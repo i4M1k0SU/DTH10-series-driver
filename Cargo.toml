@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/dth10-core",
+    "crates/dth10-usb",
 ]
 
 [workspace.package]
@@ -12,6 +13,7 @@ repository = ""
 
 [workspace.dependencies]
 dth10-core = { path = "crates/dth10-core" }
+dth10-usb = { path = "crates/dth10-usb" }
 nusb = "0.2"
 log = "0.4"
 env_logger = "0.11"

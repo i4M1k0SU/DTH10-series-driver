@@ -1,0 +1,11 @@
+[package]
+name = "dth10-usb"
+description = "nusb (WinUSB / usbfs) transport for dth10-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dth10-core.workspace = true
+nusb.workspace = true
+log.workspace = true
