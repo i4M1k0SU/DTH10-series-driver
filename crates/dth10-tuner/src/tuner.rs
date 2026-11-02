@@ -400,6 +400,33 @@ struct Satellite {
     lnb_volt: u32,
     /// `Lj101Kit::init` has run (at open; on first use when that failed).
     initialised: bool,
+    /// The command path of the satellite kit's I2C and GPIO.
+    i2c_path: u8,
+}
+
+/// The device's report that the antenna supply may be over-current: event
+/// 0x0000/0x1011 for the satellite filter with bit 0 of its fifth payload byte set.
+fn lnb_overcurrent_report(ev: &dth10_core::events::Event) -> bool {
+    (ev.class, ev.code) == dth10_core::events::code::LNB_CHECK
+        && ev.targets & 0b10 != 0
+        && ev.payload.get(4).is_some_and(|b| b & 1 != 0)
+}
+
+/// After an over-current report: 100 ms later, the supply's state bit in the
+/// GPIO status block; not good means switch the supply off (both its bits).
+fn check_lnb_supply(dev: &Device<UsbTransport>, cut: &AtomicBool) {
+    std::thread::sleep(Duration::from_millis(100));
+    match dev.gpio_read() {
+        Ok(st) if st[12] & 1 == 0 => match dev.gpio_write(0x2020, 0) {
+            Ok(()) => {
+                cut.store(true, Ordering::Relaxed);
+                log::warn!("antenna (LNB) supply over-current: switched off; the next BS/CS tune switches it on again");
+            }
+            Err(e) => log::warn!("antenna (LNB) supply over-current, but switching it off failed: {e}"),
+        },
+        Ok(_) => log::info!("antenna (LNB) supply over-current report, but the supply is good"),
+        Err(e) => log::warn!("antenna (LNB) supply over-current report, GPIO status: {e}"),
+    }
 }
 
 /// An opened device: terrestrial kit on tuner #0, optional satellite kit.
@@ -425,6 +452,10 @@ pub struct Tuner {
     /// Application credentials for CEPM, loaded from `TunerConfig::app_keys`
     /// on first use (or given with [`Tuner::with_app_keys`]).
     keys: Option<Arc<AppKeys>>,
+    /// Set by the event thread when it switched the antenna supply off after
+    /// an over-current report; the next satellite tune switches it on again
+    /// (with its own health check).
+    lnb_cut: Arc<AtomicBool>,
 }
 
 impl Tuner {
@@ -493,6 +524,7 @@ impl Tuner {
                                 endpoint,
                                 lnb_volt: 0,
                                 initialised: false,
+                                i2c_path,
                             })
                         }
                         Err(e) => {
@@ -534,13 +566,23 @@ impl Tuner {
             terrestrial.dev().power_down(&info0.desc)?;
         }
 
-        if (cfg.log_events || std::env::var_os("DTH10_EVENTS").is_some())
+        let log_events = cfg.log_events || std::env::var_os("DTH10_EVENTS").is_some();
+        // The antenna supply of the model whose GPIO switches it ("h70"): the
+        // device reports a possible over-current on the interrupt endpoint, and
+        // the vendor driver then reads the supply's state 100 ms later and
+        // switches it off when it is not good. Watched here the same way.
+        let lnb_cut = Arc::new(AtomicBool::new(false));
+        let lnb_watch = satellite
+            .as_ref()
+            .filter(|s| s.kit.desc.model_is("h70"))
+            .map(|s| (Device::new(transport.clone()).with_tuner_index(s.i2c_path), lnb_cut.clone()));
+        if (log_events || lnb_watch.is_some())
             && let Some(addr) = pipes.interrupt_in
         {
             // Log the interrupt-endpoint events (card events 0xCBDA/0xCACD and
-            // the like) while running. A storm of them (the device sends one
-            // every 0.5 s when its card engine is in trouble, docs/40) is
-            // summarised once a minute instead of flooding the log.
+            // the like) while running, when asked to. A storm of them (the
+            // device sends one every 0.5 s when its card engine is in trouble,
+            // docs/40) is summarised once a minute instead of flooding the log.
             match transport.interrupt_in(addr) {
                 Ok(ep) => {
                     let mut rd = dth10_usb::EventReader::new(ep);
@@ -552,6 +594,14 @@ impl Tuner {
                             loop {
                                 match rd.next(Duration::from_millis(1000)) {
                                     Ok(Some(ev)) => {
+                                        if let Some((dev, cut)) = lnb_watch.as_ref()
+                                            && lnb_overcurrent_report(&ev)
+                                        {
+                                            check_lnb_supply(dev, cut);
+                                        }
+                                        if !log_events {
+                                            continue;
+                                        }
                                         in_window += 1;
                                         if in_window <= 5 {
                                             log::info!(
@@ -603,6 +653,7 @@ impl Tuner {
             last: None,
             cepm: Arc::new(Mutex::new(saved)),
             keys: None,
+            lnb_cut,
         })
     }
 
@@ -1037,7 +1088,12 @@ impl Tuner {
                 }
                 let lnb_volt = if self.cfg.lnb_power { self.cfg.lnb_voltage } else { 0 };
                 let sat_wait = Duration::from_millis(self.cfg.sat_lock_wait_ms);
+                let lnb_was_cut = self.lnb_cut.swap(false, Ordering::Relaxed);
                 let sat = self.satellite.as_mut().ok_or(Error::Unsupported("no ISDB-S tuner on this device".into()))?;
+                if lnb_was_cut {
+                    // switched off after an over-current report: on again below
+                    sat.lnb_volt = 0;
+                }
                 let ep = sat.endpoint;
                 if !sat.initialised {
                     let t = Instant::now();
@@ -1353,6 +1409,19 @@ mod tests {
         // Nothing learned: nothing selected (push_program_lists warns about that).
         assert_eq!(select_programs(&[], DeviceProgram::Id(333)), (vec![], None));
         assert_eq!(select_programs(&[], DeviceProgram::First), (vec![], None));
+    }
+
+    #[test]
+    fn lnb_overcurrent_reports() {
+        use dth10_core::events::Event;
+        let ev = |class, code, targets, payload: &[u8]| Event { targets, class, code, payload: payload.to_vec() };
+        assert!(lnb_overcurrent_report(&ev(0, 0x1011, 0b10, &[0, 0, 0, 0, 1])));
+        assert!(lnb_overcurrent_report(&ev(0, 0x1011, 0b11, &[0, 0, 0, 0, 0x81])));
+        // for the terrestrial filter only, bit 0 clear, too short, or another event
+        assert!(!lnb_overcurrent_report(&ev(0, 0x1011, 0b01, &[0, 0, 0, 0, 1])));
+        assert!(!lnb_overcurrent_report(&ev(0, 0x1011, 0b10, &[0, 0, 0, 0, 2])));
+        assert!(!lnb_overcurrent_report(&ev(0, 0x1011, 0b10, &[0, 0, 0, 0])));
+        assert!(!lnb_overcurrent_report(&ev(0xCBDA, 0xCACD, 0b10, &[0, 0, 0, 0, 1])));
     }
 
     #[test]
