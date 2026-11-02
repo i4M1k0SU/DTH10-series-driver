@@ -1,0 +1,15 @@
+[package]
+name = "dth10-diag"
+description = "Hardware diagnostic tool for the BUFFALO DTH10 series of USB TV tuners (developer use: vendor commands, I2C, kit probes, CEPM handshake; recording is the dth10 command)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dth10-core.workspace = true
+dth10-usb.workspace = true
+# Channel-name parsing (`Channel::parse`) and number parsing shared with `dth10`.
+dth10-tuner.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
