@@ -4,6 +4,7 @@ members = [
     "crates/dth10-core",
     "crates/dth10-usb",
     "crates/dth10-tuner",
+    "crates/dth10-cli",
 ]
 
 [workspace.package]
