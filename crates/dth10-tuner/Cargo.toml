@@ -1,0 +1,12 @@
+[package]
+name = "dth10-tuner"
+description = "Tuner session logic shared by the BonDriver and the dth10 command: channel tables, device-mode PID learning, CEPM decryption, TS reader thread"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dth10-core.workspace = true
+dth10-usb.workspace = true
+log.workspace = true
+socket2 = "0.6"

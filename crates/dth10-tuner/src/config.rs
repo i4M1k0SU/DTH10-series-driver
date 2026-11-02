@@ -1,0 +1,170 @@
+//! Settings of a [`crate::Tuner`]. The BonDriver fills them from its ini, the
+//! `dth10` command from its options; the keys named in the comments are the
+//! ini's (docs/30).
+
+use std::path::PathBuf;
+
+use dth10_usb::RecipientMode;
+
+/// How the TS is requested from the bridge (`[Stream] Mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamModeCfg {
+    /// `raw`: full transport stream as received (PSI clear, ES MULTI2-scrambled
+    /// as broadcast). The host descrambles with its own B-CAS reader.
+    Raw,
+    /// `device`: the bridge's own mode (what the original driver used): the
+    /// selected program's PIDs are pushed to the device, which descrambles
+    /// with the built-in B-CAS card and wraps the output in the link
+    /// encryption of docs/22, undone here when `device_decrypt` is set.
+    Device,
+}
+
+/// Which program's PID list is pushed to the device in `device` mode
+/// (`[Stream] Program`). The bridge keeps one list at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceProgram {
+    /// `first`: the first program of the PAT (lowest program number).
+    First,
+    /// `all`: push every program's list in turn. The device descrambles one
+    /// program per tuning and reads only the program number of the list
+    /// (docs/20 §6), so this ends up with the last program of the PAT.
+    All,
+    /// A program (service) number.
+    Id(u16),
+}
+
+impl DeviceProgram {
+    /// `first` / `all` / a decimal or `0x` hex service id.
+    pub fn parse(s: &str) -> Option<DeviceProgram> {
+        let s = s.trim();
+        match s.to_ascii_lowercase().as_str() {
+            "" | "first" | "auto" => Some(DeviceProgram::First),
+            "all" => Some(DeviceProgram::All),
+            _ => parse_num(s).map(|n| DeviceProgram::Id(n as u16)),
+        }
+    }
+}
+
+/// Platform default of [`TunerConfig::read_depth`].
+pub fn default_read_depth() -> usize {
+    if cfg!(windows) { 4 } else { 16 }
+}
+
+/// Decimal or `0x`-prefixed hexadecimal.
+pub fn parse_num(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(h, 16).ok()
+    } else {
+        s.parse().ok()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TunerConfig {
+    /// bmRequestType recipient of the vendor requests (`dth10 --recipient`; the
+    /// DLL always uses the platform default, device on Windows, docs/30).
+    pub recipient: RecipientMode,
+    /// `[Device] Serial`: pick the device whose USB serial number matches (empty = first).
+    pub serial: String,
+    /// `[Stream] Mode = raw | device`
+    pub stream_mode: StreamModeCfg,
+    /// `[Stream] Program = first | all | <service id>` (device mode only).
+    pub device_program: DeviceProgram,
+    /// In device mode, run the CEPM handshake and decrypt the link encryption
+    /// (docs/22) so the host receives clear TS. Always on in the DLL and the
+    /// daemon; `dth10 tune --no-decrypt` turns it off for analysis.
+    pub device_decrypt: bool,
+    /// File keeping the handshake results between runs (`DTH10_<serial>.cepm`
+    /// in the state directory, see `dth10 --state-dir`);
+    /// the device keeps a handshake until it loses the session (docs/22 §6c).
+    pub cepm_state: Option<PathBuf>,
+    /// `[Stream] AppKeys`: the vendor application's `CoBDACom.dll` (supplied by
+    /// the user), from which the application certificate, private key and
+    /// content IV of the link encryption are read at run time (docs/22 §6).
+    /// Required for `device_decrypt`.
+    pub app_keys: Option<PathBuf>,
+    /// Drop the bridge's TEI+null filler packets (the DLL and the daemon always
+    /// do; `dth10 tune --keep-filler` keeps them for analysis).
+    pub drop_filler: bool,
+    /// `[Stream] ReadDepth`: bulk IN transfers kept in flight (39936 bytes
+    /// each, 19 ms of stream). The host controller fills them without the
+    /// reader thread, so the depth is the stall the stream survives: 4 (the
+    /// original driver) on Windows, 16 elsewhere, where hubs and older
+    /// kernels have shown completion gaps of over 100 ms.
+    pub read_depth: usize,
+    /// One stream at a time (TVTest, `dth10 tune`): tuning a channel of one
+    /// system stops the other system's stream and puts its kit to standby.
+    /// `false` (`dth10 serve`): the terrestrial and satellite streams run
+    /// independently, each in the device's own mode (docs/40).
+    pub exclusive: bool,
+    /// Log the device's interrupt events (card events) while open
+    /// (`dth10 serve`; `DTH10_EVENTS=1` does the same for every front end).
+    pub log_events: bool,
+    /// `[ISDB-T] LockWaitMs`
+    pub ter_lock_wait_ms: u64,
+    /// ISDB-T channel bandwidth in Hz: 6 MHz on the Japanese UHF raster (fixed in the DLL).
+    pub ter_bandwidth_hz: u32,
+    /// Command path (bRequest bit7) for the satellite demodulator/tuner I2C and
+    /// GPIO. `None` = as the vendor driver: the tuner #0 path when TLV #1 flags
+    /// bit2 is set (the DT-H70/U2, whose tuner #1 path reaches no I2C device,
+    /// docs/40), else the proxy path #1 (docs/20 §5.2). `dth10 tune
+    /// --sat-i2c-path` overrides it for diagnostics.
+    pub sat_i2c_path: Option<u8>,
+    /// Command path (bRequest bit7) of the satellite stream-enable command:
+    /// filter #1, which the satellite CEPM handshake is bound to (fixed in the DLL).
+    pub sat_stream_path: u8,
+    /// Bulk IN endpoint of the satellite TS (0 = auto: the second bulk IN, 0x82; fixed in the DLL).
+    pub sat_endpoint: u8,
+    /// `[ISDB-S] LnbVoltage = 0 | 110 | 150`: the voltage asked for when the
+    /// supply is switched on.
+    pub lnb_voltage: u32,
+    /// `[ISDB-S] LnbPower`: switch the antenna (LNB) supply on for BS/CS
+    /// channels. Off by default: the DT-H70/U2 has no antenna power supply
+    /// (the vendor driver's GPIO sequence for model "h70" exists and is sent
+    /// when this is on, but powers nothing on this product); the setting is
+    /// for family models that have one.
+    pub lnb_power: bool,
+    /// `[ISDB-S] LockWaitMs`
+    pub sat_lock_wait_ms: u64,
+}
+
+impl Default for TunerConfig {
+    fn default() -> Self {
+        TunerConfig {
+            recipient: RecipientMode::platform_default(),
+            serial: String::new(),
+            stream_mode: StreamModeCfg::Raw,
+            device_program: DeviceProgram::First,
+            device_decrypt: true,
+            cepm_state: None,
+            app_keys: None,
+            drop_filler: true,
+            read_depth: default_read_depth(),
+            exclusive: true,
+            log_events: false,
+            ter_lock_wait_ms: 1200,
+            ter_bandwidth_hz: 6_000_000,
+            sat_i2c_path: None,
+            sat_stream_path: 1,
+            sat_endpoint: 0,
+            lnb_voltage: 150,
+            lnb_power: false,
+            sat_lock_wait_ms: 1500,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn program_parses() {
+        assert_eq!(DeviceProgram::parse("first"), Some(DeviceProgram::First));
+        assert_eq!(DeviceProgram::parse("ALL"), Some(DeviceProgram::All));
+        assert_eq!(DeviceProgram::parse("0x400"), Some(DeviceProgram::Id(0x400)));
+        assert_eq!(DeviceProgram::parse("1024"), Some(DeviceProgram::Id(1024)));
+        assert_eq!(DeviceProgram::parse("x"), None);
+    }
+}
