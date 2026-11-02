@@ -1,0 +1,4 @@
+# Keep LF in every checkout, Windows included (core.autocrlf would turn the
+# files into CRLF there, which rustfmt's newline_style = "Unix" and
+# .editorconfig's end_of_line = lf reject).
+* text=auto eol=lf

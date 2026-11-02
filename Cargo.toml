@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/dth10-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = ""
+
+[workspace.dependencies]
+dth10-core = { path = "crates/dth10-core" }
+nusb = "0.2"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+
+# Whole-program optimisation for the shipped binaries (the daemon's TS
+# decryption and the DLL's stream copy are the hot paths); the build takes
+# longer, the tests use the dev profile as before.
+[profile.release]
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,16 @@
+[package]
+name = "dth10-core"
+description = "Protocol and chip drivers for the Cobalt EVA01 bridge of the BUFFALO DTH10 series of USB TV tuners, I/O-agnostic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true
+sha1 = "0.11"
+aes = "0.9"
+cmac = "0.8"
+num-bigint = "0.5"
+num-traits = "0.2"
+num-integer = "0.1"
+rand = "0.10"
