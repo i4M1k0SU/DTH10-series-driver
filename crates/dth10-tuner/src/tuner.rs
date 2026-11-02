@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use dth10_core::LockExt;
 use dth10_core::cepm::{self, AppKeys, Decryptor, Handshake};
 use dth10_core::isdbs::Lj101Kit;
-use dth10_core::kit::Tc90517Kit;
 use dth10_core::tc90517::{SignalStatus, TuneRequest, field, lock};
+use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::{DeviceInformation, TunerDesc};
 use dth10_core::{Device, Error, Result, StreamMode};
 use dth10_usb::{StreamReader, UsbTransport};
@@ -406,7 +406,7 @@ struct Satellite {
 pub struct Tuner {
     cfg: TunerConfig,
     transport: UsbTransport,
-    terrestrial: Tc90517Kit<UsbTransport>,
+    terrestrial: TerrestrialKit<UsbTransport>,
     info0: DeviceInformation,
     satellite: Option<Satellite>,
     /// The running streams by system: 0 = terrestrial (tuner #0), 1 = satellite.
@@ -510,9 +510,9 @@ impl Tuner {
             None
         };
 
-        let mut terrestrial = Tc90517Kit::new(dev0, info0.desc.clone())?;
+        let mut terrestrial = TerrestrialKit::new(dev0, info0.desc.clone())?;
         terrestrial.init()?;
-        log::info!("terrestrial kit init done {:?}", t_start.elapsed());
+        log::info!("terrestrial kit ({}) init done {:?}", terrestrial.kind(), t_start.elapsed());
         // The original driver initialises both kits at start-up, in order, and
         // only then sends the device start (USB trace of the original driver,
         // docs/40). A failure here is retried on the kit's first use.
@@ -529,9 +529,9 @@ impl Tuner {
         }
         // As in the original driver, the device start (wValue 0 / wIndex 0x10) comes
         // after kit Init, followed by the kit's power-down when desc flags bit5 is set.
-        terrestrial.dev.start()?;
+        terrestrial.dev().start()?;
         if info0.desc.skip_init_config() {
-            terrestrial.dev.power_down(&info0.desc)?;
+            terrestrial.dev().power_down(&info0.desc)?;
         }
 
         if (cfg.log_events || std::env::var_os("DTH10_EVENTS").is_some())
@@ -764,7 +764,7 @@ impl Tuner {
         if let Some(mut s) = self.streams[i].take() {
             debug_assert_eq!(s.system, system);
             let r = match system {
-                System::IsdbT => self.terrestrial.dev.stream_disable(),
+                System::IsdbT => self.terrestrial.dev().stream_disable(),
                 System::IsdbS => self.satellite.as_ref().map_or(Ok(()), |sat| sat.stream_dev.stream_disable()),
             };
             if let Err(e) = r {
@@ -1028,7 +1028,7 @@ impl Tuner {
                     let decrypt = device_mode && self.ensure_cepm(System::IsdbT);
                     // KS pin order (docs/21): bulk reads start before the stream-enable command.
                     self.start_stream(ep, System::IsdbT, decrypt, restart)?;
-                    self.terrestrial.dev.stream_enable_mode(&desc, mode)?;
+                    self.terrestrial.dev().stream_enable_mode(&desc, mode)?;
                 }
             }
             System::IsdbS => {
