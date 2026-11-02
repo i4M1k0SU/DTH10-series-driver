@@ -6,6 +6,7 @@ members = [
     "crates/dth10-diag",
     "crates/dth10-tuner",
     "crates/dth10-cli",
+    "crates/dth10-bondriver",
 ]
 
 [workspace.package]
