@@ -1,23 +1,34 @@
-# CI for this Cargo workspace (the repository root): format, lint and test on
-# Windows (every crate, the BonDriver DLL included) and Linux (everything but
-# the DLL), then the shipped binaries as artifacts: `dth10` and `dth10-diag`
-# for Windows x64, macOS arm64 and static Linux musl (x86_64, aarch64, armv7),
-# and the Windows BonDriver DLL with its `dth10.exe` helper. macOS is only
-# built (it links Apple's frameworks, so it needs a Mac runner); the tests run
-# on Windows and Linux.
-# Every action is pinned to a commit SHA (the version is in the comment next to
-# it); bump by changing both.
+# Build/test every push and PR; publish matching version tags after all checks pass.
+# Action versions are pinned to commit SHAs.
 name: CI
 
 on:
   push:
+    branches: ['**']
+    tags: ['v[0-9]*', '[0-9]*.[0-9]*.[0-9]*']
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Validate version and release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: python3 .github/scripts/release.py version
+      - name: Test release packaging
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+
   test:
+    needs: metadata
     name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -36,35 +47,45 @@ jobs:
           rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
-      - run: cargo clippy ${{ matrix.packages }} --all-targets -- -D warnings
-      - run: cargo test ${{ matrix.packages }}
-      # The MSVC runtime's own dynamic_cast on the DLL's hand-made RTTI
-      # (tests/rtti_check.cpp, built with the runner's cl.exe).
+      - run: cargo clippy ${{ matrix.packages }} --all-targets --locked -- -D warnings
+      - run: cargo test ${{ matrix.packages }} --locked
       - if: runner.os == 'Windows'
-        run: cargo test -p dth10-bondriver --features rtti-check
+        run: cargo test -p dth10-bondriver --features rtti-check --locked
 
-  # `dth10` and `dth10-diag` per target. The Linux ones are static musl
-  # binaries linked by Rust's own `rust-lld` (see .cargo/config.toml), so the
-  # Ubuntu runner needs no cross C toolchain.
   binaries:
-    name: dth10 / dth10-diag (${{ matrix.target }})
+    needs: metadata
+    name: binaries (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            exe: .exe
+            packages: --workspace
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+            packages: --workspace
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            packages: --workspace
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            packages: -p dth10-cli -p dth10-diag
+          - target: i686-unknown-linux-musl
+            os: ubuntu-latest
+            packages: -p dth10-cli -p dth10-diag
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+            packages: -p dth10-cli -p dth10-diag
           - target: armv7-unknown-linux-musleabihf
             os: ubuntu-latest
-          # Built on a Mac runner: nusb links CoreFoundation and IOKit, which
-          # need Apple's SDK.
+            packages: -p dth10-cli -p dth10-diag
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            packages: -p dth10-cli -p dth10-diag
           - target: aarch64-apple-darwin
             os: macos-latest
+            packages: -p dth10-cli -p dth10-diag
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -75,33 +96,43 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
-      - run: cargo build --release -p dth10-cli -p dth10-diag --target ${{ matrix.target }}
+      - run: cargo build --release ${{ matrix.packages }} --target ${{ matrix.target }} --locked
+      - name: Package binaries, configuration and documentation
+        run: python3 .github/scripts/release.py package --target ${{ matrix.target }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: dth10-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/dth10${{ matrix.exe }}
-            target/${{ matrix.target }}/release/dth10-diag${{ matrix.exe }}
+          name: release-${{ matrix.target }}
+          path: dist/*
           if-no-files-found: error
 
-  windows-binaries:
-    name: BonDriver DLL and dth10.exe (x64)
-    runs-on: windows-latest
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [metadata, test, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RUN_ID: ${{ github.run_id }}
+      PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - name: Rust toolchain
+      - name: Download distribution archives
+        run: gh run download "$RUN_ID" --pattern 'release-*' --dir artifacts
+      - name: Verify completeness and generate SHA-256 checksums
+        run: python3 .github/scripts/release.py collect
+      - name: Publish GitHub Release
+        shell: bash
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: release
-      - run: cargo build --release -p dth10-cli -p dth10-bondriver
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: BonDriver_DTH10-windows-x64
-          path: |
-            target/release/BonDriver_DTH10.dll
-            target/release/dth10.exe
-            crates/dth10-bondriver/BonDriver_DTH10.ini
-          if-no-files-found: error
+          flags=()
+          if [[ "$PRERELEASE" == true ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes \
+            --title "$RELEASE_TAG" "${flags[@]}"

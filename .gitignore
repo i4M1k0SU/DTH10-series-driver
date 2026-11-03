@@ -229,3 +229,6 @@ CoBDACom.dll
 *.cepm
 *.log
 dth10.sock
+
+# Python release tooling
+__pycache__/
