@@ -19,3 +19,7 @@ indent_size = 4
 # YAML
 [*.{yml,yaml}]
 indent_size = 2
+
+# Markdown
+[*.md]
+indent_size = 4
