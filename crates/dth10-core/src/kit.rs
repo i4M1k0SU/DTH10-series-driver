@@ -28,11 +28,9 @@ impl<T: UsbControl> Tc90517Kit<T> {
         } else if desc.kit_name.starts_with("SMT_LJ101") && desc.hw_version == 0x102 {
             TerVariant::SmtLj101
         } else {
-            // Other kits of the series (other models) are not implemented yet:
-            // their register tables would come from the vendor driver's other
-            // kit objects, and no such unit was available to check them.
+            // The other kits have their own types ([`crate::terrestrial`]).
             return Err(Error::Unsupported(format!(
-                "terrestrial tuner kit {} hw 0x{:x} is not implemented yet (implemented: TC90517_MxL, SMT_LJ101 hw 0x102)",
+                "terrestrial tuner kit {} hw 0x{:x} is not a TC90517 kit",
                 desc.kit_name, desc.hw_version
             )));
         };

@@ -10,19 +10,24 @@
 //! * [`tlv`]       – device information blob (wValue 0 / wIndex 0xC0DE) parser
 //! * [`device`]    – [`device::Device`]: GPIO, I2C (raw / register / batch), stream control, PID filter
 //! * [`tc90517`] + [`mxl13xrf`] + [`kit`] – ISDB-T kit `TC90517_MxL13xRF` (tuner/filter #0)
+//! * [`terrestrial`] – the kit of tuner #0 by kit name: [`kit`], [`pn2031`], [`bq200x`], [`lgdt3305`]
 //! * [`isdbs`]     – ISDB-S kit `SMT_LJ101` hw 0x402 (tuner/filter #1): TC90517 satellite side + PLL tuner
 //! * [`events`]    – interrupt-endpoint event notifications
 //! * [`cepm`]      – link encryption of the original stream mode (AES-CTR + ECDH handshake, docs/22)
 
+pub mod bq200x;
 pub mod cepm;
 pub mod device;
 pub mod error;
 pub mod events;
 pub mod isdbs;
 pub mod kit;
+pub mod lgdt3305;
 pub mod mxl13xrf;
+pub mod pn2031;
 pub mod protocol;
 pub mod tc90517;
+pub mod terrestrial;
 pub mod tlv;
 pub mod tuner_bus;
 

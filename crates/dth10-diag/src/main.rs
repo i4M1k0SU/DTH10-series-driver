@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dth10_core::cepm;
 use dth10_core::isdbs::Lj101Kit;
-use dth10_core::kit::Tc90517Kit;
 use dth10_core::tc90517::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
+use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::{Device, StreamMode, TunerDesc};
 use dth10_tuner::channels::uhf_center_hz;
 use dth10_tuner::config::parse_num;
@@ -625,10 +625,10 @@ fn tune(o: &Opener, a: &TuneArgs) -> Res {
     let dev = Device::new(t);
     let di = dev.read_device_information()?;
     print_desc(0, &di.desc);
-    let mut kit = Tc90517Kit::new(dev, di.desc)?;
+    let mut kit = TerrestrialKit::new(dev, di.desc)?;
     kit.init()?;
     if !a.no_start {
-        kit.dev.start()?; // wValue 0 / wIndex 0x10, after the kit Init (the original driver's order)
+        kit.dev().start()?; // wValue 0 / wIndex 0x10, after the kit Init (the original driver's order)
     }
     kit.open()?;
     let r = ter_probe(&mut kit, ep, a);
@@ -638,7 +638,7 @@ fn tune(o: &Opener, a: &TuneArgs) -> Res {
     r
 }
 
-fn ter_probe(kit: &mut Tc90517Kit<UsbTransport>, ep: u8, a: &TuneArgs) -> Res {
+fn ter_probe(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs) -> Res {
     let ch = &a.channel;
     kit.tune(&TuneRequest::isdb_t(ch.frequency_hz as u64, 6_000_000))?;
     let tuned = Instant::now();
@@ -661,7 +661,7 @@ fn ter_probe(kit: &mut Tc90517Kit<UsbTransport>, ep: u8, a: &TuneArgs) -> Res {
 }
 
 /// `tune --file`: enable stream #0, read it for `--seconds` and write it to `file`.
-fn capture(kit: &mut Tc90517Kit<UsbTransport>, ep: u8, a: &TuneArgs, file: &Path, tuned: Instant) -> Res {
+fn capture(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs, file: &Path, tuned: Instant) -> Res {
     let byte0 = match &a.enable_bytes {
         Some(b) => b[0],
         None => StreamMode::RawFullTs as u8,
@@ -680,7 +680,7 @@ fn capture(kit: &mut Tc90517Kit<UsbTransport>, ep: u8, a: &TuneArgs, file: &Path
         std::thread::sleep(rest);
     }
     let mut reader = StreamReader::new(
-        kit.dev.transport().bulk_in(ep)?,
+        kit.dev().transport().bulk_in(ep)?,
         StreamReader::DEFAULT_TRANSFER_LEN,
         StreamReader::DEFAULT_DEPTH,
     )?;
@@ -688,14 +688,17 @@ fn capture(kit: &mut Tc90517Kit<UsbTransport>, ep: u8, a: &TuneArgs, file: &Path
     reader.start(); // bulk reads first, then the enable command (docs/21)
     match &a.enable_bytes {
         Some(b) => {
-            kit.dev.stream_enable_payload(b)?;
+            kit.dev().stream_enable_payload(b)?;
             println!("stream enable with custom payload {b:02x?}");
         }
-        None => kit.dev.stream_enable_mode(&kit.desc, StreamMode::RawFullTs)?,
+        None => {
+            let desc = kit.desc().clone();
+            kit.dev().stream_enable_mode(&desc, StreamMode::RawFullTs)?
+        }
     }
     let r = capture_loop(&mut reader, &mut f, a.seconds, a.blocks);
     reader.stop();
-    let disabled = kit.dev.stream_disable();
+    let disabled = kit.dev().stream_disable();
     let (total, transfers) = r?;
     disabled?;
     println!("\n{transfers} transfers, captured {total} bytes to {}", file.display());
@@ -807,7 +810,7 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
     print_desc(1, &info1.desc);
     // The original driver and `dth10` initialise both kits, then send the
     // device start; the terrestrial kit stays in standby here.
-    match Tc90517Kit::new(dev0, info0.desc.clone()) {
+    match TerrestrialKit::new(dev0, info0.desc.clone()) {
         Ok(mut ter) => {
             if let Err(e) = ter.init() {
                 eprintln!("warning: terrestrial kit Init: {e}");
@@ -887,9 +890,9 @@ fn scan(o: &Opener, first: u32, last: u32, wait_ms: u64) -> Res {
     let dev = Device::new(o.open()?);
     let di = dev.read_device_information()?;
     print_desc(0, &di.desc);
-    let mut kit = Tc90517Kit::new(dev, di.desc)?;
+    let mut kit = TerrestrialKit::new(dev, di.desc)?;
     kit.init()?;
-    kit.dev.start()?;
+    kit.dev().start()?;
     kit.open()?;
     for ch in first..=last {
         let freq = uhf_center_hz(ch).ok_or("UHF channel out of range")?; // 13..62, checked by the option parser

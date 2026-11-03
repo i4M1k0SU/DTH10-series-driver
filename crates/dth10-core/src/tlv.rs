@@ -117,18 +117,19 @@ pub struct TunerDesc {
     pub kit_name: String,
     /// 'Q' 0x51 — tuner/device id.
     pub id: u32,
-    /// 'R' 0x52 — flags: bit3 = tuner I2C directly on the bus,
-    /// bit5 = skip power-up/config in Init, bit7 = also tested by the original driver (purpose unknown).
+    /// 'R' 0x52 — flags: bit2 = the satellite kit's I2C over the tuner #0 path, bit3 = tuner I2C directly on
+    /// the bus, bit5 = skip power-up/config in Init, bit7 = diversity-capable (BQ200X kits: two demodulators
+    /// and tuners on one channel, built only when diversity is requested).
     pub flags: u32,
     /// '`' 0x60 — hardware version: 0x101 / 0x102 / 0x104 / 0x402.
     pub hw_version: u32,
     /// 'V' 0x56 — demodulator I2C 7-bit address.
     pub demod_i2c_addr: u8,
-    /// 'F' 0x46 — unknown byte.
+    /// 'F' 0x46 — I2C address of the second (slave) demodulator in BQ200X diversity.
     pub byte_46: u8,
     /// 'W' 0x57 — tuner I2C 7-bit address.
     pub tuner_i2c_addr: u8,
-    /// 'G' 0x47 — unknown byte.
+    /// 'G' 0x47 — I2C address of the second tuner in BQ200X diversity.
     pub byte_47: u8,
     /// '^' 0x5E — tuner crystal frequency in Hz.
     pub tuner_xtal_hz: u32,
@@ -138,7 +139,7 @@ pub struct TunerDesc {
     pub tuner_opts: u32,
     /// ']' 0x5D — demodulator crystal frequency in Hz.
     pub demod_xtal_hz: u32,
-    /// 'b' 0x62 — unknown.
+    /// 'b' 0x62 — demodulator IF override (BQ200X, LGDT3305; used when present).
     pub val_62: u32,
     /// 0x40 — unknown byte.
     pub byte_40: u8,
@@ -156,7 +157,7 @@ pub struct TunerDesc {
     pub gpio_c_close: u32,
     /// 'd' 0x64 — GPIO value written with mask C at Open.
     pub gpio_c_open: u32,
-    /// 'g' 0x67 — unknown.
+    /// 'g' 0x67 — GPIO value written with mask C at open in BQ200X diversity.
     pub val_67: u32,
     /// 0x1D — model string, e.g. `h70`, `h55`, `f200` (32 bytes).
     pub model: String,
