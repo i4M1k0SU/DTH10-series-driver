@@ -10,6 +10,10 @@
 //!   is not available (a chroot that only has `/dev/bus/usb` bind-mounted), the
 //!   device nodes are scanned directly ([`UsbTransport::list_all`]) or a node is
 //!   opened by path ([`UsbTransport::open_path`]).
+//! * macOS: IOKit (nusb links CoreFoundation and IOKit). No driver binding is
+//!   needed for this vendor-specific device; the interface recipient is used,
+//!   as on Linux. Devices are found through nusb's own enumeration (the
+//!   `/dev/bus/usb` scan and `UsbTransport::open_path` are Linux-only).
 
 use core::time::Duration;
 
