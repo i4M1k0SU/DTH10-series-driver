@@ -13,3 +13,7 @@ dth10-tuner.workspace = true
 log.workspace = true
 env_logger.workspace = true
 clap.workspace = true
+
+[build-dependencies]
+jiff.workspace = true
+winresource.workspace = true

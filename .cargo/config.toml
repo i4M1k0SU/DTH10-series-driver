@@ -1,7 +1,7 @@
 # Statically linked Linux builds of the `dth10` / `dth10-diag` commands, made on
 # any host with Rust's own linker (`rust-lld`) and the musl objects shipped with
 # the target's rust-std: no cross C toolchain is needed (the commands have no C
-# code). CI builds all three targets on Ubuntu the same way.
+# code). CI builds all four Linux targets on Ubuntu the same way.
 #
 #   rustup target add armv7-unknown-linux-musleabihf      # 32-bit ARM (e.g. an Android TV box)
 #   cargo build --release -p dth10-cli -p dth10-diag --target armv7-unknown-linux-musleabihf
