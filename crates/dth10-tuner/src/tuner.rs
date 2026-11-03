@@ -412,10 +412,11 @@ fn lnb_overcurrent_report(ev: &dth10_core::events::Event) -> bool {
         && ev.payload.get(4).is_some_and(|b| b & 1 != 0)
 }
 
-/// After an over-current report: 100 ms later, the supply's state bit in the
-/// GPIO status block; not good means switch the supply off (both its bits).
+/// After an over-current report: 10 ms later (the vendor driver's delay), the
+/// supply's state bit in the GPIO status block; not good means switch the
+/// supply off (both its bits).
 fn check_lnb_supply(dev: &Device<UsbTransport>, cut: &AtomicBool) {
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(10));
     match dev.gpio_read() {
         Ok(st) if st[12] & 1 == 0 => match dev.gpio_write(0x2020, 0) {
             Ok(()) => {
@@ -569,7 +570,7 @@ impl Tuner {
         let log_events = cfg.log_events || std::env::var_os("DTH10_EVENTS").is_some();
         // The antenna supply of the model whose GPIO switches it ("h70"): the
         // device reports a possible over-current on the interrupt endpoint, and
-        // the vendor driver then reads the supply's state 100 ms later and
+        // the vendor driver then reads the supply's state 10 ms later and
         // switches it off when it is not good. Watched here the same way.
         let lnb_cut = Arc::new(AtomicBool::new(false));
         let lnb_watch = satellite
