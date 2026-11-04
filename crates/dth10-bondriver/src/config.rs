@@ -198,7 +198,8 @@ impl Config {
         t.ter_lock_wait_ms = f.u64("ISDB-T", "LockWaitMs", t.ter_lock_wait_ms);
         t.lnb_voltage = match f.u64("ISDB-S", "LnbVoltage", t.lnb_voltage as u64) {
             0 => 0,
-            v if v <= 110 => 110,
+            11 | 110 => 110,
+            15 | 150 => 150,
             _ => 150,
         };
         t.lnb_power = f.bool("ISDB-S", "LnbPower", t.lnb_power);
@@ -351,6 +352,34 @@ mod tests {
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("debug", "C:\\logs\\bon.log"));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (9, 7));
         assert_fixed(t);
+    }
+
+    #[test]
+    fn lnb_voltage_uses_default_for_invalid_values() {
+        for (index, (value, expected)) in [
+            ("0", 0),
+            ("11", 110),
+            ("15", 150),
+            ("110", 110),
+            ("150", 150),
+            ("1", 150),
+            ("50", 150),
+            ("111", 150),
+            ("151", 150),
+            ("-1", 150),
+            ("invalid", 150),
+            ("", 150),
+            ("18446744073709551616", 150),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ini = format!("[ISDB-S]\r\nLnbVoltage={value}\r\n");
+            let (c, _) = load_with(&format!("lnb-voltage-{index}"), Some(&ini));
+            assert_eq!(c.tuner.lnb_voltage, expected, "LnbVoltage={value}");
+        }
+        let (c, _) = load_with("lnb-voltage-missing", Some("[ISDB-S]\r\nLnbPower=1\r\n"));
+        assert_eq!(c.tuner.lnb_voltage, 150);
     }
 
     /// An ini of an older version that still has retired keys (with values
