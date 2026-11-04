@@ -93,7 +93,7 @@ dth10 stream --socket /run/dth10/dth10.sock -c BS15_0 --program 101 # クライ�
 
 ### ビルド
 
-Rust の stable ツールチェーンを用意し、使用するターゲットを `rustup target add <ターゲット名>` で導入する。
+ターゲットは `rust-toolchain.toml` により自動で追加される。
 
 Windows 向けには Visual Studio Build Tools の C++ ビルド環境と Windows SDK、macOS 向けには Xcode Command Line Tools が必要。Linux 向けは `.cargo/config.toml` で `rust-lld` を指定しているため、クロス C ツールチェーンは不要。
 
