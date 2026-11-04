@@ -25,7 +25,9 @@ BUFFALO DTH10 シリーズ ユーザーモード実装
 
 ## 使い方
 
-### `CoBDACom.dll` の用意
+### 共通 - `CoBDACom.dll` の用意
+
+デバイス内蔵 B-CAS リーダーの利用や BS/CS の視聴を行う場合は、 `CoBDACom.dll` を用意する必要がある。
 
 純正ソフトウェアから入手する。
 
@@ -41,17 +43,17 @@ BUFFALO DTH10 シリーズ ユーザーモード実装
 1. 以下のファイルを `TVTest.exe` と同じ階層にコピー
     - `BonDriver_DTH10.dll`
       - TVTest と同じアーキテクチャのものを使う
-      - 地デジと BS/CS を同時に視聴する場合は、コピーして `BonDriver_DTH10_T.dll`, `BonDriver_DTH10_S.dll` にリネーム
+      - 地デジと BS/CS を同時に視聴する場合は、コピーして `BonDriver_DTH10-T.dll`, `BonDriver_DTH10-S.dll` にリネーム
     - `BonDriver_DTH10.ini`
-      - 同時に視聴する場合は、DLL と同様に `BonDriver_DTH10_T.ini`, `BonDriver_DTH10_S.ini` にリネーム
+      - 同時に視聴する場合は、DLL と同様に `BonDriver_DTH10-T.ini`, `BonDriver_DTH10-S.ini` にリネーム
     - `dth10.exe`
     - `CoBDACom.dll`
-1. 必要に応じて `BonDriver_DTH10.ini` (`BonDriver_DTH10_T.ini`, `BonDriver_DTH10_S.ini`) を編集
+1. 必要に応じて `BonDriver_DTH10.ini` (`BonDriver_DTH10-T.ini`, `BonDriver_DTH10-S.ini`) を編集
     - 複数台接続する場合、 `Serial=` の指定が必要
       - `dth10 list` で確認。未指定では動作しない
-    - `BonDriver_DTH10_T.ini`
+    - `BonDriver_DTH10-T.ini`
       - `Spaces=GR`
-    - `BonDriver_DTH10_S.ini`
+    - `BonDriver_DTH10-S.ini`
       - `Spaces=BS,CS`
 1. TVTest を起動し、チャンネルスキャン、視聴
 
@@ -126,3 +128,7 @@ cargo test --workspace
 # MSVC で C++ 側をビルドし、本物の `dynamic_cast` で RTTI を検証する
 cargo test -p dth10-bondriver --features rtti-check
 ```
+
+## ライセンス
+
+[MIT LICENSE](LICENSE)
