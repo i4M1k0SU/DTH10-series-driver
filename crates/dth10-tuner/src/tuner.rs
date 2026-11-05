@@ -199,7 +199,21 @@ impl StreamRestart {
         for (prog, list) in &self.pids {
             self.dev.set_program_pids(*prog, list)?;
         }
-        self.dev.stream_enable_mode(&self.desc, self.mode)
+        self.dev.stream_enable_mode(&self.desc, self.mode)?;
+        send_program_lists(&self.dev, &self.pids);
+        Ok(())
+    }
+}
+
+/// Send the program lists again right after a stream enable. Firmware differs
+/// in when it takes the list: the DT-H70/U2 (1.0.18) keeps one sent before the
+/// enable, the DT-F100/U2 (0.8.17) clears it on the enable and then outputs
+/// only PSI + 1seg, so the list goes to the device both before and after.
+fn send_program_lists(dev: &Device<UsbTransport>, lists: &[(u32, Vec<u16>)]) {
+    for (prog, pids) in lists {
+        if let Err(e) = dev.set_program_pids(*prog, pids) {
+            log::warn!("set_program_pids 0x{prog:04x} after the stream enable: {e}");
+        }
     }
 }
 
@@ -1078,9 +1092,12 @@ impl Tuner {
                         restart = Some(StreamRestart { dev, desc: desc.clone(), mode, pids });
                     }
                     let decrypt = device_mode && self.ensure_cepm(System::IsdbT);
+                    let lists = restart.as_ref().map(|r| r.pids.clone()).unwrap_or_default();
                     // KS pin order (docs/21): bulk reads start before the stream-enable command.
                     self.start_stream(ep, System::IsdbT, decrypt, restart)?;
-                    self.terrestrial.dev().stream_enable_mode(&desc, mode)?;
+                    let dev = self.terrestrial.dev();
+                    dev.stream_enable_mode(&desc, mode)?;
+                    send_program_lists(dev, &lists);
                 }
             }
             System::IsdbS => {
@@ -1167,11 +1184,13 @@ impl Tuner {
                     }
                     let dev = Device::new(self.transport.clone()).with_tuner_index(self.cfg.sat_stream_path);
                     let pids = self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags)?;
+                    let lists = pids.clone();
                     let restart = Some(StreamRestart { dev, desc: desc.clone(), mode, pids });
                     let decrypt = true;
                     self.start_stream(ep, System::IsdbS, decrypt, restart)?;
                     let sat = self.satellite.as_mut().expect("checked above");
                     sat.stream_dev.stream_enable_mode(&desc, mode)?;
+                    send_program_lists(&sat.stream_dev, &lists);
                 }
             }
         }
