@@ -21,7 +21,7 @@ use crate::protocol::UsbControl;
 
 /// Register addresses used by the driver.
 pub mod reg {
-    /// General control 1: bits[1:0] = modulation (0 = 64QAM, 1 = 256QAM, 3 = 8VSB).
+    /// General control 1: `bits[1:0]` = modulation (0 = 64QAM, 1 = 256QAM, 3 = 8VSB).
     pub const GEN_CTRL_1: u16 = 0x0000;
     /// General control 2: bit5 = I2C repeater to the tuner (0 = open, 1 = closed).
     pub const GEN_CTRL_2: u16 = 0x0001;
@@ -31,7 +31,7 @@ pub mod reg {
     pub const GEN_STATUS: u16 = 0x0003;
     /// IF control: bit6 set for an IF of 44 MHz or more, cleared below.
     pub const IF_CTRL: u16 = 0x0007;
-    /// bits[7:6] cleared for a low IF or an IF of 44.0..44.2 MHz, set otherwise.
+    /// `bits[7:6]` cleared for a low IF or an IF of 44.0..44.2 MHz, set otherwise.
     pub const IF_RANGE: u16 = 0x000D;
     /// Digital AGC reference, high / low byte.
     pub const DGTL_AGC_REF_1: u16 = 0x0012;
@@ -92,7 +92,7 @@ pub mod lock {
     pub const LOCKED: u32 = 0x010;
 }
 
-/// Modulation, as the value of `GEN_CTRL_1` bits[1:0].
+/// Modulation, as the value of `GEN_CTRL_1` `bits[1:0]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Modulation {
     Qam64 = 0,
@@ -111,7 +111,7 @@ impl Modulation {
         }
     }
 
-    /// From `GEN_CTRL_1` bits[1:0]; the value 2 is not a mode the driver knows.
+    /// From `GEN_CTRL_1` `bits[1:0]`; the value 2 is not a mode the driver knows.
     pub fn from_reg(v: u8) -> Option<Self> {
         match v & 3 {
             0 => Some(Modulation::Qam64),

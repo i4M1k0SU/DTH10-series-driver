@@ -54,7 +54,7 @@ pub struct SignalStatus {
     pub tsid_count: u8,
     /// ISDB-S: TS-IDs of the transponder, packed.
     pub tsids: [u16; 8],
-    /// ISDB-S: raw registers 0xC8..0xCF (TMCC modulation modes / slot counts / TS-ID[0]).
+    /// ISDB-S: raw registers 0xC8..0xCF (TMCC modulation modes / slot counts / `TS-ID[0]`).
     pub tmcc_raw: [u8; 8],
 }
 

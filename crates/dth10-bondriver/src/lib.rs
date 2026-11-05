@@ -34,11 +34,11 @@
 //! x64 calling convention otherwise.
 //!
 //! The DLL never opens the device itself: the tuner is held by the server
-//! process `dth10.exe serve` in the DLL's folder ([`client`]), which lets
+//! process `dth10.exe serve` in the DLL's folder (`client`), which lets
 //! several DLL instances (two TVTest windows, GR and BS/CS) share one unit
 //! and brings the stream back by itself after a crash or an unplug.
 //!
-//! Every entry point runs under [`guard`]: a panic inside the DLL must not
+//! Every entry point runs under `guard`: a panic inside the DLL must not
 //! unwind into TVTest (Rust aborts the process when a panic reaches an
 //! `extern` boundary), so it is caught, logged, and the call fails.
 

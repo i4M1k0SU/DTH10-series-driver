@@ -64,7 +64,7 @@ pub struct StreamRequest {
     /// Antenna (LNB) supply for this tune: 0 = off, else the voltage (110 /
     /// 150); `None` = the daemon's setting. Used by satellite tunes only.
     pub lnb: Option<u32>,
-    /// How long this tune waits for lock [ms]; `None` = the daemon's setting.
+    /// How long this tune waits for lock, in ms; `None` = the daemon's setting.
     pub lock_wait_ms: Option<u64>,
 }
 
