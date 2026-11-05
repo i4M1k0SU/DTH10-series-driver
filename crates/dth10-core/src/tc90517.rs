@@ -4,10 +4,11 @@
 
 pub mod demod;
 
-pub use demod::{BER_UNUSED, SignalStatus, Tc90517, TerVariant, TuneRequest, ber_e9, cnr_mdb_from_raw, field, lock};
+pub use demod::{Tc90517, TerVariant, ber_e9, cnr_mdb_from_raw};
 
 use crate::device::Device;
 use crate::error::{Error, Result};
+use crate::kit::{SignalStatus, TuneRequest};
 use crate::mxl13xrf::{Mxl13xRf, MxlType};
 use crate::protocol::UsbControl;
 use crate::tlv::TunerDesc;
@@ -144,7 +145,7 @@ impl<T: UsbControl> Tc90517Kit<T> {
         let mut st = SignalStatus { mask, ..Default::default() };
         self.demod.status(&mut self.dev, &mut st)?;
         st.strength = self.tuner.signal(&mut self.dev)?;
-        st.mask |= crate::tc90517::field::STRENGTH;
+        st.mask |= crate::kit::field::STRENGTH;
         Ok(st)
     }
 

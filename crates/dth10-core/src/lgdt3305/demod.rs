@@ -16,8 +16,8 @@ use std::thread::sleep;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
+use crate::kit::{BER_UNUSED, SignalStatus, field};
 use crate::protocol::UsbControl;
-use crate::tc90517::{BER_UNUSED, SignalStatus, field};
 
 /// Register addresses used by the driver.
 pub mod reg {
@@ -81,7 +81,7 @@ pub mod reg {
 }
 
 /// Lock flag bits of [`SignalStatus::lock`] for this demodulator. The values
-/// are those of [`crate::tc90517::lock`] with the same meaning (first flag,
+/// are those of [`crate::kit::lock`] with the same meaning (first flag,
 /// signal / carrier, full lock), so callers can test them the same way.
 pub mod lock {
     /// `0x031E` bit0.

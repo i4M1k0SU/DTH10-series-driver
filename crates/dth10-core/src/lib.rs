@@ -9,6 +9,7 @@
 //! * [`protocol`]  – 8-byte request encoding and the `send` primitive
 //! * [`tlv`]       – device information blob (wValue 0 / wIndex 0xC0DE) parser
 //! * [`device`]    – [`device::Device`]: GPIO, I2C (raw / register / batch), stream control, PID filter
+//! * [`kit`]       – what every kit shares: tune request, signal status, lock / field bits
 //! * [`tc90517`] + [`mxl13xrf`] – ISDB-T kit `TC90517_MxL13xRF` / `SMT_LJ101` hw 0x102 (tuner/filter #0)
 //! * [`terrestrial`] – the kit of tuner #0 by kit name: [`tc90517`], [`pn2031`], [`bq200x`], [`lgdt3305`]
 //! * [`lj101`]     – ISDB-S kit `SMT_LJ101` hw 0x402 (tuner/filter #1): TC90517 satellite side + PLL tuner
@@ -20,6 +21,7 @@ pub mod cepm;
 pub mod device;
 pub mod error;
 pub mod events;
+pub mod kit;
 pub mod lgdt3305;
 pub mod lj101;
 pub mod mxl13xrf;

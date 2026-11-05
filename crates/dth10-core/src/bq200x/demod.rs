@@ -26,8 +26,8 @@ use std::time::Instant;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
+use crate::kit::{SignalStatus, field};
 use crate::protocol::UsbControl;
-use crate::tc90517::{SignalStatus, field};
 use crate::tlv::TunerDesc;
 
 /// Lock flag bits of [`SignalStatus::lock`] as the BQ200X kits fill them
@@ -809,11 +809,11 @@ impl Bq200x {
             st.mask |= field::BER_A;
         }
         if requested & field::BER_B != 0 {
-            st.ber[1] = if layers & 2 != 0 { Self::ber(dev, a, 1)? } else { crate::tc90517::BER_UNUSED };
+            st.ber[1] = if layers & 2 != 0 { Self::ber(dev, a, 1)? } else { crate::kit::BER_UNUSED };
             st.mask |= field::BER_B;
         }
         if requested & field::BER_C != 0 {
-            st.ber[2] = crate::tc90517::BER_UNUSED;
+            st.ber[2] = crate::kit::BER_UNUSED;
             st.mask |= field::BER_C;
         }
         let err_a = Self::error_count(dev, a, 0)?;

@@ -31,9 +31,9 @@ use std::thread::sleep;
 
 use crate::device::{Device, FLAG_TUNER1};
 use crate::error::{Error, Result};
+use crate::kit::{SignalStatus, TuneRequest, field};
 use crate::mxl13xrf::{self, Mxl13xRf, MxlType};
 use crate::protocol::{self, UsbControl, cmd};
-use crate::tc90517::{SignalStatus, TuneRequest, field};
 use crate::tlv::TunerDesc;
 use crate::tuner_bus::{TunerBus, TunerPath};
 
@@ -939,7 +939,7 @@ mod tests {
         assert_eq!(st.cnr_mdb, 24000);
         assert_eq!(st.quality, 90);
         assert_eq!(st.ber[1], ber_check(0x10, 0x10));
-        assert_eq!(st.ber[2], crate::tc90517::BER_UNUSED);
+        assert_eq!(st.ber[2], crate::kit::BER_UNUSED);
         assert_eq!(st.sync_state, 1);
         // The tuner's reading replaces the strength (all-zero MxL registers: 113 dB).
         assert_eq!(st.strength, 113_000);

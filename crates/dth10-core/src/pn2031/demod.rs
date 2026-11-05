@@ -20,8 +20,8 @@ use std::thread::sleep;
 
 use crate::device::Device;
 use crate::error::Result;
+use crate::kit::{BER_UNUSED, SignalStatus, field, lock};
 use crate::protocol::UsbControl;
-use crate::tc90517::{BER_UNUSED, SignalStatus, field, lock};
 
 /// I2C address the vendor driver uses when the descriptor has none.
 pub const DEFAULT_ADDR: u8 = 0x10;

@@ -26,8 +26,8 @@ pub use tuner::Pn2031Tuner;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
+use crate::kit::{SignalStatus, TuneRequest, field};
 use crate::protocol::UsbControl;
-use crate::tc90517::{SignalStatus, TuneRequest, field};
 use crate::tlv::TunerDesc;
 
 pub struct Pn2031Kit<T: UsbControl> {
@@ -150,7 +150,7 @@ impl<T: UsbControl> Pn2031Kit<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tc90517::{BER_UNUSED, lock};
+    use crate::kit::{BER_UNUSED, lock};
     use core::time::Duration;
     use std::cell::RefCell;
     use std::collections::HashMap;

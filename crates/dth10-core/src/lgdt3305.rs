@@ -26,9 +26,9 @@ use std::thread::sleep;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
+use crate::kit::{SignalStatus, TuneRequest, field};
 use crate::mxl13xrf::{Mxl13xRf, MxlType};
 use crate::protocol::UsbControl;
-use crate::tc90517::{SignalStatus, TuneRequest, field};
 use crate::tlv::TunerDesc;
 use crate::tuner_bus::{TunerBus, TunerPath};
 
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(st.lock, 0);
         assert_eq!(st.cnr_mdb, 0);
         assert_eq!(st.quality, 0);
-        assert_eq!(st.ber[0], crate::tc90517::BER_UNUSED);
+        assert_eq!(st.ber[0], crate::kit::BER_UNUSED);
         let mut e = Exp::default();
         e.rd(0x0000).rd(0x031E).rd(0x011D).rd(0x021B).rd(0x0003).rd(0x050A).rd(0x011B).rd(0x011C);
         e.gate_open().tr(0xCC).tr(0xBA).gate_close();

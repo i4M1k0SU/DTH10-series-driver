@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use dth10_core::LockExt;
 use dth10_core::cepm::{self, AppKeys, Decryptor, Handshake};
+use dth10_core::kit::{SignalStatus, TuneRequest, field, lock};
 use dth10_core::lj101::Lj101Kit;
-use dth10_core::tc90517::{SignalStatus, TuneRequest, field, lock};
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::{DeviceInformation, TunerDesc};
 use dth10_core::{Device, Error, Result, StreamMode};
