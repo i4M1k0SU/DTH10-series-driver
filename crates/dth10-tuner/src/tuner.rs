@@ -483,6 +483,26 @@ pub struct Tuner {
     /// an over-current report; the next satellite tune switches it on again
     /// (with its own health check).
     lnb_cut: Arc<AtomicBool>,
+    /// The interrupt-endpoint thread, if one runs. Last field: dropped after
+    /// [`Tuner::close`], it stops the thread and waits for it.
+    _events: Option<EventThread>,
+}
+
+/// The interrupt-endpoint reader. It holds the endpoint and with it the
+/// device handle, so it is stopped and joined when the tuner goes: otherwise
+/// the device could not be opened again (WinUSB refuses a second open).
+struct EventThread {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for EventThread {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 impl Tuner {
@@ -603,6 +623,7 @@ impl Tuner {
             .as_ref()
             .filter(|s| s.kit.desc.model_is("h70"))
             .map(|s| (Device::new(transport.clone()).with_tuner_index(s.i2c_path), lnb_cut.clone()));
+        let mut events = None;
         if (log_events || lnb_watch.is_some())
             && let Some(addr) = pipes.interrupt_in
         {
@@ -614,11 +635,13 @@ impl Tuner {
                 Ok(ep) => {
                     let mut rd = dth10_usb::EventReader::new(ep);
                     let t0 = Instant::now();
-                    std::thread::Builder::new()
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let stop_thread = stop.clone();
+                    let handle = std::thread::Builder::new()
                         .name("dth10-events".into())
                         .spawn(move || {
                             let (mut window, mut in_window, mut suppressed) = (Instant::now(), 0u32, 0u64);
-                            loop {
+                            while !stop_thread.load(Ordering::Relaxed) {
                                 match rd.next(Duration::from_millis(1000)) {
                                     Ok(Some(ev)) => {
                                         if let Some((dev, cut)) = lnb_watch.as_ref()
@@ -660,6 +683,7 @@ impl Tuner {
                             }
                         })
                         .ok();
+                    events = handle.map(|h| EventThread { stop, handle: Some(h) });
                 }
                 Err(e) => log::warn!("event endpoint: {e}"),
             }
@@ -681,6 +705,7 @@ impl Tuner {
             cepm: Arc::new(Mutex::new(saved)),
             keys: None,
             lnb_cut,
+            _events: events,
         })
     }
 
