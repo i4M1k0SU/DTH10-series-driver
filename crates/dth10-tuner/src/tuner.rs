@@ -217,6 +217,18 @@ fn send_program_lists(dev: &Device<UsbTransport>, lists: &[(u32, Vec<u16>)]) {
     }
 }
 
+/// A raw (byte0=1) stream enable that the device refuses with a STALL: this
+/// firmware has no raw mode (seen on the DT-F100/U2, 0.8.17). Reported as
+/// unsupported rather than as a USB failure, so a server keeps the device open.
+fn stream_enable_error(mode: StreamMode, e: Error) -> Error {
+    match e {
+        Error::Usb(m) if mode == StreamMode::RawFullTs && m.contains("stall") => Error::Unsupported(
+            "this device's firmware has no raw mode (it rejects the raw stream enable); use device mode".into(),
+        ),
+        e => e,
+    }
+}
+
 /// How often a running stream logs its counters.
 const STATS_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -1061,7 +1073,7 @@ impl Tuner {
                 if self.streams[0].is_none() {
                     let desc = self.info0.desc.clone();
                     let mode = if device_mode { StreamMode::EncryptedPartial } else { StreamMode::RawFullTs };
-                    if !device_mode {
+                    if !device_mode && self.satellite.is_some() {
                         // docs/40: once stream #0 ran in raw mode, the next satellite
                         // enable hangs the device until it is power-cycled.
                         log::warn!(
@@ -1084,9 +1096,11 @@ impl Tuner {
                             let flags = self.cepm_flags_for(System::IsdbT);
                             self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags)?
                         } else {
-                            log::warn!(
-                                "terrestrial PSI learn in raw mode: BS/CS channels will not work on this device until it is power-cycled"
-                            );
+                            if self.satellite.is_some() {
+                                log::warn!(
+                                    "terrestrial PSI learn in raw mode: BS/CS channels will not work on this device until it is power-cycled"
+                                );
+                            }
                             self.learn_and_push_pids(ep, &dev, &desc)?
                         };
                         restart = Some(StreamRestart { dev, desc: desc.clone(), mode, pids });
@@ -1096,7 +1110,7 @@ impl Tuner {
                     // KS pin order (docs/21): bulk reads start before the stream-enable command.
                     self.start_stream(ep, System::IsdbT, decrypt, restart)?;
                     let dev = self.terrestrial.dev();
-                    dev.stream_enable_mode(&desc, mode)?;
+                    dev.stream_enable_mode(&desc, mode).map_err(|e| stream_enable_error(mode, e))?;
                     send_program_lists(dev, &lists);
                 }
             }
