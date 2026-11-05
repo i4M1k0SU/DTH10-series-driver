@@ -951,7 +951,7 @@ impl Tuner {
         let keys = self.app_keys()?;
         let hs = self.cepm.locked().iter().find(|(f, _)| *f == flags).map(|(_, hs)| hs.clone());
         let Some(hs) = hs else {
-            return Err(Error::Protocol("no CEPM handshake for the satellite stream path; cannot read its PSI"));
+            return Err(Error::Protocol("no CEPM handshake for this stream path; cannot read its PSI"));
         };
         let mut dec = Decryptor::new(hs, keys);
         let mut reader = StreamReader::new(
@@ -982,7 +982,7 @@ impl Tuner {
                     self.store_handshake(flags, hs);
                     dev_for_stream.stream_disable()?;
                     dev_for_stream.stream_enable_mode(desc, StreamMode::EncryptedPartial)?;
-                    log::info!("cepm: satellite stream restarted for the new session (PSI learn)");
+                    log::info!("cepm: stream restarted for the new session (PSI learn)");
                 }
             }
         }
