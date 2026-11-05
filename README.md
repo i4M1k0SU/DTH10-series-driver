@@ -86,7 +86,7 @@ dth10 stream --socket /run/dth10/dth10.sock -c BS15_0 --program 101 # クライ�
 
 | crate | 内容 |
 |---|---|
-| `crates/dth10-core` | USB 非依存のプロトコル層: 制御転送エンコード (`protocol`), デバイス情報 TLV (`tlv`), GPIO/I2C/ストリーム制御/PID フィルタ (`device`), TC90517 地デジ側 (`tc90517`), MxL13xRF (`mxl13xrf`), 地デジキット (`kit`), キット名による地デジ側キットの選択 (`terrestrial`), PN2031 / BQ200X (ISDB-T) と LGDT3305 (ATSC) のキット (`pn2031`, `bq200x`, `lgdt3305`。実機未検証), BS/CS キット (`isdbs`), 割り込みイベント (`events`), リンク暗号の復号 (`cepm`) |
+| `crates/dth10-core` | USB 非依存のプロトコル層: 制御転送エンコード (`protocol`), デバイス情報 TLV (`tlv`), GPIO/I2C/ストリーム制御/PID フィルタ (`device`), 全キット共通の型 (`kit`), TC90517 + MxL13xRF の地デジキット (`tc90517`), MxL13xRF (`mxl13xrf`), キット名による地デジ側キットの選択 (`terrestrial`), PN2031 / BQ200X (ISDB-T) と LGDT3305 (ATSC) のキット (`pn2031`, `bq200x`, `lgdt3305`。実機未検証), BS/CS キット (`lj101`), 割り込みイベント (`events`), リンク暗号の復号 (`cepm`) |
 | `crates/dth10-usb` | `nusb` によるトランスポート (Windows: WinUSB / Linux: usbfs / macOS: IOKit) とバルク連続リーダ |
 | `crates/dth10-diag` | 開発者向けのハードウェア診断ツール `dth10-diag`: `info [--raw]`, `gpio-read`, `raw`, `events`, `i2c-read`, `i2c-write`, `tune` (ISDB-T の同調・ロック・信号状態。`--file` で raw モード記録), `tune-sat` (ISDB-S の同調・ロック・信号状態・TMCC の TS-ID 表), `scan`, `cepm`, `reset`, `hub-power` (Linux)。共通オプション `--serial`, `--recipient`, `--tuner`, `--drain-events`, `-v`。生のベンダーコマンド・単独の CEPM ハンドシェイク・hub-power は電源を入れ直すまでデバイスをフリーズさせることがあるため、診断用として提供。記録・視聴は `dth10` |
 | `crates/dth10-tuner` | BonDriver と `dth10` コマンドが共有するチューナーロジック (チャンネル表、PAT/PMT 収集、device モードの PID リスト、CEPM 復号付きリーダスレッド、`TsQueue`) |
