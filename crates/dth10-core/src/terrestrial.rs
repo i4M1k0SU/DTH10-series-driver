@@ -14,10 +14,10 @@
 use crate::bq200x::Bq200xKit;
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::kit::Tc90517Kit;
 use crate::lgdt3305::Lgdt3305Kit;
 use crate::pn2031::Pn2031Kit;
 use crate::protocol::UsbControl;
+use crate::tc90517::Tc90517Kit;
 use crate::tc90517::{SignalStatus, TuneRequest};
 use crate::tlv::TunerDesc;
 

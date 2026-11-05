@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dth10_core::cepm;
-use dth10_core::isdbs::Lj101Kit;
+use dth10_core::lj101::Lj101Kit;
 use dth10_core::tc90517::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::{Device, StreamMode, TunerDesc};
