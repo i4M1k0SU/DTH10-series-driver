@@ -22,7 +22,7 @@ dth10-tuner = { path = "crates/dth10-tuner" }
 nusb = "0.2"
 log = "0.4"
 env_logger = "0.11"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 winresource = "0.1.34"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 
