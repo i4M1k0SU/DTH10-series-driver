@@ -34,7 +34,7 @@ use dth10_core::cepm;
 use dth10_core::kit::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
 use dth10_core::lj101::Lj101Kit;
 use dth10_core::terrestrial::TerrestrialKit;
-use dth10_core::{Device, StreamMode, TunerDesc};
+use dth10_core::{Device, StreamMode, TunerDesc, unverified_kit_error};
 use dth10_tuner::channels::uhf_center_hz;
 use dth10_tuner::config::parse_num;
 use dth10_tuner::{Channel, System};
@@ -376,7 +376,12 @@ struct Opener {
 impl Opener {
     fn open(&self) -> Res<UsbTransport> {
         let t = UsbTransport::open_matching(self.mode, self.serial.as_deref())?;
-        eprintln!("device serial {} (bmRequestType recipient {:?})", t.serial().unwrap_or("-"), self.mode);
+        eprintln!(
+            "device {} serial {} (bmRequestType recipient {:?})",
+            dth10_core::product_label(t.product_id()),
+            t.serial().unwrap_or("-"),
+            self.mode
+        );
         if self.drain_events
             && let Some(ep) = t.pipes().interrupt_in
         {
@@ -622,10 +627,11 @@ fn wait_lock(
 fn tune(o: &Opener, a: &TuneArgs) -> Res {
     let t = o.open()?;
     let (ep, _) = t.pipes().ts0.ok_or("no TS endpoint 0x81 found")?;
+    let pid = t.product_id();
     let dev = Device::new(t);
     let di = dev.read_device_information()?;
     print_desc(0, &di.desc);
-    let mut kit = TerrestrialKit::new(dev, di.desc)?;
+    let mut kit = TerrestrialKit::new(dev, di.desc).map_err(|e| unverified_kit_error(pid, 0, e))?;
     kit.init()?;
     if !a.no_start {
         kit.dev().start()?; // wValue 0 / wIndex 0x10, after the kit Init (the original driver's order)
@@ -816,9 +822,10 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
                 eprintln!("warning: terrestrial kit Init: {e}");
             }
         }
-        Err(e) => eprintln!("warning: terrestrial kit: {e}"),
+        Err(e) => eprintln!("warning: terrestrial kit: {}", unverified_kit_error(t.product_id(), 0, e)),
     }
-    let mut kit = Lj101Kit::new(Device::new(t.clone()).with_tuner_index(a.i2c_tuner), info1.desc.clone())?;
+    let mut kit = Lj101Kit::new(Device::new(t.clone()).with_tuner_index(a.i2c_tuner), info1.desc.clone())
+        .map_err(|e| unverified_kit_error(t.product_id(), 1, e))?;
     println!("satellite kit: I2C/GPIO via the tuner #{} path", a.i2c_tuner);
     kit.init()?;
     if !a.no_start {
@@ -887,10 +894,12 @@ fn scan(o: &Opener, first: u32, last: u32, wait_ms: u64) -> Res {
     if first > last {
         return Err(format!("--first {first} is above --last {last}").into());
     }
-    let dev = Device::new(o.open()?);
+    let t = o.open()?;
+    let pid = t.product_id();
+    let dev = Device::new(t);
     let di = dev.read_device_information()?;
     print_desc(0, &di.desc);
-    let mut kit = TerrestrialKit::new(dev, di.desc)?;
+    let mut kit = TerrestrialKit::new(dev, di.desc).map_err(|e| unverified_kit_error(pid, 0, e))?;
     kit.init()?;
     kit.dev().start()?;
     kit.open()?;

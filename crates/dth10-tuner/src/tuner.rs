@@ -521,6 +521,8 @@ impl Tuner {
     pub fn open_with(transport: UsbTransport, cfg: &TunerConfig, queue: TsQueue) -> Result<Self> {
         let t_start = Instant::now();
         let pipes = transport.pipes();
+        let pid = transport.product_id();
+        log::info!("model {} ({pid:04x})", dth10_core::product_label(pid));
         log::info!("endpoints: {pipes:?}");
 
         let dev0 = Device::new(transport.clone());
@@ -575,7 +577,7 @@ impl Tuner {
                             })
                         }
                         Err(e) => {
-                            log::warn!("tuner #1 not supported: {e}");
+                            log::warn!("tuner #1 not supported: {}", dth10_core::unverified_kit_error(pid, 1, e));
                             None
                         }
                     }
@@ -589,7 +591,8 @@ impl Tuner {
             None
         };
 
-        let mut terrestrial = TerrestrialKit::new(dev0, info0.desc.clone())?;
+        let mut terrestrial =
+            TerrestrialKit::new(dev0, info0.desc.clone()).map_err(|e| dth10_core::unverified_kit_error(pid, 0, e))?;
         terrestrial.init()?;
         log::info!("terrestrial kit ({}) init done {:?}", terrestrial.kind(), t_start.elapsed());
         // The original driver initialises both kits at start-up, in order, and

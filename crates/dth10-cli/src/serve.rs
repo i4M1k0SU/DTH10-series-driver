@@ -615,11 +615,7 @@ fn discover(units: &Units, make_unit: &dyn Fn(&str) -> Arc<Unit>) {
         if u.iter().any(|x| x.serial == serial) {
             continue;
         }
-        log::info!(
-            "dth10 serve: unit {serial} ({}) at {}",
-            dth10_core::product_name(d.product_id).unwrap_or("?"),
-            d.location
-        );
+        log::info!("dth10 serve: unit {serial} ({}) at {}", dth10_core::product_label(d.product_id), d.location);
         u.push(make_unit(&serial));
     }
 }
