@@ -59,7 +59,9 @@ pub const SUPPORTED_PIDS: &[(u16, &str)] = &[
     (0x01DA, "DT-H11/U2"),
     (0x01DB, "DT-F200/U2W"),
     (0x01FF, "DT-H71/U2"),
+    (0x0200, "DT-H70B/PCIE"),
     (0x0202, "DT-F120/U2"),
+    (0x0218, "DT-H30/PCIEM-TS"),
     (PID_DTH10_U7, "DT-H10/U7"),
 ];
 
@@ -75,12 +77,13 @@ pub const PID_DTH10_U7: u16 = 0x017B;
 
 /// Supported product IDs that are not in the vendor driver's INF this
 /// implementation follows and that have not been checked on a unit: the
-/// successor models, which the vendor application handles exactly like the
-/// rest of the series but which need a newer vendor driver (their boards may
-/// report a tuner kit that is not implemented here), and the DT-H10/U7
+/// successor models, listed in the INFs of newer vendor drivers (0x01FF,
+/// 0x0200 and 0x0202 in the 5.1.9.33 one of the series, 0x0218 in the
+/// separate DT-H30/PCIEM-TS driver 5.1.9.46). Their boards may report a
+/// tuner kit that is not implemented here. And the DT-H10/U7
 /// ([`PID_DTH10_U7`]), which has a vendor driver of its own and a different
 /// TS slot layout.
-pub const UNVERIFIED_PIDS: &[u16] = &[0x01FF, 0x0202, PID_DTH10_U7];
+pub const UNVERIFIED_PIDS: &[u16] = &[0x01FF, 0x0200, 0x0202, 0x0218, PID_DTH10_U7];
 
 /// Returns the marketing name for a supported product ID.
 pub fn product_name(pid: u16) -> Option<&'static str> {
@@ -144,9 +147,13 @@ mod tests {
     fn successor_models_are_supported_but_unverified() {
         assert_eq!(product_name(0x01FF), Some("DT-H71/U2"));
         assert_eq!(product_name(0x0202), Some("DT-F120/U2"));
-        assert!(is_unverified(0x01FF) && is_unverified(0x0202));
+        assert_eq!(product_name(0x0200), Some("DT-H70B/PCIE"));
+        assert_eq!(product_name(0x0218), Some("DT-H30/PCIEM-TS"));
+        assert!(UNVERIFIED_PIDS.iter().all(|&pid| is_unverified(pid)));
         assert_eq!(product_label(0x01FF), "DT-H71/U2 (unverified model)");
         assert_eq!(product_label(0x0202), "DT-F120/U2 (unverified model)");
+        assert_eq!(product_label(0x0200), "DT-H70B/PCIE (unverified model)");
+        assert_eq!(product_label(0x0218), "DT-H30/PCIEM-TS (unverified model)");
     }
 
     #[test]

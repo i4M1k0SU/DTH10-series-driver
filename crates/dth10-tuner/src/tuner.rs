@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use dth10_core::LockExt;
 use dth10_core::cepm::{self, AppKeys, Decryptor, Handshake};
+use dth10_core::device::LnbGpio;
 use dth10_core::kit::{SignalStatus, TuneRequest, field, lock};
 use dth10_core::lj101::Lj101Kit;
 use dth10_core::terrestrial::TerrestrialKit;
@@ -479,11 +480,11 @@ fn lnb_overcurrent_report(ev: &dth10_core::events::Event) -> bool {
 
 /// After an over-current report: 10 ms later (the vendor driver's delay), the
 /// supply's state bit in the GPIO status block; not good means switch the
-/// supply off (both its bits).
-fn check_lnb_supply(dev: &Device<UsbTransport>, cut: &AtomicBool) {
+/// supply off (both its bits `gpio`).
+fn check_lnb_supply(dev: &Device<UsbTransport>, gpio: LnbGpio, cut: &AtomicBool) {
     std::thread::sleep(Duration::from_millis(10));
     match dev.gpio_read() {
-        Ok(st) if st[12] & 1 == 0 => match dev.gpio_write(0x2020, 0) {
+        Ok(st) if st[12] & 1 == 0 => match dev.gpio_write(gpio.all(), 0) {
             Ok(()) => {
                 cut.store(true, Ordering::Relaxed);
                 log::warn!("antenna (LNB) supply over-current: switched off; the next BS/CS tune switches it on again");
@@ -710,15 +711,15 @@ impl Tuner {
         }
 
         let log_events = cfg.log_events || std::env::var_os("DTH10_EVENTS").is_some();
-        // The antenna supply of the model whose GPIO switches it ("h70"): the
-        // device reports a possible over-current on the interrupt endpoint, and
-        // the vendor driver then reads the supply's state 10 ms later and
-        // switches it off when it is not good. Watched here the same way.
+        // The antenna supply of the models whose GPIO switches it ("h70",
+        // "h70b"): the device reports a possible over-current on the interrupt
+        // endpoint, and the vendor driver then reads the supply's state 10 ms
+        // later and switches it off when it is not good. Watched here the same way.
         let lnb_cut = Arc::new(AtomicBool::new(false));
-        let lnb_watch = satellite
-            .as_ref()
-            .filter(|s| s.kit.desc.model_is("h70"))
-            .map(|s| (Device::new(transport.clone()).with_tuner_index(s.i2c_path), lnb_cut.clone()));
+        let lnb_watch = satellite.as_ref().and_then(|s| {
+            let gpio = LnbGpio::of(&s.kit.desc)?;
+            Some((Device::new(transport.clone()).with_tuner_index(s.i2c_path), gpio, lnb_cut.clone()))
+        });
         let mut events = None;
         if (log_events || lnb_watch.is_some())
             && let Some(addr) = pipes.interrupt_in
@@ -740,10 +741,10 @@ impl Tuner {
                             while !stop_thread.load(Ordering::Relaxed) {
                                 match rd.next(Duration::from_millis(1000)) {
                                     Ok(Some(ev)) => {
-                                        if let Some((dev, cut)) = lnb_watch.as_ref()
+                                        if let Some((dev, gpio, cut)) = lnb_watch.as_ref()
                                             && lnb_overcurrent_report(&ev)
                                         {
-                                            check_lnb_supply(dev, cut);
+                                            check_lnb_supply(dev, *gpio, cut);
                                         }
                                         if !log_events {
                                             continue;

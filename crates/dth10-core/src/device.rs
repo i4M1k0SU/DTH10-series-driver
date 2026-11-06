@@ -329,18 +329,48 @@ impl<T: UsbControl> Device<T> {
     }
 }
 
-/// LNB (BS/CS antenna) power control, model "h70" only.
+/// The bridge GPIO bits that switch the antenna (LNB) supply, which depend on
+/// the model string: "h70b" uses its own bits, other "h70" models the older
+/// ones; other models have no supply under driver control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LnbGpio {
+    /// Supply on (11 V unless `v15` is set too).
+    pub power: u32,
+    /// 15 V instead of 11 V.
+    pub v15: u32,
+}
+
+impl LnbGpio {
+    /// The bits for the model of `desc`, checked like the vendor driver does:
+    /// "h70" first, then "h70b" overrides it.
+    pub fn of(desc: &TunerDesc) -> Option<Self> {
+        if desc.model_is("h70b") {
+            Some(Self { power: 0x10000, v15: 0x4000 })
+        } else if desc.model_is("h70") {
+            Some(Self { power: 0x20, v15: 0x2000 })
+        } else {
+            None
+        }
+    }
+
+    /// Both bits.
+    pub fn all(self) -> u32 {
+        self.power | self.v15
+    }
+}
+
+/// LNB (BS/CS antenna) power control through the bridge GPIO bits `gpio`.
 ///
 /// `volt` is 150 (15 V), 110 (11 V) or 0 (off). Returns `Ok(true)` when the
 /// bridge reported the supply as healthy (status bit set after 150 ms) and
 /// `Ok(false)` when it was switched off again because the status bit was clear.
-pub fn lnb_set<T: UsbControl>(dev: &Device<T>, volt: u32) -> Result<bool> {
+pub fn lnb_set<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio, volt: u32) -> Result<bool> {
     let bits: u32 = match volt {
-        150 => 0x2020,
-        110 => 0x0020,
+        150 => gpio.all(),
+        110 => gpio.power,
         _ => 0,
     };
-    dev.gpio_write(0x2020 & !bits, 0)?;
+    dev.gpio_write(gpio.all() & !bits, 0)?;
     dev.gpio_write(bits, bits)?;
     if volt == 0 {
         return Ok(true);
@@ -348,19 +378,19 @@ pub fn lnb_set<T: UsbControl>(dev: &Device<T>, volt: u32) -> Result<bool> {
     sleep(Duration::from_millis(150));
     let st = dev.gpio_read()?;
     if st[12] & 1 == 0 {
-        dev.gpio_write(0x2020, 0)?;
+        dev.gpio_write(gpio.all(), 0)?;
         return Ok(false);
     }
     Ok(true)
 }
 
-/// Read back the LNB state, model "h70" only: 0, 110 or 150.
-pub fn lnb_get<T: UsbControl>(dev: &Device<T>) -> Result<u32> {
+/// Read back the LNB state from the bridge GPIO bits `gpio`: 0, 110 or 150.
+pub fn lnb_get<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio) -> Result<u32> {
     let st = dev.gpio_read()?;
     let v = u32::from_le_bytes([st[8], st[9], st[10], st[11]]);
-    if v & 0x20 == 0 {
+    if v & gpio.power == 0 {
         Ok(0)
-    } else if v & 0x2000 != 0 {
+    } else if v & gpio.v15 != 0 {
         Ok(150)
     } else {
         Ok(110)
@@ -378,6 +408,8 @@ mod tests {
     #[derive(Default)]
     struct Mock {
         log: RefCell<Vec<Call>>,
+        /// What every IN transfer returns (zeros by default).
+        input: [u8; 16],
     }
 
     impl UsbControl for Mock {
@@ -387,6 +419,8 @@ mod tests {
         }
         fn control_in(&self, r: u8, v: u16, i: u16, b: &mut [u8], _: Duration) -> Result<usize> {
             self.log.borrow_mut().push((r, v, i, vec![]));
+            let n = b.len().min(self.input.len());
+            b[..n].copy_from_slice(&self.input[..n]);
             Ok(b.len())
         }
     }
@@ -435,5 +469,86 @@ mod tests {
         dev.start().unwrap();
         let log = dev.transport().log.borrow();
         assert_eq!(log[0], (0x02, 0, 0x10, vec![]));
+    }
+
+    fn model(m: &str) -> TunerDesc {
+        TunerDesc { model: m.into(), ..Default::default() }
+    }
+
+    /// A GPIO status block: output bits at bytes 8..12, supply state at byte 12.
+    fn gpio_status(out: u32, good: bool) -> [u8; 16] {
+        let mut st = [0u8; 16];
+        st[8..12].copy_from_slice(&out.to_le_bytes());
+        st[12] = good as u8;
+        st
+    }
+
+    /// The GPIO output writes (mask, value) and status reads ("read") in order.
+    fn gpio_ops(dev: &Device<Mock>) -> Vec<(u32, u32)> {
+        let word = |d: &[u8], at: usize| u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]]);
+        dev.transport()
+            .log
+            .borrow()
+            .iter()
+            .filter_map(|(_, _, i, d)| match *i {
+                cmd::SYS_GPIO_SET => Some((word(d, 4), word(d, 8))),
+                cmd::SYS_GPIO_READ => Some((u32::MAX, u32::MAX)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const READ: (u32, u32) = (u32::MAX, u32::MAX);
+
+    #[test]
+    fn lnb_gpio_bits_follow_the_model() {
+        let h70 = LnbGpio { power: 0x20, v15: 0x2000 };
+        let h70b = LnbGpio { power: 0x10000, v15: 0x4000 };
+        assert_eq!(LnbGpio::of(&model("h70")), Some(h70));
+        assert_eq!(LnbGpio::of(&model("h70b")), Some(h70b), "\"h70b\" is checked before \"h70\"");
+        assert_eq!(LnbGpio::of(&model("h70b2")), Some(h70b));
+        for m in ["", "h7", "h55", "f200", "h71"] {
+            assert_eq!(LnbGpio::of(&model(m)), None, "{m:?}");
+        }
+        assert_eq!((h70.all(), h70b.all()), (0x2020, 0x14000));
+    }
+
+    #[test]
+    fn lnb_set_drives_the_bits_of_the_model() {
+        for (m, power, v15) in [("h70", 0x20, 0x2000), ("h70b", 0x10000, 0x4000)] {
+            let g = LnbGpio::of(&model(m)).unwrap();
+            let dev = Device::new(Mock { input: gpio_status(0, true), ..Default::default() });
+            assert!(lnb_set(&dev, g, 150).unwrap(), "{m}");
+            // nothing to clear first (a zero mask is not sent)
+            assert_eq!(gpio_ops(&dev), vec![(power | v15, power | v15), READ], "{m} 15 V");
+
+            let dev = Device::new(Mock { input: gpio_status(0, true), ..Default::default() });
+            assert!(lnb_set(&dev, g, 110).unwrap(), "{m}");
+            assert_eq!(gpio_ops(&dev), vec![(v15, 0), (power, power), READ], "{m} 11 V");
+
+            let dev = Device::new(Mock::default());
+            assert!(lnb_set(&dev, g, 0).unwrap(), "{m}");
+            assert_eq!(gpio_ops(&dev), vec![(power | v15, 0)], "{m} off: no status check");
+        }
+    }
+
+    #[test]
+    fn lnb_set_switches_the_supply_off_when_the_status_bit_is_clear() {
+        for (m, all) in [("h70", 0x2020), ("h70b", 0x14000)] {
+            let g = LnbGpio::of(&model(m)).unwrap();
+            let dev = Device::new(Mock { input: gpio_status(all, false), ..Default::default() });
+            assert!(!lnb_set(&dev, g, 150).unwrap(), "{m}");
+            assert_eq!(gpio_ops(&dev), vec![(all, all), READ, (all, 0)], "{m}");
+        }
+    }
+
+    #[test]
+    fn lnb_get_reads_the_bits_of_the_model() {
+        let h70 = LnbGpio::of(&model("h70")).unwrap();
+        let h70b = LnbGpio::of(&model("h70b")).unwrap();
+        let get =
+            |g, out| lnb_get(&Device::new(Mock { input: gpio_status(out, true), ..Default::default() }), g).unwrap();
+        assert_eq!([get(h70, 0x2020), get(h70, 0x20), get(h70, 0x2000), get(h70, 0x14000)], [150, 110, 0, 0]);
+        assert_eq!([get(h70b, 0x14000), get(h70b, 0x10000), get(h70b, 0x4000), get(h70b, 0x2020)], [150, 110, 0, 0]);
     }
 }
