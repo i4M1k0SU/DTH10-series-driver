@@ -19,6 +19,8 @@ BUFFALO DTH10 シリーズ ユーザーモード実装
 | DT-F200/U2W | `0x01DB` | 2010-12 | 地上 | - |
 | DT-H71/U2 | `0x01FF` | - | 地上, BS, CS | - |
 | DT-F120/U2 | `0x0202` | - | 地上 | - |
+| DT-H70B/PCIE | `0x0200` | - | 地上, BS, CS | - |
+| DT-H30/PCIEM-TS | `0x0218` | - | - | - |
 
 USB VID は `0x0411` (BUFFALO) で共通。
 
