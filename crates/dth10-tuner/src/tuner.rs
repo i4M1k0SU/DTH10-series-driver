@@ -14,6 +14,7 @@ use dth10_core::kit::{SignalStatus, TuneRequest, field, lock};
 use dth10_core::lj101::Lj101Kit;
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::{DeviceInformation, TunerDesc};
+use dth10_core::ts_slot::SlotLayout;
 use dth10_core::{Device, Error, Result, StreamMode};
 use dth10_usb::{StreamReader, UsbTransport};
 
@@ -114,8 +115,9 @@ impl TsQueue {
 }
 
 /// Extracts TS packets from the bulk format of the bridge: the
-/// pipe carries 256-byte blocks whose first 188 bytes are one TS packet and
-/// whose remaining 68 bytes are padding. A transfer tail shorter than 256
+/// pipe carries 256-byte blocks with one TS packet each, placed as the
+/// model's [`SlotLayout`] says (on most models the first 188 bytes, the
+/// remaining 68 bytes being padding). A transfer tail shorter than 256
 /// bytes is dropped, as in the original driver.
 pub struct Aligner {
     dropped_tail: u64,
@@ -123,13 +125,14 @@ pub struct Aligner {
     /// some hosts: the first blocks arrive with zeroed TS headers).
     unsynced: u64,
     drop_filler: bool,
+    layout: SlotLayout,
 }
 
-pub const BLOCK: usize = 256;
+pub const BLOCK: usize = dth10_core::ts_slot::SLOT;
 
 impl Aligner {
-    pub fn new(drop_filler: bool) -> Self {
-        Aligner { dropped_tail: 0, unsynced: 0, drop_filler }
+    pub fn new(drop_filler: bool, layout: SlotLayout) -> Self {
+        Aligner { dropped_tail: 0, unsynced: 0, drop_filler, layout }
     }
 
     /// Return the TS packets contained in `data`.
@@ -148,8 +151,9 @@ impl Aligner {
             }
         }
         let mut out = Vec::with_capacity(blocks * TS_PACKET);
-        for b in 0..blocks {
-            let pkt = &data[b * BLOCK..b * BLOCK + TS_PACKET];
+        let mut scratch = [0u8; TS_PACKET];
+        for slot in data.as_chunks::<BLOCK>().0 {
+            let pkt = self.layout.packet(slot, &mut scratch);
             if pkt[0] != 0x47 {
                 self.unsynced += 1;
                 if self.unsynced == 1 || self.unsynced.is_multiple_of(10000) {
@@ -316,6 +320,7 @@ impl Stream {
         queue: TsQueue,
         system: System,
         drop_filler: bool,
+        layout: SlotLayout,
         name: &str,
         decrypt: Option<(Handshake, UsbTransport, Arc<AppKeys>)>,
         cepm_flags: u8,
@@ -330,7 +335,7 @@ impl Stream {
         let handle = std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
-                let mut aligner = Aligner::new(drop_filler);
+                let mut aligner = Aligner::new(drop_filler, layout);
                 let mut dec = decrypt.map(|(hs, t, keys)| {
                     let mut d = Decryptor::new(hs, keys);
                     d.label = label.clone();
@@ -594,7 +599,7 @@ impl Tuner {
                     );
                     let i2c_path = if info1.desc.flags & 0x4 != 0 { 0 } else { 1 };
                     let i2c_dev = Device::new(transport.clone()).with_tuner_index(i2c_path);
-                    match TerrestrialKit::new(i2c_dev, info1.desc.clone()) {
+                    match TerrestrialKit::new(i2c_dev, info1.desc.clone(), pid) {
                         Ok(kit) => {
                             let endpoint = pipes.ts1.map(|(ep, _)| ep).unwrap_or(0x82);
                             log::info!(
@@ -664,8 +669,8 @@ impl Tuner {
             None
         };
 
-        let mut terrestrial =
-            TerrestrialKit::new(dev0, info0.desc.clone()).map_err(|e| dth10_core::unverified_kit_error(pid, 0, e))?;
+        let mut terrestrial = TerrestrialKit::new(dev0, info0.desc.clone(), pid)
+            .map_err(|e| dth10_core::unverified_kit_error(pid, 0, e))?;
         terrestrial.init()?;
         log::info!("terrestrial kit ({}) init done {:?}", terrestrial.kind(), t_start.elapsed());
         // The original driver initialises both kits at start-up, in order, and
@@ -695,11 +700,11 @@ impl Tuner {
         // As in the original driver, the device start (wValue 0 / wIndex 0x10) comes
         // after kit Init, followed by each kit's power-down when its desc flags bit5 is set.
         terrestrial.dev().start()?;
-        if info0.desc.skip_init_config() {
+        if terrestrial.skips_init_config() {
             terrestrial.dev().power_down(&info0.desc)?;
         }
         if let Some(ter1) = second.as_mut()
-            && ter1.info.desc.skip_init_config()
+            && ter1.kit.skips_init_config()
             && let Err(e) = ter1.kit.dev().power_down(&ter1.info.desc)
         {
             log::warn!("second terrestrial kit power-down after the device start: {e}");
@@ -800,6 +805,11 @@ impl Tuner {
             lnb_cut,
             _events: events,
         })
+    }
+
+    /// Where the TS packets sit in the bulk slots of this model.
+    fn slot_layout(&self) -> SlotLayout {
+        SlotLayout::for_product(self.transport.product_id())
     }
 
     /// Use already loaded application credentials instead of reading
@@ -924,6 +934,7 @@ impl Tuner {
             self.queues[tuner].clone(),
             system,
             self.cfg.drop_filler,
+            self.slot_layout(),
             name,
             dec,
             flags,
@@ -1069,7 +1080,7 @@ impl Tuner {
             self.cfg.read_depth.max(1),
         )?;
         let mut psi = PsiCollector::new();
-        let mut aligner = Aligner::new(true);
+        let mut aligner = Aligner::new(true, self.slot_layout());
         reader.start();
         dev_for_stream.stream_enable_mode(desc, StreamMode::RawFullTs)?;
         let deadline = Instant::now() + PSI_LEARN_TIMEOUT;
@@ -1109,7 +1120,7 @@ impl Tuner {
             self.cfg.read_depth.max(1),
         )?;
         let mut psi = PsiCollector::new();
-        let mut aligner = Aligner::new(true);
+        let mut aligner = Aligner::new(true, self.slot_layout());
         reader.start();
         dev_for_stream.stream_enable_mode(desc, StreamMode::EncryptedPartial)?;
         let t = Instant::now();
@@ -1613,7 +1624,7 @@ mod tests {
 
     #[test]
     fn aligner_extracts_188_of_256() {
-        let mut a = Aligner::new(true);
+        let mut a = Aligner::new(true, SlotLayout::Plain);
         let mut data = vec![0xEEu8; 2 * BLOCK + 10];
         data[0] = 0x47;
         data[BLOCK] = 0x47;
@@ -1634,7 +1645,7 @@ mod tests {
 
     #[test]
     fn aligner_drops_tei_null_filler() {
-        let mut a = Aligner::new(true);
+        let mut a = Aligner::new(true, SlotLayout::Plain);
         let mut data = vec![0xFFu8; 2 * BLOCK];
         data[0] = 0x47;
         data[1] = 0x9F;
@@ -1646,8 +1657,40 @@ mod tests {
         let out = a.feed(&data);
         assert_eq!(out.len(), TS_PACKET);
         assert_eq!(out[1], 0x01);
-        let mut keep = Aligner::new(false);
+        let mut keep = Aligner::new(false, SlotLayout::Plain);
         assert_eq!(keep.feed(&data).len(), 2 * TS_PACKET);
+    }
+
+    #[test]
+    fn aligner_split_layout() {
+        // Two DT-H10/U7 slots: one whole packet at +4, one split after a
+        // 3-byte head (L = 3: 7 bytes at +4, the rest at +12), then a filler.
+        let mut pkt = [0u8; TS_PACKET];
+        pkt[0] = 0x47;
+        pkt[1] = 0x01;
+        for (i, b) in pkt.iter_mut().enumerate().skip(2) {
+            *b = i as u8;
+        }
+        let mut data = vec![0xEEu8; 3 * BLOCK];
+        data[1] = 0;
+        data[4..4 + TS_PACKET].copy_from_slice(&pkt);
+        let s = &mut data[BLOCK..2 * BLOCK];
+        s[1] = 3;
+        s[4..11].copy_from_slice(&pkt[..7]);
+        s[12..12 + 181].copy_from_slice(&pkt[7..]);
+        let f = &mut data[2 * BLOCK..];
+        f[1] = 0;
+        f[4..8].copy_from_slice(&[0x47, 0x9F, 0xFF, 0x1F]);
+        let mut a = Aligner::new(true, SlotLayout::Split);
+        let out = a.feed(&data);
+        assert_eq!(out.len(), 2 * TS_PACKET);
+        assert_eq!(&out[..TS_PACKET], &pkt);
+        assert_eq!(&out[TS_PACKET..], &pkt);
+        assert_eq!(a.unsynced, 0);
+        // The plain layout finds no sync byte at +0 in these slots.
+        let mut plain = Aligner::new(true, SlotLayout::Plain);
+        assert!(plain.feed(&data).is_empty());
+        assert_eq!(plain.unsynced, 3);
     }
 
     fn program(number: u16) -> Program {

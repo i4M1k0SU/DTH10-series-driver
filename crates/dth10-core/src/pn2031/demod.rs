@@ -22,6 +22,7 @@
 use core::time::Duration;
 use std::thread::sleep;
 
+use super::Pn2031Variant;
 use crate::device::Device;
 use crate::error::Result;
 use crate::kit::{BER_UNUSED, SignalStatus, field, lock};
@@ -266,6 +267,72 @@ pub const COEF_WORDS: [(u8, u32); 25] = [
 /// Number of [`COEF_WORDS`] in each of the three batches.
 pub const COEF_BATCHES: [usize; 3] = [8, 8, 9];
 
+/// [`Pn2031Variant::Dth10U7`] configuration, part 1 (one batch): [`CFG_BASE`]
+/// without `0x73`, `0x08` ← `00`, `0x06`, `0x1F` and `0x1C`.
+pub const CFG_BASE_U7: [(u8, u8); 15] = [
+    (0x08, 0x01),
+    (0x09, 0x1A),
+    (0x50, 0xD1),
+    (0x51, 0x22),
+    (0x71, 0x00),
+    (0x28, 0x2A),
+    (0x29, 0x00),
+    (0x2A, 0xFF),
+    (0x2B, 0x80),
+    (0x3B, 0x21),
+    (0x3C, 0x3A),
+    (0x28, 0x20),
+    (0x29, 0x3E),
+    (0x2A, 0xE0),
+    (0x2B, 0x8F),
+];
+
+/// [`Pn2031Variant::Dth10U7`] configuration after the stream-parameter batch
+/// (one batch): `0x3B`/`0x3C`, then the words of [`CFG_WORDS_A`] with word
+/// `0x46` ← `0x001A0C` (not `0x00200C`), words `0x00` and `0x05` written
+/// through their low byte only (`0x05` ← `00`, not `02`) and no word `0x6A`.
+pub const CFG_WORDS_U7: [(u8, u8); 17] = [
+    (0x3B, 0x21),
+    (0x3C, 0x38),
+    (0x28, 0x74),
+    (0x29, 0x00),
+    (0x2A, 0x00),
+    (0x2B, 0xFF),
+    (0x28, 0x46),
+    (0x29, 0x00),
+    (0x2A, 0x1A),
+    (0x2B, 0x0C),
+    (0x04, 0x40),
+    (0x05, 0x00),
+    (0x28, 0x00),
+    (0x2B, 0x08),
+    (0x28, 0x05),
+    (0x2B, 0x00),
+    (0x1C, 0x01),
+];
+
+/// [`Pn2031Variant::Dth10U7`] configuration, last batch (after the
+/// [`COEF_WORDS`]): indirect `0x1E`..`0x39` as in [`CFG_IND_1E`], with
+/// `0x27` ← `C4` (not `C3`).
+pub const CFG_IND_1E_U7: [(u8, u8); 16] = [
+    (0x50, 0x1E),
+    (0x51, 0x5D),
+    (0x50, 0x22),
+    (0x51, 0x00),
+    (0x50, 0x23),
+    (0x51, 0xC8),
+    (0x50, 0x24),
+    (0x51, 0x00),
+    (0x50, 0x25),
+    (0x51, 0xF0),
+    (0x50, 0x26),
+    (0x51, 0x00),
+    (0x50, 0x27),
+    (0x51, 0xC4),
+    (0x50, 0x39),
+    (0x51, 0x02),
+];
+
 /// Raw write the tune sequence sends to the demodulator before programming
 /// the tuner (as bytes on the bus: `71 00 39 01 44 00`). These are three
 /// register/value pairs, `0x71` ← `00` (13-segment reception), `0x39` ← `01`
@@ -369,6 +436,8 @@ pub struct Pn2031 {
     pub addr: u8,
     /// The descriptor's stream parameter (`TunerDesc::stream_param`), captured when the kit is built.
     pub stream_param: u32,
+    /// Which configuration [`Pn2031::configure`] sends.
+    pub variant: Pn2031Variant,
     /// Last completed C/N in 0.001 dB since the last configuration or tune.
     cnr_last: Option<i32>,
     /// Last completed post-Viterbi BER ×1e-9 of layers A/B/C since the last
@@ -384,9 +453,12 @@ fn append<T: UsbControl>(dev: &mut Device<T>, addr: u8, pairs: &[(u8, u8)]) -> R
 }
 
 impl Pn2031 {
-    /// `addr` 0 selects [`DEFAULT_ADDR`], as the vendor driver does.
-    pub fn new(addr: u8, stream_param: u32) -> Self {
-        Pn2031 { addr: if addr == 0 { DEFAULT_ADDR } else { addr }, stream_param, cnr_last: None, ber_last: [None; 3] }
+    /// `addr` 0 selects [`DEFAULT_ADDR`], as the vendor driver does;
+    /// [`Pn2031Variant::Dth10U7`] always uses [`DEFAULT_ADDR`], as the
+    /// DT-H10/U7's vendor driver does.
+    pub fn new(addr: u8, stream_param: u32, variant: Pn2031Variant) -> Self {
+        let addr = if addr == 0 || variant == Pn2031Variant::Dth10U7 { DEFAULT_ADDR } else { addr };
+        Pn2031 { addr, stream_param, variant, cnr_last: None, ber_last: [None; 3] }
     }
 
     /// Forget the kept C/N and BER values (their measurements are restarted).
@@ -415,12 +487,18 @@ impl Pn2031 {
     /// indirect `0x71 ← E5` through `0x6D`/`0x6E` (immediate). Every register
     /// write carries one data byte, also the 24-bit words (four writes each).
     /// The configuration is fixed to [`CONFIG_IF_HZ`].
+    ///
+    /// [`Pn2031Variant::Dth10U7`] sends the configuration of the DT-H10/U7's
+    /// vendor driver instead: [`CFG_BASE_U7`] for the first batch, the same
+    /// batches up to the stream parameter, then [`CFG_WORDS_U7`], the
+    /// [`COEF_WORDS`] and [`CFG_IND_1E_U7`] last.
     pub fn configure<T: UsbControl>(&mut self, dev: &mut Device<T>) -> Result<()> {
+        let u7 = self.variant == Pn2031Variant::Dth10U7;
         self.forget_measurements();
         self.write1(dev, 0x70, 0x00)?;
         sleep(Duration::from_millis(1));
         self.write1(dev, 0x70, 0xFF)?;
-        self.batch(dev, &CFG_BASE)?;
+        self.batch(dev, if u7 { &CFG_BASE_U7 } else { &CFG_BASE })?;
         self.batch(dev, &CFG_WINDOW04_A)?;
         self.batch(dev, &CFG_WINDOW04_B)?;
         self.batch(dev, &CFG_IND_A7)?;
@@ -429,8 +507,12 @@ impl Pn2031 {
         append(dev, self.addr, &CFG_TS_HEAD)?;
         dev.i2c_batch_append(self.addr, 0x51, &[ts_select(self.stream_param)])?;
         self.batch(dev, &CFG_TS_TAIL)?;
-        self.batch(dev, &CFG_IND_1E)?;
-        self.batch(dev, &CFG_WORDS_A)?;
+        if u7 {
+            self.batch(dev, &CFG_WORDS_U7)?;
+        } else {
+            self.batch(dev, &CFG_IND_1E)?;
+            self.batch(dev, &CFG_WORDS_A)?;
+        }
         let mut words = COEF_WORDS.iter();
         for n in COEF_BATCHES {
             for &(idx, w) in words.by_ref().take(n) {
@@ -438,6 +520,9 @@ impl Pn2031 {
                 append(dev, self.addr, &[(0x28, idx), (0x29, b[1]), (0x2A, b[2]), (0x2B, b[3])])?;
             }
             dev.i2c_batch_flush()?;
+        }
+        if u7 {
+            self.batch(dev, &CFG_IND_1E_U7)?;
         }
         self.write1(dev, 0x6D, 0x71)?;
         self.write1(dev, 0x6E, 0xE5)
@@ -661,8 +746,10 @@ mod tests {
 
     #[test]
     fn default_address() {
-        assert_eq!(Pn2031::new(0, 0).addr, 0x10);
-        assert_eq!(Pn2031::new(0x12, 0).addr, 0x12);
+        assert_eq!(Pn2031::new(0, 0, Pn2031Variant::Standard).addr, 0x10);
+        assert_eq!(Pn2031::new(0x12, 0, Pn2031Variant::Standard).addr, 0x12);
+        // The DT-H10/U7's vendor driver does not look at the descriptor's address.
+        assert_eq!(Pn2031::new(0x12, 0, Pn2031Variant::Dth10U7).addr, 0x10);
     }
 
     #[test]
@@ -678,6 +765,9 @@ mod tests {
             CFG_IND_1E.len(),
             CFG_WORDS_A.len(),
             4 * COEF_BATCHES.iter().max().unwrap(),
+            CFG_BASE_U7.len(),
+            CFG_WORDS_U7.len(),
+            CFG_IND_1E_U7.len(),
         ];
         for n in biggest {
             assert!(n * 6 <= crate::device::I2C_BATCH_MAX);
