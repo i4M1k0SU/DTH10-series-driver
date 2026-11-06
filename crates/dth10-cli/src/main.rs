@@ -469,16 +469,26 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
                 sec_bytes += chunk.len() as u64;
             }
         }
-        if a.stats && last_stats.elapsed() >= Duration::from_secs(1) {
-            let dt = last_stats.elapsed().as_secs_f64();
-            eprintln!(
-                "[t+{:6.1}s] {:6.0} pkt/s {:5.2} MB/s  C/N {:5.1} dB  total {:.1} MB",
-                start.elapsed().as_secs_f64(),
-                sec_bytes as f64 / 188.0 / dt,
-                sec_bytes as f64 / 1e6 / dt,
-                tuner.signal_level(),
-                total as f64 / 1e6
-            );
+        // The status is read once a second with or without --stats: some kits
+        // follow the carrier offset and acquire the signal again after a lost
+        // lock only inside the status read.
+        if last_stats.elapsed() >= Duration::from_secs(1) {
+            let (ter, sat) = tuner.poll_status();
+            if a.stats {
+                let cnr = match ch.system {
+                    System::IsdbT => ter,
+                    System::IsdbS => sat,
+                };
+                let dt = last_stats.elapsed().as_secs_f64();
+                eprintln!(
+                    "[t+{:6.1}s] {:6.0} pkt/s {:5.2} MB/s  C/N {:5.1} dB  total {:.1} MB",
+                    start.elapsed().as_secs_f64(),
+                    sec_bytes as f64 / 188.0 / dt,
+                    sec_bytes as f64 / 1e6 / dt,
+                    cnr.unwrap_or(0.0),
+                    total as f64 / 1e6
+                );
+            }
             last_stats = Instant::now();
             sec_bytes = 0;
         }
