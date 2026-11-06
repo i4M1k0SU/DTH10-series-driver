@@ -74,8 +74,8 @@ impl<T: UsbControl> Tc90517Kit<T> {
         match self.demod.variant {
             TerVariant::Tc90517Mxl => self.tuner.init(&mut self.dev, &self.desc),
             TerVariant::SmtLj101 => self.tuner.init_lj101(&mut self.dev),
-            // Built by the TC90522 / TC90532 kits only, never by this one.
-            TerVariant::Tc9052x(_) => Err(Error::Protocol("not a TC90517 kit variant")),
+            // Built by the TC90522 / TC90532 / TC90527 kits only, never by this one.
+            TerVariant::Tc9052x(_) | TerVariant::Tc90527(_) => Err(Error::Protocol("not a TC90517 kit variant")),
         }
     }
 

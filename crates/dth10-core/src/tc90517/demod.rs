@@ -28,6 +28,10 @@ pub enum TerVariant {
     /// vendor driver: their own configuration and TS pins
     /// ([`crate::tc9052x::demod`]), the SMT_LJ101 kit's post-tune steps.
     Tc9052x(VendorDriver),
+    /// The `TC90527_*` kits ([`crate::tc90527`]) of the given vendor driver:
+    /// their own configuration and TS pins ([`crate::tc90527::demod`]), the
+    /// TC90517_MxL13xRF kit's post-tune steps.
+    Tc90527(VendorDriver),
 }
 
 /// Demodulator instance bound to an I2C address (`TunerDesc::demod_i2c_addr`).
@@ -79,6 +83,7 @@ impl Tc90517 {
             TerVariant::Tc90517Mxl => self.configure_mxl_kit(dev, desc),
             TerVariant::SmtLj101 => self.configure_lj101_kit(dev, desc),
             TerVariant::Tc9052x(driver) => crate::tc9052x::demod::configure(dev, self.addr, desc, driver),
+            TerVariant::Tc90527(driver) => crate::tc90527::demod::configure(dev, self.addr, desc, driver),
         }
     }
 
@@ -143,6 +148,7 @@ impl Tc90517 {
     /// MxL kit: mode 0 = `80/08`, 1 = `A8/A8`, 2 = `94/58`.
     /// SMT_LJ101 kit: mode 0 = `A2/08`, 1 = `AA/A8`, 2 = `A6/58`.
     /// TC90522 / TC90532 kits: [`crate::tc9052x::demod::set_ts_pins`].
+    /// TC90527 kits: [`crate::tc90527::demod::set_ts_pins`].
     pub fn set_ts_mode<T: UsbControl>(&self, dev: &mut Device<T>, mode: u8) -> Result<()> {
         let (r1e, r1f) = match (self.variant, mode) {
             (TerVariant::Tc90517Mxl, 0) => (0x80, 0x08),
@@ -152,6 +158,7 @@ impl Tc90517 {
             (TerVariant::SmtLj101, 1) => (0xAA, 0xA8),
             (TerVariant::SmtLj101, 2) => (0xA6, 0x58),
             (TerVariant::Tc9052x(_), _) => return crate::tc9052x::demod::set_ts_pins(dev, self.addr, mode),
+            (TerVariant::Tc90527(_), _) => return crate::tc90527::demod::set_ts_pins(dev, self.addr, mode),
             _ => return dev.i2c_batch_flush(),
         };
         dev.i2c_batch_append(self.addr, 0x1E, &[r1e])?;
@@ -190,14 +197,14 @@ impl Tc90517 {
         dev.i2c_batch_flush()
     }
 
-    /// Post-tune. MxL kit: `0x01 <- 40`, `0x23 &= ~1`, `0x76 <- 8F`
+    /// Post-tune. MxL and TC90527 kits: `0x01 <- 40`, `0x23 &= ~1`, `0x76 <- 8F`
     /// (batch), 20 ms, TS on. SMT_LJ101 and TC90522 / TC90532 kits: `0x01 <- 40`,
     /// `0x23 &= ~1` (immediate), 20 ms, TS on.
     pub fn post_tune<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         dev.i2c_reg_write(self.addr, 0x01, &[0x40])?;
         let v = self.read1(dev, 0x23)?;
         match self.variant {
-            TerVariant::Tc90517Mxl => {
+            TerVariant::Tc90517Mxl | TerVariant::Tc90527(_) => {
                 dev.i2c_batch_append(self.addr, 0x23, &[v & !0x01])?;
                 dev.i2c_batch_append(self.addr, 0x76, &[0x8F])?;
                 dev.i2c_batch_flush()?;
