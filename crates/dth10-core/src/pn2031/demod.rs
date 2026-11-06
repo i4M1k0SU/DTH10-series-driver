@@ -1,12 +1,14 @@
 //! PN2031 ISDB-T demodulator, as the vendor driver's `PN2031_MxL135RF` kit
 //! drives it.
 //!
-//! The chip is not identified beyond the kit name. Its register file is
-//! reached three ways, all on the demodulator's own I2C address:
+//! The register map matches the Fujitsu MB86A20S (the chip is that one or a
+//! sibling). Its register file is reached three ways, all on the
+//! demodulator's own I2C address:
 //!
 //! * direct registers (`0x08`, `0x0A`, `0x45`..`0x47`, `0x5F`..`0x6C`, ...);
 //! * an 8-bit indirect window: address in `0x50`, data in `0x51`
-//!   (and a second one for reads, address `0x6D`, data `0x6E`);
+//!   (and a second one for reads, address `0x6D`, data `0x6E`, which also
+//!   gives the decoded TMCC);
 //! * 24-bit indirect words: index in `0x28`, data bytes in `0x29`..`0x2B`;
 //!   another 8-bit window at `0x04`/`0x05`.
 //!
@@ -26,8 +28,14 @@ use crate::protocol::UsbControl;
 /// I2C address the vendor driver uses when the descriptor has none.
 pub const DEFAULT_ADDR: u8 = 0x10;
 
+/// IF the fixed configuration ([`CFG_BASE`]) is set up for: 4.000 MHz.
+pub const CONFIG_IF_HZ: i32 = 4_000_000;
+
 /// Configuration, part 1 (one batch): direct registers, the first
-/// indirect-window values and two 24-bit words.
+/// indirect-window values and two 24-bit words. The words `0x2A` ← `0x00FF80`
+/// and `0x20` ← `0x3EE08F` set the IF to [`CONFIG_IF_HZ`] at a 32.571 MHz
+/// demodulator clock; nothing in the configuration depends on the
+/// descriptor's IF.
 pub const CFG_BASE: [(u8, u8); 20] = [
     (0x08, 0x01),
     (0x73, 0x00),
@@ -257,12 +265,16 @@ pub const COEF_WORDS: [(u8, u32); 25] = [
 pub const COEF_BATCHES: [usize; 3] = [8, 8, 9];
 
 /// Raw write the tune sequence sends to the demodulator before programming
-/// the tuner (as bytes on the bus: `71 00 39 01 44 00`).
+/// the tuner (as bytes on the bus: `71 00 39 01 44 00`). These are three
+/// register/value pairs, `0x71` ← `00` (13-segment reception), `0x39` ← `01`
+/// and `0x44` ← `00` (sub-channel 0): the chip takes consecutive pairs in
+/// one write. Sent as one write, as the vendor driver does.
 pub const TUNE_RAW: [u8; 6] = [0x71, 0x00, 0x39, 0x01, 0x44, 0x00];
 
-/// Byte the configuration writes to indirect register `0xD5`: 1 when bit0 of
-/// the descriptor's stream parameter is clear, else 0 (TS output selection,
-/// meaning unconfirmed).
+/// Byte the configuration writes to indirect register `0xD5`, the TS output
+/// format (bit0: 1 = serial TS, 0 = parallel TS): 1 when bit0 of the
+/// descriptor's stream parameter is clear, else 0. Stream parameter bit0 set
+/// thus selects parallel TS output.
 pub fn ts_select(stream_param: u32) -> u8 {
     (!stream_param & 1) as u8
 }
@@ -333,7 +345,7 @@ pub fn ber_e9(err: u32) -> u32 {
     (1_000_000_000u64 * err as u64 / 1_632_000) as u32
 }
 
-/// Per-layer BER registers: `(request bit, layer-active bit of 0x60, first error-count register, counter-restart bit of 0x5F)`.
+/// Per-layer BER registers: `(request bit, measurement-done bit of 0x60, first error-count register, counter-restart bit of 0x5F)`.
 const BER_LAYERS: [(u32, u8, u8, u8); 3] =
     [(field::BER_A, 0x01, 0x64, 0x01), (field::BER_B, 0x02, 0x67, 0x02), (field::BER_C, 0x04, 0x6A, 0x04)];
 
@@ -377,6 +389,7 @@ impl Pn2031 {
     /// then twelve batches of single-byte register writes, then
     /// indirect `0x71 ← E5` through `0x6D`/`0x6E` (immediate). Every register
     /// write carries one data byte, also the 24-bit words (four writes each).
+    /// The configuration is fixed to [`CONFIG_IF_HZ`].
     pub fn configure<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         self.write1(dev, 0x70, 0x00)?;
         sleep(Duration::from_millis(1));
@@ -454,7 +467,9 @@ impl Pn2031 {
     /// * lock: `0x0A & 0x0F` ≥ 2 → [`lock::SYNC_STARTED`], ≥ 5 → [`lock::SIGNAL`],
     ///   ≥ 9 → [`lock::LOCKED`]; indirect `0x84` (window `0x6D`/`0x6E`) bit0 → 0x100;
     /// * C/N: raw `0x46`/`0x47`, then the measurement is restarted;
-    /// * BER: layer in use when its bit of `0x60` is set, else [`BER_UNUSED`];
+    /// * BER: bit n of `0x60` says the post-Viterbi measurement of layer n has
+    ///   completed; then its error count is read and its counter restarted,
+    ///   else [`BER_UNUSED`];
     /// * quality: 20 with signal, 60 when locked, then 80 / 90 / 95 above
     ///   22 / 23 / 24 dB C/N (100 instead of 95 when the sync state is 9 or more).
     pub fn status<T: UsbControl>(&self, dev: &mut Device<T>, st: &mut SignalStatus) -> Result<()> {

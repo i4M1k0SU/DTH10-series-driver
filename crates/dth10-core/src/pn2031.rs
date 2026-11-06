@@ -71,10 +71,25 @@ impl<T: UsbControl> Pn2031Kit<T> {
             return self.dev.power_down(&self.desc);
         }
         self.dev.power_up(&self.desc)?;
-        self.demod.configure(&mut self.dev)?;
+        self.configure_demod()?;
         self.tuner.init(&mut self.dev, &self.desc)?;
         self.last_request = None;
         self.tuner.standby(&mut self.dev)
+    }
+
+    /// Demodulator configuration. It is fixed to an IF of 4 MHz whatever the
+    /// descriptor says (as in the vendor driver); another IF is only warned
+    /// about, since the tuner is set up from the descriptor's IF.
+    fn configure_demod(&mut self) -> Result<()> {
+        if self.desc.if_freq_hz != demod::CONFIG_IF_HZ {
+            log::warn!(
+                "PN2031: the demodulator configuration is fixed to IF {} Hz but the descriptor gives IF {} Hz; \
+                 reception will likely fail",
+                demod::CONFIG_IF_HZ,
+                self.desc.if_freq_hz
+            );
+        }
+        self.demod.configure(&mut self.dev)
     }
 
     /// Open (reference counted).
@@ -93,7 +108,7 @@ impl<T: UsbControl> Pn2031Kit<T> {
     fn open_inner(&mut self) -> Result<()> {
         if self.desc.skip_init_config() {
             self.dev.power_up(&self.desc)?;
-            self.demod.configure(&mut self.dev)?;
+            self.configure_demod()?;
             self.tuner.init(&mut self.dev, &self.desc)?;
             self.last_request = None;
         } else {
