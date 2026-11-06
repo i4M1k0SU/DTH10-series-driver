@@ -14,6 +14,7 @@
 //! * [`terrestrial`] – the kit of tuner #0 by kit name: [`tc90517`], [`sharp8011`], [`pn2031`], [`bq200x`], [`lgdt3305`]
 //! * [`lj101`]     – ISDB-S kit `SMT_LJ101` hw 0x402 (tuner/filter #1): TC90517 satellite side + PLL tuner
 //! * [`sharp8011`] – ISDB-T / ISDB-S kits `SHARP_8011` hw 0x102 / 0x402: TC90517 + the module's PLL tuners
+//! * [`satellite`] – the kit of the satellite tuner by kit name and hw version: [`lj101`], [`sharp8011`]
 //! * [`events`]    – interrupt-endpoint event notifications
 //! * [`cepm`]      – link encryption of the original stream mode (AES-CTR + ECDH handshake, docs/22)
 
@@ -30,6 +31,7 @@ pub mod pn2031;
 pub mod protocol;
 #[cfg(test)]
 mod regmock;
+pub mod satellite;
 pub mod sharp8011;
 pub mod tc90517;
 pub mod terrestrial;
