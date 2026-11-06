@@ -140,7 +140,42 @@ struct Unit {
     /// The last C/N read of each system, answered to a status request while
     /// the tuner is busy with a tune (a tune can take seconds; a client's
     /// signal-level poll must not wait for it).
-    cnr: Mutex<(Option<f32>, Option<f32>)>,
+    cnr: Mutex<Cnr>,
+    /// Stream requests tuning the unit now (a status reply says `busy` then;
+    /// the tuner is also locked briefly by the periodic status read).
+    tuning: AtomicUsize,
+}
+
+/// The C/N of each system as last read, and when the status was last read.
+#[derive(Default)]
+struct Cnr {
+    ter: Option<f32>,
+    sat: Option<f32>,
+    /// The last full status read (a client's status request or the periodic read).
+    read: Option<Instant>,
+}
+
+impl Cnr {
+    fn set(&mut self, system: System, cnr: Option<f32>) {
+        match system {
+            System::IsdbT => self.ter = cnr,
+            System::IsdbS => self.sat = cnr,
+        }
+    }
+}
+
+/// How often the status of a unit that streams is read. Some kits follow the
+/// carrier offset and acquire the signal again after a lost lock only inside
+/// the status read (as in the vendor driver, whose application keeps reading
+/// it during playback), so it is read with or without a client asking.
+const STATUS_POLL: Duration = Duration::from_secs(1);
+/// How often the periodic read looks at the units.
+const STATUS_TICK: Duration = Duration::from_millis(250);
+
+/// Whether the periodic read is due: a stream runs and no read (a client's
+/// status request counts) happened within [`STATUS_POLL`].
+fn status_due(streaming: bool, last_read: Option<Instant>, now: Instant) -> bool {
+    streaming && last_read.is_none_or(|t| now.saturating_duration_since(t) >= STATUS_POLL)
 }
 
 #[derive(Default)]
@@ -292,18 +327,20 @@ fn serve_status(conn: &Conn, id: u64, unit: &Unit) {
             // seconds with a device in trouble, and a client polls this often.
             None => Reply::Ok(Status { ter: None, sat: None, holders, busy: false }.to_info(&unit.serial)),
             Some(t) => {
-                let cnr = |t: &mut Tuner, system: System| {
-                    if t.current_of(system).is_some() { Some(t.signal_level_of(system)) } else { None }
-                };
-                let (ter, sat) = (cnr(t, System::IsdbT), cnr(t, System::IsdbS));
-                *unit.cnr.locked() = (ter, sat);
+                let (ter, sat) = t.poll_status();
+                *unit.cnr.locked() = Cnr { ter, sat, read: Some(Instant::now()) };
                 Reply::Ok(Status { ter, sat, holders, busy: false }.to_info(&unit.serial))
             }
         },
         Err(std::sync::TryLockError::WouldBlock) => {
-            // A tune is in progress: answer with the last values rather than wait.
-            let (ter, sat) = *unit.cnr.locked();
-            Reply::Ok(Status { ter, sat, holders, busy: true }.to_info(&unit.serial))
+            // A tune (or a stream's start or end, or the periodic status read)
+            // is in progress: answer with the last values rather than wait.
+            let (ter, sat) = {
+                let c = unit.cnr.locked();
+                (c.ter, c.sat)
+            };
+            let busy = unit.tuning.load(Ordering::Relaxed) > 0;
+            Reply::Ok(Status { ter, sat, holders, busy }.to_info(&unit.serial))
         }
         Err(std::sync::TryLockError::Poisoned(p)) => {
             drop(p.into_inner());
@@ -377,6 +414,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
     }
 
     let t0 = Instant::now();
+    unit.tuning.fetch_add(1, Ordering::Relaxed);
     let tuned: Result<f32, String> = {
         let mut guard = unit.tuner.locked();
         unit.open(&mut guard).and_then(|()| {
@@ -414,13 +452,10 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
             }
         })
     };
+    unit.tuning.fetch_sub(1, Ordering::Relaxed);
     let cnr = match tuned {
         Ok(cnr) => {
-            let mut c = unit.cnr.locked();
-            match system {
-                System::IsdbT => c.0 = Some(cnr),
-                System::IsdbS => c.1 = Some(cnr),
-            }
+            unit.cnr.locked().set(system, Some(cnr));
             cnr
         }
         Err(e) => {
@@ -529,11 +564,32 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         } else if let Some(t) = guard.as_mut() {
             t.release(system);
         }
-        let mut c = unit.cnr.locked();
-        match system {
-            System::IsdbT => c.0 = None,
-            System::IsdbS => c.1 = None,
+        unit.cnr.locked().set(system, None);
+    }
+}
+
+/// Read the status of every unit that streams about once a second (see
+/// [`STATUS_POLL`]), until `quit` is set or the daemon stops. A unit whose
+/// tuner is busy (a tune, a stream start or end, a client's status request)
+/// is skipped this round; the lock is held only for the read itself, so a
+/// tune never waits for this. A failed read is logged at debug level only.
+fn poll_status(units: &Units, quit: &AtomicBool) {
+    while !quit.load(Ordering::Relaxed) && !stop::stopping() {
+        let list: Vec<Arc<Unit>> = units.locked().clone();
+        for u in &list {
+            let streaming = u.slots.iter().any(|s| s.locked().owner != 0);
+            if !status_due(streaming, u.cnr.locked().read, Instant::now()) {
+                continue;
+            }
+            let Ok(mut guard) = u.tuner.try_lock() else { continue };
+            if let Some(t) = guard.as_mut() {
+                let (ter, sat) = t.poll_status();
+                // Stored under the tuner lock: a stream's end clears its value
+                // under the same lock, after this.
+                *u.cnr.locked() = Cnr { ter, sat, read: Some(Instant::now()) };
+            }
         }
+        std::thread::sleep(STATUS_TICK);
     }
 }
 
@@ -603,7 +659,8 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             queues: [TsQueue::new(), TsQueue::new()],
             tuner: Mutex::new(None),
             slots: [Mutex::new(Slot::default()), Mutex::new(Slot::default())],
-            cnr: Mutex::new((None, None)),
+            cnr: Mutex::new(Cnr::default()),
+            tuning: AtomicUsize::new(0),
         })
     };
     let units: Units = Arc::new(Mutex::new(Vec::new()));
@@ -637,6 +694,11 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     }
     let activity = Arc::new(Activity { active: AtomicUsize::new(0), last_end: Mutex::new(Instant::now()) });
     let next_id = AtomicU64::new(1);
+    let quit = Arc::new(AtomicBool::new(false));
+    let poller = {
+        let (units, quit) = (units.clone(), quit.clone());
+        std::thread::spawn(move || poll_status(&units, &quit))
+    };
     let mut threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut last_scan = Instant::now();
     while !stop::stopping() {
@@ -683,6 +745,8 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    quit.store(true, Ordering::Relaxed);
+    let _ = poller.join();
     for t in threads {
         let _ = t.join();
     }
@@ -732,5 +796,23 @@ mod tests {
         // the same client changing channel replaces its own stream even with busy=fail
         assert_eq!(claim(&held(3, Some("a")), true, Some("a")), Claim::Replace);
         assert_eq!(claim(&held(3, Some("a")), false, Some("a")), Claim::Replace);
+    }
+
+    #[test]
+    fn status_read_schedule() {
+        let now = Instant::now();
+        let ago = |ms: u64| now.checked_sub(Duration::from_millis(ms));
+        // nothing streams: never read, however old the last read
+        assert!(!status_due(false, None, now));
+        assert!(!status_due(false, ago(60_000), now));
+        // a stream runs: read when nothing was read yet or the last read is a second old
+        assert!(status_due(true, None, now));
+        assert!(status_due(true, ago(1000), now));
+        assert!(status_due(true, ago(5000), now));
+        // a read (a client's status request) less than a second ago: not yet
+        assert!(!status_due(true, ago(999), now));
+        assert!(!status_due(true, Some(now), now));
+        // a read stamped after `now` (taken by another thread meanwhile): not due
+        assert!(!status_due(true, Some(now + Duration::from_millis(10)), now));
     }
 }
