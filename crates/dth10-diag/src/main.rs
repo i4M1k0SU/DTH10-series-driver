@@ -642,7 +642,7 @@ fn tune(o: &Opener, a: &TuneArgs) -> Res {
     let dev = Device::new(t);
     let di = dev.read_device_information()?;
     print_desc(0, &di.desc);
-    let mut kit = TerrestrialKit::new(dev, di.desc).map_err(|e| unverified_kit_error(pid, 0, e))?;
+    let mut kit = TerrestrialKit::new(dev, di.desc, pid).map_err(|e| unverified_kit_error(pid, 0, e))?;
     kit.init()?;
     if !a.no_start {
         kit.dev().start()?; // wValue 0 / wIndex 0x10, after the kit Init (the original driver's order)
@@ -842,7 +842,7 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
     print_desc(1, &info1.desc);
     // The original driver and `dth10` initialise both kits, then send the
     // device start; the terrestrial kit stays in standby here.
-    match TerrestrialKit::new(dev0, info0.desc.clone()) {
+    match TerrestrialKit::new(dev0, info0.desc.clone(), t.product_id()) {
         Ok(mut ter) => {
             if let Err(e) = ter.init() {
                 eprintln!("warning: terrestrial kit Init: {e}");
@@ -927,7 +927,7 @@ fn scan(o: &Opener, first: u32, last: u32, wait_ms: u64) -> Res {
     let dev = Device::new(t);
     let di = dev.read_device_information()?;
     print_desc(0, &di.desc);
-    let mut kit = TerrestrialKit::new(dev, di.desc).map_err(|e| unverified_kit_error(pid, 0, e))?;
+    let mut kit = TerrestrialKit::new(dev, di.desc, pid).map_err(|e| unverified_kit_error(pid, 0, e))?;
     kit.init()?;
     kit.dev().start()?;
     kit.open()?;

@@ -598,7 +598,7 @@ impl Tuner {
                     );
                     let i2c_path = if info1.desc.flags & 0x4 != 0 { 0 } else { 1 };
                     let i2c_dev = Device::new(transport.clone()).with_tuner_index(i2c_path);
-                    match TerrestrialKit::new(i2c_dev, info1.desc.clone()) {
+                    match TerrestrialKit::new(i2c_dev, info1.desc.clone(), pid) {
                         Ok(kit) => {
                             let endpoint = pipes.ts1.map(|(ep, _)| ep).unwrap_or(0x82);
                             log::info!(
@@ -668,8 +668,8 @@ impl Tuner {
             None
         };
 
-        let mut terrestrial =
-            TerrestrialKit::new(dev0, info0.desc.clone()).map_err(|e| dth10_core::unverified_kit_error(pid, 0, e))?;
+        let mut terrestrial = TerrestrialKit::new(dev0, info0.desc.clone(), pid)
+            .map_err(|e| dth10_core::unverified_kit_error(pid, 0, e))?;
         terrestrial.init()?;
         log::info!("terrestrial kit ({}) init done {:?}", terrestrial.kind(), t_start.elapsed());
         // The original driver initialises both kits at start-up, in order, and
@@ -699,11 +699,11 @@ impl Tuner {
         // As in the original driver, the device start (wValue 0 / wIndex 0x10) comes
         // after kit Init, followed by each kit's power-down when its desc flags bit5 is set.
         terrestrial.dev().start()?;
-        if info0.desc.skip_init_config() {
+        if terrestrial.skips_init_config() {
             terrestrial.dev().power_down(&info0.desc)?;
         }
         if let Some(ter1) = second.as_mut()
-            && ter1.info.desc.skip_init_config()
+            && ter1.kit.skips_init_config()
             && let Err(e) = ter1.kit.dev().power_down(&ter1.info.desc)
         {
             log::warn!("second terrestrial kit power-down after the device start: {e}");
