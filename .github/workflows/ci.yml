@@ -18,7 +18,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate version and release tag
         id: version
         env:
@@ -40,7 +40,7 @@ jobs:
             packages: --workspace
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
@@ -88,7 +88,7 @@ jobs:
             packages: -p dth10-cli -p dth10-diag
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
@@ -122,7 +122,7 @@ jobs:
       RUN_ID: ${{ github.run_id }}
       PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download distribution archives
         run: gh run download "$RUN_ID" --pattern 'release-*' --dir artifacts
       - name: Verify completeness and generate SHA-256 checksums
