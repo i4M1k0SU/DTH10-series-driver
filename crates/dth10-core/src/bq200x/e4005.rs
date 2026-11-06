@@ -590,6 +590,28 @@ mod tests {
         assert_eq!(band(400_000), (5, 0));
         assert_eq!(band(1_500_000), (4, 0));
         assert_eq!(band(468_000), (-1, 0));
+        // Edges as in the vendor driver; 135–388 MHz is band 3 (UHF code), there is no band 2.
+        assert_eq!(band(44_000), (1, 0));
+        assert_eq!(band(130_000), (1, 0));
+        assert_eq!(band(130_001), (-1, 0));
+        assert_eq!(band(135_000), (3, 0));
+        assert_eq!(band(388_000), (3, 0));
+        assert_eq!(band(388_001), (-1, 0));
+        assert_eq!(band(393_000), (5, 0));
+        assert_eq!(band(466_000), (5, 0));
+        assert_eq!(band(470_000), (3, 1));
+        assert_eq!(band(600_000), (3, 1));
+        assert_eq!(band(600_001), (3, 2));
+        assert_eq!(band(900_000), (3, 4));
+        assert_eq!(band(900_001), (-1, 0));
+        assert_eq!(band(1_452_000), (4, 0));
+        assert_eq!(band(1_680_000), (4, 0));
+        assert_eq!(band(1_680_001), (-1, 0));
+        // 3-phase mixing (divider table 1) only for band 1.
+        assert_eq!(divider_sel(100_000), 1);
+        assert_eq!(divider_sel(200_000), 0);
+        assert_eq!(divider_sel(400_000), 0);
+        assert_eq!(divider_sel(50_000_000), -1);
     }
 
     #[test]
@@ -599,6 +621,11 @@ mod tests {
         assert_eq!(divider(100_000, 1), Some((5, 32)));
         assert_eq!(divider(1_000_000, 0), Some((0, 2)));
         assert_eq!(divider(50_000, 0), None);
+        // Band 1 below 55 MHz has no divider; band 5 uses the ×8 divider.
+        assert_eq!(divider(50_000, 1), None);
+        assert_eq!(divider(55_000, 1), Some((7, 48)));
+        assert_eq!(divider(400_000, 0), Some((3, 8)));
+        assert_eq!(divider(200_000, 0), Some((5, 16)));
         for code in 0..8u8 {
             assert_eq!(multiplier_from_code(code, 0), [2, 4, 6, 8, 12, 16, 20, 24][code as usize]);
         }
@@ -622,6 +649,11 @@ mod tests {
         assert_eq!(track_index(560_000, 3), 8);
         assert_eq!(track_index(470_000, 3), 5);
         assert_eq!(track_index(990_000, 3), 15);
+        // Band 5 reads the next row's first column (268/299 MHz): always 15.
+        assert_eq!(track_index(393_000, 5), 15);
+        assert_eq!(track_index(466_000, 5), 15);
+        // Band 1 column: 268 MHz from index 1 on, ties keep the later index.
+        assert_eq!(track_index(100_000, 1), 1);
     }
 
     #[test]
@@ -641,5 +673,15 @@ mod tests {
         assert_eq!(harmonic_band(547_000, 6000), 0x0D);
         // 557 MHz is above it.
         assert_eq!(harmonic_band(557_142, 6000), 0);
+        // Exactly on the edge (d = 0) and one bandwidth below it (d = B) still count.
+        assert_eq!(harmonic_band(550_000, 6000), 0x0D);
+        assert_eq!(harmonic_band(544_000, 6000), 0x0D);
+        assert_eq!(harmonic_band(543_000, 6000), 0);
+        // Band codes by frequency: 86 MHz → edge 89 (t 3), div 2, 44.5 → bits 4:3 = 0b01, VHF2 code.
+        assert_eq!(harmonic_band(86_000, 6000), 0x09);
+        // 200 MHz → edge 204 (t 7), div 4, 51 → bits 4:3 = 0b10, VHF3 code (< 460 MHz).
+        assert_eq!(harmonic_band(200_000, 6000), 0x13);
+        // 890 MHz → edge 895 (t 31), div 16, 55.9 → bits 4:3 = 0b10, L code (≥ 868 MHz).
+        assert_eq!(harmonic_band(890_000, 6000), 0x17);
     }
 }
