@@ -2,6 +2,8 @@
 
 BUFFALO DTH10 シリーズ ユーザーモード実装
 
+[![CI](https://github.com/i4M1k0SU/DTH10-series-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/i4M1k0SU/DTH10-series-driver/actions/workflows/ci.yml)
+
 ## 対象機種
 
 | 型番 | PID | 発売時期 | 受信 | 検証 |
