@@ -11,11 +11,12 @@
 //! * [`device`]    – [`device::Device`]: GPIO, I2C (raw / register / batch), stream control, PID filter
 //! * [`kit`]       – what every kit shares: tune request, signal status, lock / field bits, vendor driver
 //! * [`tc90517`] + [`mxl13xrf`] – ISDB-T kit `TC90517_MxL13xRF` / `SMT_LJ101` hw 0x102 (tuner/filter #0)
-//! * [`terrestrial`] – the kit of tuner #0 by kit name: [`tc90517`], [`sharp8011`], [`tc9052x`], [`pn2031`], [`bq200x`], [`lgdt3305`]
+//! * [`terrestrial`] – the kit of tuner #0 by kit name: [`tc90517`], [`sharp8011`], [`tc9052x`], [`tc90527`], [`pn2031`], [`bq200x`], [`lgdt3305`]
 //! * [`lj101`]     – ISDB-S kit `SMT_LJ101` hw 0x402 (tuner/filter #1): TC90517 satellite side + PLL tuner
 //! * [`sharp8011`] – ISDB-T / ISDB-S kits `SHARP_8011` hw 0x102 / 0x402: TC90517 + the module's PLL tuners
 //! * [`tc9052x`]   – ISDB-T / ISDB-S kits `TC90522_*` / `TC90532_*` hw 0x102 / 0x402: TC90517-class demodulator + tuner
-//! * [`fc5500`], [`mtv808`] – the terrestrial tuners of those kits
+//! * [`tc90527`]   – ISDB-T kits `TC90527_FC5500` / `TC90527_MTV808`: TC90527 demodulator + tuner
+//! * [`fc5500`], [`mtv808`] – the terrestrial tuners of the TC9052x and TC90527 kits
 //! * [`satellite`] – the kit of the satellite tuner by kit name and hw version: [`lj101`], [`sharp8011`], [`tc9052x`]
 //! * [`events`]    – interrupt-endpoint event notifications
 //! * [`ts_slot`]   – where the TS packet sits in each 256-byte slot of the bulk pipe
@@ -39,6 +40,7 @@ mod regmock;
 pub mod satellite;
 pub mod sharp8011;
 pub mod tc90517;
+pub mod tc90527;
 pub mod tc9052x;
 pub mod terrestrial;
 pub mod tlv;
