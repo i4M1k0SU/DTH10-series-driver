@@ -17,6 +17,9 @@
 //!
 //! The vendor driver also calls a per-model tune hook first, which only acts
 //! on model "f200" (as in the TC90517 kit); it is not reproduced here.
+//!
+//! The DT-H10/U7 has a vendor driver of its own, which sets the kit up
+//! differently ([`Pn2031Variant::Dth10U7`]).
 
 pub mod demod;
 pub mod tuner;
@@ -24,17 +27,45 @@ pub mod tuner;
 pub use demod::{Pn2031, ber_e9, cnr_mdb_from_raw, cnr_tenth_db_from_raw};
 pub use tuner::Pn2031Tuner;
 
+use core::time::Duration;
+use std::thread::sleep;
+
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::kit::{SignalStatus, TuneRequest, field};
 use crate::protocol::UsbControl;
 use crate::tlv::TunerDesc;
 
+/// Which vendor driver's register sequences the kit sends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Pn2031Variant {
+    /// The vendor driver of the series (every model but the DT-H10/U7).
+    #[default]
+    Standard,
+    /// The DT-H10/U7's own vendor driver: an earlier demodulator configuration
+    /// ([`demod::CFG_BASE_U7`], [`demod::CFG_WORDS_U7`],
+    /// [`demod::CFG_IND_1E_U7`]) and MxL init table
+    /// ([`crate::mxl13xrf::init_registers_u7`]); the demodulator always at
+    /// 0x10 and the tuner always behind its gate (the descriptor's address
+    /// and flags bit3 are not looked at); flags bit5 not looked at either
+    /// (Init always powers up and configures); the power-up enables GPIO
+    /// masks A and B only; Open and Close do not write GPIO mask C.
+    Dth10U7,
+}
+
+impl Pn2031Variant {
+    /// The variant of the model with USB product ID `pid`.
+    pub fn for_product(pid: u16) -> Self {
+        if pid == crate::PID_DTH10_U7 { Pn2031Variant::Dth10U7 } else { Pn2031Variant::Standard }
+    }
+}
+
 pub struct Pn2031Kit<T: UsbControl> {
     pub dev: Device<T>,
     pub desc: TunerDesc,
     pub demod: Pn2031,
     pub tuner: Pn2031Tuner,
+    pub variant: Pn2031Variant,
     open_count: u32,
     last_request: Option<TuneRequest>,
 }
@@ -45,32 +76,58 @@ impl<T: UsbControl> Pn2031Kit<T> {
     /// The demodulator address defaults to 0x10 when the descriptor has none.
     /// The tuner is reached through the demodulator's I2C gate unless
     /// `flags` bit3 says it sits directly on the bridge bus.
-    pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
+    /// [`Pn2031Variant::Dth10U7`]: demodulator at 0x10, tuner behind the gate.
+    pub fn new(dev: Device<T>, desc: TunerDesc, variant: Pn2031Variant) -> Result<Self> {
         if desc.kit_name != "PN2031_MxL135RF" {
             return Err(Error::Unsupported(format!(
                 "terrestrial tuner kit {} hw 0x{:x} is not a PN2031 kit",
                 desc.kit_name, desc.hw_version
             )));
         }
-        let demod = Pn2031::new(desc.demod_i2c_addr, desc.stream_param);
-        let gate = if desc.tuner_direct_i2c() { None } else { Some(demod.addr) };
+        let demod = Pn2031::new(desc.demod_i2c_addr, desc.stream_param, variant);
+        let direct = variant == Pn2031Variant::Standard && desc.tuner_direct_i2c();
+        let gate = if direct { None } else { Some(demod.addr) };
         Ok(Pn2031Kit {
-            tuner: Pn2031Tuner::new(desc.tuner_i2c_addr, gate),
+            tuner: Pn2031Tuner::new(desc.tuner_i2c_addr, gate, variant),
             demod,
             dev,
             desc,
+            variant,
             open_count: 0,
             last_request: None,
         })
     }
 
+    /// Whether Init leaves power-up and configuration to Open (descriptor
+    /// `flags` bit5; never with [`Pn2031Variant::Dth10U7`]).
+    pub fn skips_init_config(&self) -> bool {
+        self.variant == Pn2031Variant::Standard && self.desc.skip_init_config()
+    }
+
+    /// GPIO power-up: [`Device::power_up`]; [`Pn2031Variant::Dth10U7`]
+    /// enables masks A and B only (not C), with the same order and delays.
+    fn power_up(&self) -> Result<()> {
+        if self.variant == Pn2031Variant::Standard {
+            return self.dev.power_up(&self.desc);
+        }
+        let (a, b) = (self.desc.gpio_mask_a, self.desc.gpio_mask_b);
+        self.dev.gpio_enable(a | b)?;
+        self.dev.gpio_clear_bits(a | b)?;
+        sleep(Duration::from_millis(2));
+        self.dev.gpio_set_bits(a)?;
+        sleep(Duration::from_millis(15));
+        self.dev.gpio_set_bits(b)?;
+        sleep(Duration::from_millis(10));
+        Ok(())
+    }
+
     /// Init: power-up, demodulator configuration, tuner init, tuner standby.
     /// With `flags` bit5 set: power-down only.
     pub fn init(&mut self) -> Result<()> {
-        if self.desc.skip_init_config() {
+        if self.skips_init_config() {
             return self.dev.power_down(&self.desc);
         }
-        self.dev.power_up(&self.desc)?;
+        self.power_up()?;
         self.configure_demod()?;
         self.tuner.init(&mut self.dev, &self.desc)?;
         self.last_request = None;
@@ -106,13 +163,16 @@ impl<T: UsbControl> Pn2031Kit<T> {
     }
 
     fn open_inner(&mut self) -> Result<()> {
-        if self.desc.skip_init_config() {
+        if self.skips_init_config() {
             self.dev.power_up(&self.desc)?;
             self.configure_demod()?;
             self.tuner.init(&mut self.dev, &self.desc)?;
             self.last_request = None;
         } else {
             self.tuner.wake(&mut self.dev)?;
+        }
+        if self.variant == Pn2031Variant::Dth10U7 {
+            return Ok(());
         }
         self.dev.gpio_write(self.desc.gpio_mask_c, self.desc.gpio_c_open)
     }
@@ -125,6 +185,9 @@ impl<T: UsbControl> Pn2031Kit<T> {
         self.open_count -= 1;
         if self.open_count != 0 {
             return Ok(());
+        }
+        if self.variant == Pn2031Variant::Dth10U7 {
+            return self.tuner.standby(&mut self.dev);
         }
         self.dev.gpio_write(self.desc.gpio_mask_c, self.desc.gpio_c_close)?;
         if self.desc.skip_init_config() { self.dev.power_down(&self.desc) } else { self.tuner.standby(&mut self.dev) }
@@ -245,7 +308,11 @@ mod tests {
     }
 
     fn kit_with(regs: HashMap<(u16, u16), u8>, d: TunerDesc) -> Pn2031Kit<Mock> {
-        Pn2031Kit::new(Device::new(Mock { regs: RefCell::new(regs), ..Default::default() }), d).unwrap()
+        kit_variant(regs, d, Pn2031Variant::Standard)
+    }
+
+    fn kit_variant(regs: HashMap<(u16, u16), u8>, d: TunerDesc, v: Pn2031Variant) -> Pn2031Kit<Mock> {
+        Pn2031Kit::new(Device::new(Mock { regs: RefCell::new(regs), ..Default::default() }), d, v).unwrap()
     }
 
     fn take_log(k: &Pn2031Kit<Mock>) -> Vec<Call> {
@@ -289,7 +356,7 @@ mod tests {
     #[test]
     fn rejects_other_kits() {
         let d = TunerDesc { kit_name: "TC90517_MxL135RF".into(), ..desc() };
-        assert!(Pn2031Kit::new(Device::new(Mock::default()), d).is_err());
+        assert!(Pn2031Kit::new(Device::new(Mock::default()), d, Pn2031Variant::Standard).is_err());
     }
 
     #[test]
@@ -434,6 +501,149 @@ mod tests {
         k.close().unwrap();
         assert!(!k.is_open());
         assert_eq!(take_log(&k), vec![gpio(0x1006, 0x4, 0x0), gate(), tuner_w(&[0x01, 0x00, 0x0F, 0x00])]);
+    }
+
+    /// Every configuration batch of the DT-H10/U7 variant, in order.
+    fn u7_config_batches(stream_param_bit0: bool) -> Vec<Call> {
+        let mut ts = demod::CFG_TS_HEAD.to_vec();
+        ts.push((0x51, if stream_param_bit0 { 0x00 } else { 0x01 }));
+        ts.extend(demod::CFG_TS_TAIL);
+        let mut v = vec![
+            batch(&[
+                (0x08, 0x01),
+                (0x09, 0x1A),
+                (0x50, 0xD1),
+                (0x51, 0x22),
+                (0x71, 0x00),
+                (0x28, 0x2A),
+                (0x29, 0x00),
+                (0x2A, 0xFF),
+                (0x2B, 0x80),
+                (0x3B, 0x21),
+                (0x3C, 0x3A),
+                (0x28, 0x20),
+                (0x29, 0x3E),
+                (0x2A, 0xE0),
+                (0x2B, 0x8F),
+            ]),
+            batch(&demod::CFG_WINDOW04_A),
+            batch(&demod::CFG_WINDOW04_B),
+            batch(&demod::CFG_IND_A7),
+            batch(&demod::CFG_IND_DC),
+            batch(&demod::CFG_IND_B0),
+            batch(&ts),
+            batch(&[
+                (0x3B, 0x21),
+                (0x3C, 0x38),
+                (0x28, 0x74),
+                (0x29, 0x00),
+                (0x2A, 0x00),
+                (0x2B, 0xFF),
+                (0x28, 0x46),
+                (0x29, 0x00),
+                (0x2A, 0x1A),
+                (0x2B, 0x0C),
+                (0x04, 0x40),
+                (0x05, 0x00),
+                (0x28, 0x00),
+                (0x2B, 0x08),
+                (0x28, 0x05),
+                (0x2B, 0x00),
+                (0x1C, 0x01),
+            ]),
+        ];
+        let mut words = demod::COEF_WORDS.iter();
+        for n in demod::COEF_BATCHES {
+            let pairs: Vec<(u8, u8)> = words
+                .by_ref()
+                .take(n)
+                .flat_map(|&(i, w)| [(0x28, i), (0x29, (w >> 16) as u8), (0x2A, (w >> 8) as u8), (0x2B, w as u8)])
+                .collect();
+            v.push(batch(&pairs));
+        }
+        v.push(batch(&[
+            (0x50, 0x1E),
+            (0x51, 0x5D),
+            (0x50, 0x22),
+            (0x51, 0x00),
+            (0x50, 0x23),
+            (0x51, 0xC8),
+            (0x50, 0x24),
+            (0x51, 0x00),
+            (0x50, 0x25),
+            (0x51, 0xF0),
+            (0x50, 0x26),
+            (0x51, 0x00),
+            (0x50, 0x27),
+            (0x51, 0xC4),
+            (0x50, 0x39),
+            (0x51, 0x02),
+        ]));
+        v
+    }
+
+    #[test]
+    fn u7_init_sequence() {
+        // The DT-H10/U7 variant ignores the descriptor's demodulator address,
+        // flags bit3 (direct tuner) and bit5 (skip init), and GPIO mask C.
+        let d = TunerDesc { demod_i2c_addr: 0x12, flags: 0x28, ..desc() };
+        let mut k = kit_variant(HashMap::new(), d, Pn2031Variant::Dth10U7);
+        assert_eq!(k.demod.addr, DEMOD);
+        assert!(!k.skips_init_config());
+        k.init().unwrap();
+        let log = take_log(&k);
+
+        // Power-up: enable A|B only, clear A|B, set A, set B.
+        let mut expect =
+            vec![gpio(0x1004, 0x3, 0x3), gpio(0x1006, 0x3, 0), gpio(0x1006, 0x1, 0x1), gpio(0x1006, 0x2, 0x2)];
+        expect.extend([w(0x70, 0x00), w(0x70, 0xFF)]);
+        expect.extend(u7_config_batches(false));
+        expect.extend([w(0x6D, 0x71), w(0x6E, 0xE5)]);
+        // MxL: soft reset, the 19-pair table (patched: IF 4 MHz, crystal 24 MHz,
+        // clock output off), standby; each through the gate.
+        expect.extend([gate(), tuner_w(&[0xFF]), gate()]);
+        expect.push(tuner_w(&[
+            0x04, 0x00, 0x02, 0x00, 0x03, 0x40, 0x05, 0x04, 0x06, 0x10, 0x07, 0x0A, 0x08, 0x80, 0x2E, 0x15, 0x30, 0x10,
+            0x45, 0x58, 0x48, 0x19, 0x52, 0x03, 0x53, 0x44, 0x6A, 0x4B, 0x76, 0x00, 0x78, 0x18, 0x7A, 0x17, 0x85, 0x06,
+            0x01, 0x01,
+        ]));
+        expect.extend([gate(), tuner_w(&[0x01, 0x00, 0x0F, 0x00])]);
+        assert_eq!(log, expect);
+    }
+
+    #[test]
+    fn u7_stream_param_selects_d5() {
+        let d = TunerDesc { stream_param: 0x1, ..desc() };
+        let mut k = kit_variant(HashMap::new(), d, Pn2031Variant::Dth10U7);
+        k.init().unwrap();
+        let batches: Vec<Call> = take_log(&k).into_iter().filter(|c| c.1 == 0x2B00).collect();
+        assert_eq!(batches, u7_config_batches(true));
+    }
+
+    #[test]
+    fn u7_open_tune_close_sequence() {
+        let mut regs = HashMap::new();
+        regs.insert((REG, 0x45), 0x9A);
+        let mut k = kit_variant(regs, desc(), Pn2031Variant::Dth10U7);
+        // Open and Close only wake / put the tuner to standby (no GPIO).
+        k.open().unwrap();
+        assert_eq!(take_log(&k), vec![gate(), tuner_w(&[0x01, 0x01])]);
+        // Tune: the same sequence as the standard variant.
+        k.tune(&TuneRequest::isdb_t(557_142_857, 6_000_000)).unwrap();
+        let log = take_log(&k);
+        assert_eq!(log[0], w(0x08, 0x01));
+        assert_eq!(log[1], (true, RAW_DEMOD, 0x30, vec![0x71, 0x00, 0x39, 0x01, 0x44, 0x00]));
+        assert_eq!(log[3].3[..8], [0x0F, 0x00, 0x0C, 0x15, 0x0D, 0x49, 0x0E, 0x8B]);
+        assert_eq!(*log.last().unwrap(), w(0x51, 0x00));
+        k.close().unwrap();
+        assert_eq!(take_log(&k), vec![gate(), tuner_w(&[0x01, 0x00, 0x0F, 0x00])]);
+    }
+
+    #[test]
+    fn variant_by_product() {
+        assert_eq!(Pn2031Variant::for_product(0x017B), Pn2031Variant::Dth10U7);
+        assert_eq!(Pn2031Variant::for_product(0x015F), Pn2031Variant::Standard);
+        assert_eq!(Pn2031Variant::for_product(0x0199), Pn2031Variant::Standard);
     }
 
     #[test]

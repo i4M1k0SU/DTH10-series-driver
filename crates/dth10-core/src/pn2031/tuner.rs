@@ -14,6 +14,7 @@
 use core::time::Duration;
 use std::thread::sleep;
 
+use super::Pn2031Variant;
 use crate::device::Device;
 use crate::error::Result;
 use crate::mxl13xrf::{self, Mxl13xRf, MxlType};
@@ -33,6 +34,8 @@ pub struct Pn2031Tuner {
     pub mxl: Mxl13xRf,
     /// Demodulator address of the I2C gate; `None` = tuner directly on the bus.
     pub gate: Option<u8>,
+    /// Which init table [`Pn2031Tuner::init`] sends.
+    pub variant: Pn2031Variant,
 }
 
 fn flatten(pairs: &[(u8, u8)]) -> Vec<u8> {
@@ -40,8 +43,9 @@ fn flatten(pairs: &[(u8, u8)]) -> Vec<u8> {
 }
 
 impl Pn2031Tuner {
-    pub fn new(tuner_addr: u8, gate: Option<u8>) -> Self {
-        Pn2031Tuner { mxl: Mxl13xRf::new(TunerBus { tuner_addr, path: TunerPath::Direct }, MxlType::MxL135RF), gate }
+    pub fn new(tuner_addr: u8, gate: Option<u8>, variant: Pn2031Variant) -> Self {
+        let mxl = Mxl13xRf::new(TunerBus { tuner_addr, path: TunerPath::Direct }, MxlType::MxL135RF);
+        Pn2031Tuner { mxl, gate, variant }
     }
 
     fn open_gate<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
@@ -71,8 +75,15 @@ impl Pn2031Tuner {
         Ok(b[0])
     }
 
-    /// Init: soft reset `0xFF`, then the descriptor-patched init table in one write.
+    /// Init: soft reset `0xFF`, then the descriptor-patched init table in one
+    /// write ([`Pn2031Variant::Dth10U7`]: the table of the DT-H10/U7's vendor
+    /// driver, [`mxl13xrf::init_registers_u7`]).
     pub fn init<T: UsbControl>(&self, dev: &mut Device<T>, desc: &TunerDesc) -> Result<()> {
+        if self.variant == Pn2031Variant::Dth10U7 {
+            let regs = mxl13xrf::init_registers_u7(desc);
+            self.write(dev, &[0xFF])?;
+            return self.write(dev, &flatten(&regs));
+        }
         if self.gate.is_none() {
             return self.mxl.init(dev, desc);
         }

@@ -60,8 +60,11 @@ impl<T: UsbControl> SatelliteKit<T> {
         Which::of::<T>(desc).is_some()
     }
 
-    /// The kit for `desc` (the descriptor of the tuner it drives).
-    pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
+    /// The kit for `desc` (the descriptor of the tuner it drives) on the
+    /// model with USB product ID `pid` (as [`TerrestrialKit::new`](crate::terrestrial::TerrestrialKit::new);
+    /// no satellite kit depends on the model yet).
+    pub fn new(dev: Device<T>, desc: TunerDesc, pid: u16) -> Result<Self> {
+        let _ = pid;
         Ok(match Which::of::<T>(&desc) {
             Some(Which::Lj101) => SatelliteKit::Lj101(Lj101Kit::new(dev, desc)?),
             Some(Which::Sharp8011) => SatelliteKit::Sharp8011(Sharp8011SatKit::new(dev, desc)?),
@@ -169,7 +172,7 @@ mod tests {
             ("", 0x402, None),
         ] {
             let d = desc(name, hw);
-            let kit = SatelliteKit::new(Device::new(RegMock::default()), d.clone());
+            let kit = SatelliteKit::new(Device::new(RegMock::default()), d.clone(), 0x0199);
             assert_eq!(kit.as_ref().ok().map(|k| k.kind()), kind, "{name} hw 0x{hw:x}");
             assert_eq!(SatelliteKit::<RegMock>::supports(&d), kind.is_some(), "{name} hw 0x{hw:x}");
             if kind.is_none() {
@@ -192,7 +195,7 @@ mod tests {
 
     #[test]
     fn dispatch_reaches_the_kit() {
-        let mut k = SatelliteKit::new(Device::new(RegMock::default()), desc("SHARP_8011", 0x402)).unwrap();
+        let mut k = SatelliteKit::new(Device::new(RegMock::default()), desc("SHARP_8011", 0x402), 0x0199).unwrap();
         assert!(!k.is_open());
         assert!(k.tune(1_049_480_000).is_err(), "not open");
         k.open().unwrap();

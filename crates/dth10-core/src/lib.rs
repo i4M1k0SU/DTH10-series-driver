@@ -16,6 +16,7 @@
 //! * [`sharp8011`] – ISDB-T / ISDB-S kits `SHARP_8011` hw 0x102 / 0x402: TC90517 + the module's PLL tuners
 //! * [`satellite`] – the kit of the satellite tuner by kit name and hw version: [`lj101`], [`sharp8011`]
 //! * [`events`]    – interrupt-endpoint event notifications
+//! * [`ts_slot`]   – where the TS packet sits in each 256-byte slot of the bulk pipe
 //! * [`cepm`]      – link encryption of the original stream mode (AES-CTR + ECDH handshake, docs/22)
 
 pub mod bq200x;
@@ -36,6 +37,7 @@ pub mod sharp8011;
 pub mod tc90517;
 pub mod terrestrial;
 pub mod tlv;
+pub mod ts_slot;
 pub mod tuner_bus;
 
 pub use device::{Device, StreamMode};
@@ -64,15 +66,28 @@ pub const SUPPORTED_PIDS: &[(u16, &str)] = &[
     (0x0200, "DT-H70B/PCIE"),
     (0x0202, "DT-F120/U2"),
     (0x0218, "DT-H30/PCIEM-TS"),
+    (PID_DTH10_U7, "DT-H10/U7"),
 ];
+
+/// USB product ID of the DT-H10/U7, the Windows 7 Media Center model of the
+/// DT-H10 (unverified, see [`UNVERIFIED_PIDS`]). Its own vendor driver speaks
+/// the same control protocol, but its firmware puts the TS packets into the
+/// bulk slots differently ([`ts_slot::SlotLayout::Split`]), and it reports the
+/// `PN2031_MxL135RF` kit, which that driver sets up with its own register
+/// sequences ([`pn2031::Pn2031Variant::Dth10U7`]). Its firmware has no card
+/// status query (`0xCBDA`/`0xBCAC`), no GPIO status read (`0x1010`) and no
+/// antenna (LNB) supply; nothing on the open / tune / stream path sends them.
+pub const PID_DTH10_U7: u16 = 0x017B;
 
 /// Supported product IDs that are not in the vendor driver's INF this
 /// implementation follows and that have not been checked on a unit: the
 /// successor models, listed in the INFs of newer vendor drivers (0x01FF,
 /// 0x0200 and 0x0202 in the 5.1.9.33 one of the series, 0x0218 in the
 /// separate DT-H30/PCIEM-TS driver 5.1.9.46). Their boards may report a
-/// tuner kit that is not implemented here.
-pub const UNVERIFIED_PIDS: &[u16] = &[0x01FF, 0x0200, 0x0202, 0x0218];
+/// tuner kit that is not implemented here. And the DT-H10/U7
+/// ([`PID_DTH10_U7`]), which has a vendor driver of its own and a different
+/// TS slot layout.
+pub const UNVERIFIED_PIDS: &[u16] = &[0x01FF, 0x0200, 0x0202, 0x0218, PID_DTH10_U7];
 
 /// Returns the marketing name for a supported product ID.
 pub fn product_name(pid: u16) -> Option<&'static str> {
@@ -143,6 +158,13 @@ mod tests {
         assert_eq!(product_label(0x0202), "DT-F120/U2 (unverified model)");
         assert_eq!(product_label(0x0200), "DT-H70B/PCIE (unverified model)");
         assert_eq!(product_label(0x0218), "DT-H30/PCIEM-TS (unverified model)");
+    }
+
+    #[test]
+    fn dth10_u7_is_supported_but_unverified() {
+        assert_eq!(product_name(0x017B), Some("DT-H10/U7"));
+        assert!(is_unverified(0x017B));
+        assert_eq!(product_label(0x017B), "DT-H10/U7 (unverified model)");
     }
 
     #[test]

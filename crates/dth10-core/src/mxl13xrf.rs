@@ -183,6 +183,86 @@ pub fn init_registers(desc: &TunerDesc) -> Result<[(u8, u8); 22]> {
     Ok(t)
 }
 
+/// Initialisation table of the DT-H10/U7's vendor driver (19 register pairs):
+/// [`INIT_TABLE`] without `0x09`..`0x0B` = `0x3F`.
+pub const INIT_TABLE_U7: [(u8, u8); 19] = [
+    (0x04, 0x00),
+    (0x02, 0x00),
+    (0x03, 0x08),
+    (0x05, 0x00),
+    (0x06, 0x10),
+    (0x07, 0x0A),
+    (0x08, 0x80),
+    (0x2E, 0x15),
+    (0x30, 0x10),
+    (0x45, 0x58),
+    (0x48, 0x19),
+    (0x52, 0x03),
+    (0x53, 0x44),
+    (0x6A, 0x4B),
+    (0x76, 0x00),
+    (0x78, 0x18),
+    (0x7A, 0x17),
+    (0x85, 0x06),
+    (0x01, 0x01),
+];
+
+/// The patched [`INIT_TABLE_U7`], as the DT-H10/U7's vendor driver builds it.
+/// The steps of [`init_registers`] with these differences: the IF patch
+/// knows 4 and 44 MHz only (any other IF, 0 included, leaves the IF code
+/// alone), the crystal patch 16 and 24 MHz only, and reg 0x03 bit3 (clock
+/// output, set in the table) is cleared only when neither option bit0 nor
+/// descriptor flags bit0 is set.
+pub fn init_registers_u7(desc: &TunerDesc) -> [(u8, u8); 19] {
+    let mut t = INIT_TABLE_U7;
+    let p = desc.present;
+    if p & 0x1 != 0 {
+        match desc.hw_version {
+            0x101 => patch(&mut t, 0x06, |v| (v & 0xF2) | 0x12),
+            0x102 => patch(&mut t, 0x06, |v| (v & 0xF0) | 0x10),
+            _ => {}
+        }
+    }
+    if p & 0x4000 != 0 {
+        let inv = desc.if_freq_hz < 0;
+        match desc.if_freq_hz.unsigned_abs() {
+            4_000_000 => patch(&mut t, 0x02, |v| v & 0xF0),
+            44_000_000 => patch(&mut t, 0x02, |v| (v & 0xFB) | 0x0B),
+            _ => {}
+        }
+        if inv {
+            patch(&mut t, 0x02, |v| v | 0x10);
+        } else {
+            patch(&mut t, 0x02, |v| v & !0x10);
+        }
+    }
+    if p & 0x2000 != 0 {
+        match desc.tuner_xtal_hz {
+            16_000_000 => {
+                patch(&mut t, 0x03, |v| v & 0x0F);
+                patch(&mut t, 0x05, |v| v & 0xF0);
+            }
+            24_000_000 => {
+                patch(&mut t, 0x03, |v| (v & 0x0F) | 0x40);
+                patch(&mut t, 0x05, |v| (v & 0xF4) | 0x04);
+            }
+            _ => {}
+        }
+    }
+    let flags0 = desc.flags & 0x1 != 0;
+    if desc.tuner_opts & 0x1 == 0 && !flags0 {
+        patch(&mut t, 0x03, |v| v & !0x08);
+    }
+    let b = (desc.tuner_opts & 0x2 != 0) || flags0;
+    patch(&mut t, 0x04, |v| (v & !0x01) | b as u8);
+    if desc.tuner_opts & 0x4 != 0 {
+        patch(&mut t, 0x08, |v| v & !0x80);
+    } else {
+        patch(&mut t, 0x08, |v| v | 0x80);
+    }
+    t
+}
+
 /// 10.6 fixed-point MHz frequency word (identical to Linux).
 pub fn rf_tune_word(freq_hz: u32) -> u16 {
     let mut dig = freq_hz / 1_000_000;
@@ -350,6 +430,54 @@ mod tests {
         assert_eq!(get(0x06), 0x10);
         assert_eq!(get(0x08), 0x80);
         assert_eq!(flatten(&regs).len(), 44);
+    }
+
+    #[test]
+    fn init_u7_table_pinned() {
+        // No descriptor values: only reg 0x03 bit3 (cleared) and reg 0x08 bit7 (set) change.
+        let regs = init_registers_u7(&TunerDesc::default());
+        assert_eq!(
+            flatten(&regs),
+            vec![
+                0x04, 0x00, 0x02, 0x00, 0x03, 0x00, 0x05, 0x00, 0x06, 0x10, 0x07, 0x0A, 0x08, 0x80, 0x2E, 0x15, 0x30,
+                0x10, 0x45, 0x58, 0x48, 0x19, 0x52, 0x03, 0x53, 0x44, 0x6A, 0x4B, 0x76, 0x00, 0x78, 0x18, 0x7A, 0x17,
+                0x85, 0x06, 0x01, 0x01
+            ]
+        );
+    }
+
+    #[test]
+    fn init_u7_patches() {
+        let get = |regs: &[(u8, u8)], r: u8| regs.iter().find(|p| p.0 == r).unwrap().1;
+        let desc = TunerDesc {
+            present: 0x1 | 0x4000 | 0x2000,
+            hw_version: 0x101,
+            if_freq_hz: -4_000_000,
+            tuner_xtal_hz: 24_000_000,
+            tuner_opts: 0x1,
+            ..Default::default()
+        };
+        let regs = init_registers_u7(&desc);
+        assert_eq!(get(&regs, 0x06), 0x12);
+        assert_eq!(get(&regs, 0x02), 0x10);
+        assert_eq!(get(&regs, 0x03), 0x48);
+        assert_eq!(get(&regs, 0x05), 0x04);
+        // 44 MHz, not inverted; flags bit0 keeps the clock output and sets 0x04 bit0.
+        let d = TunerDesc { if_freq_hz: 44_000_000, tuner_opts: 0x4, flags: 0x1, ..desc.clone() };
+        let regs = init_registers_u7(&d);
+        assert_eq!(get(&regs, 0x02), 0x0B);
+        assert_eq!(get(&regs, 0x03), 0x48);
+        assert_eq!(get(&regs, 0x04), 0x01);
+        assert_eq!(get(&regs, 0x08), 0x00);
+        // 6 MHz and 0 Hz IF, 27 / 32 MHz crystal: unknown to this table, no error.
+        for (if_hz, xtal) in [(6_000_000, 27_000_000), (0, 32_000_000), (5_000_000, 16_000_000)] {
+            let d = TunerDesc { if_freq_hz: if_hz, tuner_xtal_hz: xtal, tuner_opts: 0, ..desc.clone() };
+            let regs = init_registers_u7(&d);
+            assert_eq!(get(&regs, 0x02), 0x00, "IF {if_hz}");
+            assert_eq!(get(&regs, 0x03), 0x00, "crystal {xtal}");
+            assert_eq!(get(&regs, 0x05), 0x00, "crystal {xtal}");
+        }
+        assert_eq!(flatten(&init_registers_u7(&desc)).len(), 38);
     }
 
     #[test]

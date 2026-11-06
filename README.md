@@ -2,12 +2,15 @@
 
 BUFFALO DTH10 シリーズ ユーザーモード実装
 
+[![CI](https://github.com/i4M1k0SU/DTH10-series-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/i4M1k0SU/DTH10-series-driver/actions/workflows/ci.yml)
+
 ## 対象機種
 
 | 型番 | PID | 発売時期 | 受信 | 検証 |
 |---|---|---|---|:-:|
 | DT-H10/U2 | `0x015F` | 2009-06 | 地上 | - |
 | DT-H10/PCI | `0x016B` | 2009-06 | 地上 | - |
+| DT-H10/U7 | `0x017B` | - | 地上 | - |
 | DT-H33/U2 | `0x017C` | 2009-11 | 地上 | - |
 | DT-H33/PCI | `0x017D` | 2009-11 | 地上 | - |
 | DT-F100/U2 | `0x0186` | 2009-12 | 地上 | ✅ |

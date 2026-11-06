@@ -80,7 +80,7 @@ pub mod cmd {
     pub const SYS_GPIO_ENABLE: u16 = 0x1004;
     /// wIndex: GPIO output, payload `{0, mask, value}` (u32 LE ×3).
     pub const SYS_GPIO_SET: u16 = 0x1006;
-    /// wIndex: GPIO/status read (IN 16).
+    /// wIndex: GPIO/status read (IN 16). Not in every firmware (the DT-H10/U7 has none).
     pub const SYS_GPIO_READ: u16 = 0x1010;
 
     /// wValue: I2C batch write (wIndex 0), payload = concatenated batch entries.
@@ -100,7 +100,7 @@ pub mod cmd {
     pub const CBDA_STREAM_CTRL: u16 = 0x0002;
     /// wIndex: PID filter table (OUT 12 + 4n).
     pub const CBDA_PID_FILTER: u16 = 0x1000;
-    /// wIndex: capability/status query (IN 12).
+    /// wIndex: capability/status query (IN 12). Not in every firmware (the DT-H10/U7 has none).
     pub const CBDA_QUERY_BCAC: u16 = 0xBCAC;
     /// wIndex: fallback for the capability/status query (IN 4, flags 0x40).
     pub const CBDA_QUERY_CACD: u16 = 0xCACD;

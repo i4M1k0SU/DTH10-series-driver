@@ -34,6 +34,7 @@ use dth10_core::cepm;
 use dth10_core::kit::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
 use dth10_core::satellite::SatelliteKit;
 use dth10_core::terrestrial::TerrestrialKit;
+use dth10_core::ts_slot::{self, SlotLayout};
 use dth10_core::{Device, StreamMode, TunerDesc, unverified_kit_error};
 use dth10_tuner::channels::uhf_center_hz;
 use dth10_tuner::config::parse_num;
@@ -641,7 +642,7 @@ fn tune(o: &Opener, a: &TuneArgs) -> Res {
     let dev = Device::new(t);
     let di = dev.read_device_information()?;
     print_desc(0, &di.desc);
-    let mut kit = TerrestrialKit::new(dev, di.desc).map_err(|e| unverified_kit_error(pid, 0, e))?;
+    let mut kit = TerrestrialKit::new(dev, di.desc, pid).map_err(|e| unverified_kit_error(pid, 0, e))?;
     kit.init()?;
     if !a.no_start {
         kit.dev().start()?; // wValue 0 / wIndex 0x10, after the kit Init (the original driver's order)
@@ -718,7 +719,8 @@ fn capture(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs, file: &
             kit.dev().stream_enable_mode(&desc, StreamMode::RawFullTs)?
         }
     }
-    let r = capture_loop(&mut reader, &mut f, a.seconds, a.blocks);
+    let layout = SlotLayout::for_product(kit.dev().transport().product_id());
+    let r = capture_loop(&mut reader, &mut f, a.seconds, a.blocks, layout);
     reader.stop();
     let disabled = kit.dev().stream_disable();
     let (total, transfers) = r?;
@@ -727,7 +729,13 @@ fn capture(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs, file: &
     Ok(())
 }
 
-fn capture_loop(reader: &mut StreamReader, out: &mut impl Write, seconds: u64, blocks: bool) -> Res<(u64, u64)> {
+fn capture_loop(
+    reader: &mut StreamReader,
+    out: &mut impl Write,
+    seconds: u64,
+    blocks: bool,
+    layout: SlotLayout,
+) -> Res<(u64, u64)> {
     let start = Instant::now();
     let (mut total, mut transfers) = (0u64, 0u64);
     let mut sec = PacketStats::default();
@@ -740,13 +748,15 @@ fn capture_loop(reader: &mut StreamReader, out: &mut impl Write, seconds: u64, b
                     out.write_all(&data)?;
                     total += data.len() as u64;
                 }
-                // 256-byte blocks, the first 188 bytes are the TS packet (docs/21).
-                for blk in data.as_chunks::<256>().0 {
+                // 256-byte blocks with one TS packet each, placed as the model's layout says.
+                let mut scratch = [0u8; ts_slot::TS_PACKET];
+                for blk in data.as_chunks::<{ ts_slot::SLOT }>().0 {
+                    let pkt = layout.packet(blk, &mut scratch);
                     if !blocks {
-                        out.write_all(&blk[..188])?;
-                        total += 188;
+                        out.write_all(pkt)?;
+                        total += pkt.len() as u64;
                     }
-                    sec.note(&blk[..188]);
+                    sec.note(pkt);
                 }
             }
             Ok(None) => eprint!("."),
@@ -832,7 +842,7 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
     print_desc(1, &info1.desc);
     // The original driver and `dth10` initialise both kits, then send the
     // device start; the terrestrial kit stays in standby here.
-    match TerrestrialKit::new(dev0, info0.desc.clone()) {
+    match TerrestrialKit::new(dev0, info0.desc.clone(), t.product_id()) {
         Ok(mut ter) => {
             if let Err(e) = ter.init() {
                 eprintln!("warning: terrestrial kit Init: {e}");
@@ -840,8 +850,9 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
         }
         Err(e) => eprintln!("warning: terrestrial kit: {}", unverified_kit_error(t.product_id(), 0, e)),
     }
-    let mut kit = SatelliteKit::new(Device::new(t.clone()).with_tuner_index(a.i2c_tuner), info1.desc.clone())
-        .map_err(|e| unverified_kit_error(t.product_id(), 1, e))?;
+    let mut kit =
+        SatelliteKit::new(Device::new(t.clone()).with_tuner_index(a.i2c_tuner), info1.desc.clone(), t.product_id())
+            .map_err(|e| unverified_kit_error(t.product_id(), 1, e))?;
     println!("satellite kit ({}): I2C/GPIO via the tuner #{} path", kit.kind(), a.i2c_tuner);
     kit.init()?;
     if !a.no_start {
@@ -917,7 +928,7 @@ fn scan(o: &Opener, first: u32, last: u32, wait_ms: u64) -> Res {
     let dev = Device::new(t);
     let di = dev.read_device_information()?;
     print_desc(0, &di.desc);
-    let mut kit = TerrestrialKit::new(dev, di.desc).map_err(|e| unverified_kit_error(pid, 0, e))?;
+    let mut kit = TerrestrialKit::new(dev, di.desc, pid).map_err(|e| unverified_kit_error(pid, 0, e))?;
     kit.init()?;
     kit.dev().start()?;
     kit.open()?;
