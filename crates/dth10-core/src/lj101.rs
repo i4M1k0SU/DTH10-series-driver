@@ -153,14 +153,15 @@ impl<T: UsbControl> Lj101Kit<T> {
         Ok(st)
     }
 
-    /// Antenna (LNB) power: for model "h70" the bridge GPIO supply (0 / 110 /
-    /// 150 = off / 11 V / 15 V); no effect on other models, as in the vendor
-    /// driver. Returns whether the bridge reported the supply as healthy
+    /// Antenna (LNB) power: for models "h70" / "h70b" the bridge GPIO supply
+    /// (0 / 110 / 150 = off / 11 V / 15 V, bits by model, see
+    /// [`LnbGpio`](device::LnbGpio)); no effect on other models, as in the
+    /// vendor driver. Returns whether the bridge reported the supply as healthy
     /// (`false` = switched off again by the over-current check, see
     /// `device::lnb_set`). The booster is a separate switch ([`set_booster`](Self::set_booster)).
     pub fn lnb_power(&mut self, volt: u32) -> Result<bool> {
-        if self.desc.model_is("h70") {
-            return device::lnb_set(&self.dev, volt);
+        if let Some(gpio) = device::LnbGpio::of(&self.desc) {
+            return device::lnb_set(&self.dev, gpio, volt);
         }
         Ok(true)
     }
@@ -229,11 +230,13 @@ mod tests {
         assert!(k.lnb_power(150).unwrap());
         assert!(k.lnb_power(0).unwrap());
         assert_eq!(k.dev.transport().take(), vec![]);
-        // model "h70": the bridge GPIO only, no I2C
-        let mut k = kit("h70", &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0x0A)]);
-        let _ = k.lnb_power(150).unwrap();
-        let ops = k.dev.transport().take();
-        assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, Op::Other)), "{ops:?}");
-        assert_eq!(k.dev.transport().reg(0x19, 0x1C), 0x0A);
+        // models "h70" / "h70b": the bridge GPIO only, no I2C
+        for model in ["h70", "h70b"] {
+            let mut k = kit(model, &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0x0A)]);
+            let _ = k.lnb_power(150).unwrap();
+            let ops = k.dev.transport().take();
+            assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, Op::Other)), "{model}: {ops:?}");
+            assert_eq!(k.dev.transport().reg(0x19, 0x1C), 0x0A);
+        }
     }
 }
