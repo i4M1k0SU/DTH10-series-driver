@@ -34,6 +34,7 @@ use dth10_core::cepm;
 use dth10_core::kit::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
 use dth10_core::lj101::Lj101Kit;
 use dth10_core::terrestrial::TerrestrialKit;
+use dth10_core::ts_slot::{self, SlotLayout};
 use dth10_core::{Device, StreamMode, TunerDesc, unverified_kit_error};
 use dth10_tuner::channels::uhf_center_hz;
 use dth10_tuner::config::parse_num;
@@ -718,7 +719,8 @@ fn capture(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs, file: &
             kit.dev().stream_enable_mode(&desc, StreamMode::RawFullTs)?
         }
     }
-    let r = capture_loop(&mut reader, &mut f, a.seconds, a.blocks);
+    let layout = SlotLayout::for_product(kit.dev().transport().product_id());
+    let r = capture_loop(&mut reader, &mut f, a.seconds, a.blocks, layout);
     reader.stop();
     let disabled = kit.dev().stream_disable();
     let (total, transfers) = r?;
@@ -727,7 +729,13 @@ fn capture(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs, file: &
     Ok(())
 }
 
-fn capture_loop(reader: &mut StreamReader, out: &mut impl Write, seconds: u64, blocks: bool) -> Res<(u64, u64)> {
+fn capture_loop(
+    reader: &mut StreamReader,
+    out: &mut impl Write,
+    seconds: u64,
+    blocks: bool,
+    layout: SlotLayout,
+) -> Res<(u64, u64)> {
     let start = Instant::now();
     let (mut total, mut transfers) = (0u64, 0u64);
     let mut sec = PacketStats::default();
@@ -740,13 +748,15 @@ fn capture_loop(reader: &mut StreamReader, out: &mut impl Write, seconds: u64, b
                     out.write_all(&data)?;
                     total += data.len() as u64;
                 }
-                // 256-byte blocks, the first 188 bytes are the TS packet (docs/21).
-                for blk in data.as_chunks::<256>().0 {
+                // 256-byte blocks with one TS packet each, placed as the model's layout says.
+                let mut scratch = [0u8; ts_slot::TS_PACKET];
+                for blk in data.as_chunks::<{ ts_slot::SLOT }>().0 {
+                    let pkt = layout.packet(blk, &mut scratch);
                     if !blocks {
-                        out.write_all(&blk[..188])?;
-                        total += 188;
+                        out.write_all(pkt)?;
+                        total += pkt.len() as u64;
                     }
-                    sec.note(&blk[..188]);
+                    sec.note(pkt);
                 }
             }
             Ok(None) => eprint!("."),

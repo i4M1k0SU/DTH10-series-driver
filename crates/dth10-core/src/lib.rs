@@ -14,6 +14,7 @@
 //! * [`terrestrial`] – the kit of tuner #0 by kit name: [`tc90517`], [`pn2031`], [`bq200x`], [`lgdt3305`]
 //! * [`lj101`]     – ISDB-S kit `SMT_LJ101` hw 0x402 (tuner/filter #1): TC90517 satellite side + PLL tuner
 //! * [`events`]    – interrupt-endpoint event notifications
+//! * [`ts_slot`]   – where the TS packet sits in each 256-byte slot of the bulk pipe
 //! * [`cepm`]      – link encryption of the original stream mode (AES-CTR + ECDH handshake, docs/22)
 
 pub mod bq200x;
@@ -32,6 +33,7 @@ mod regmock;
 pub mod tc90517;
 pub mod terrestrial;
 pub mod tlv;
+pub mod ts_slot;
 pub mod tuner_bus;
 
 pub use device::{Device, StreamMode};
@@ -58,14 +60,27 @@ pub const SUPPORTED_PIDS: &[(u16, &str)] = &[
     (0x01DB, "DT-F200/U2W"),
     (0x01FF, "DT-H71/U2"),
     (0x0202, "DT-F120/U2"),
+    (PID_DTH10_U7, "DT-H10/U7"),
 ];
+
+/// USB product ID of the DT-H10/U7, the Windows 7 Media Center model of the
+/// DT-H10 (unverified, see [`UNVERIFIED_PIDS`]). Its own vendor driver speaks
+/// the same control protocol, but its firmware puts the TS packets into the
+/// bulk slots differently ([`ts_slot::SlotLayout::Split`]), and it reports the
+/// `PN2031_MxL135RF` kit, which that driver sets up with its own register
+/// sequences ([`pn2031::Pn2031Variant::Dth10U7`]). Its firmware has no card
+/// status query (`0xCBDA`/`0xBCAC`), no GPIO status read (`0x1010`) and no
+/// antenna (LNB) supply; nothing on the open / tune / stream path sends them.
+pub const PID_DTH10_U7: u16 = 0x017B;
 
 /// Supported product IDs that are not in the vendor driver's INF this
 /// implementation follows and that have not been checked on a unit: the
 /// successor models, which the vendor application handles exactly like the
-/// rest of the series but which need a newer vendor driver. Their boards may
-/// report a tuner kit that is not implemented here.
-pub const UNVERIFIED_PIDS: &[u16] = &[0x01FF, 0x0202];
+/// rest of the series but which need a newer vendor driver (their boards may
+/// report a tuner kit that is not implemented here), and the DT-H10/U7
+/// ([`PID_DTH10_U7`]), which has a vendor driver of its own and a different
+/// TS slot layout.
+pub const UNVERIFIED_PIDS: &[u16] = &[0x01FF, 0x0202, PID_DTH10_U7];
 
 /// Returns the marketing name for a supported product ID.
 pub fn product_name(pid: u16) -> Option<&'static str> {
@@ -132,6 +147,13 @@ mod tests {
         assert!(is_unverified(0x01FF) && is_unverified(0x0202));
         assert_eq!(product_label(0x01FF), "DT-H71/U2 (unverified model)");
         assert_eq!(product_label(0x0202), "DT-F120/U2 (unverified model)");
+    }
+
+    #[test]
+    fn dth10_u7_is_supported_but_unverified() {
+        assert_eq!(product_name(0x017B), Some("DT-H10/U7"));
+        assert!(is_unverified(0x017B));
+        assert_eq!(product_label(0x017B), "DT-H10/U7 (unverified model)");
     }
 
     #[test]
