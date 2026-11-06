@@ -99,6 +99,30 @@ impl TuneRequest {
     }
 }
 
+/// USB product ID of the DT-H30/PCIEM-TS, the one model of the separate
+/// vendor driver that [`VendorDriver::Dth30`] follows.
+pub const PID_DTH30_PCIEM_TS: u16 = 0x0218;
+
+/// Which vendor driver a kit follows where the newer drivers differ: the
+/// series driver (5.1.9.33, whose INF lists every model of the series up to
+/// the DT-H71/U2, DT-H70B/PCIE and DT-F120/U2) or the DT-H30/PCIEM-TS's own
+/// (5.1.9.46). The kits that only the latter knows always follow it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VendorDriver {
+    /// The series driver 5.1.9.33.
+    #[default]
+    Series,
+    /// The DT-H30/PCIEM-TS driver 5.1.9.46.
+    Dth30,
+}
+
+impl VendorDriver {
+    /// The driver of the model with USB product ID `pid`.
+    pub fn for_product(pid: u16) -> Self {
+        if pid == PID_DTH30_PCIEM_TS { VendorDriver::Dth30 } else { VendorDriver::Series }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +135,13 @@ mod tests {
         assert_eq!(&b[0..4], &473_142_857u32.to_le_bytes());
         assert_eq!(&b[8..12], &6_000_000u32.to_le_bytes());
         assert_eq!(b[16], 7);
+    }
+
+    #[test]
+    fn vendor_driver_by_product() {
+        assert_eq!(VendorDriver::for_product(PID_DTH30_PCIEM_TS), VendorDriver::Dth30);
+        for pid in [0x0199, 0x01FF, 0x0200, 0x0202, 0x017B] {
+            assert_eq!(VendorDriver::for_product(pid), VendorDriver::Series, "{pid:#06x}");
+        }
     }
 }
