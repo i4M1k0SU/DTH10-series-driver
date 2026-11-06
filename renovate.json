@@ -4,7 +4,7 @@
     "config:recommended",
     ":semanticCommits",
     "helpers:pinGitHubActionDigestsToSemver"
-  ]
+  ],
   "timezone": "Asia/Tokyo",
   "labels": ["renovate"],
   "rangeStrategy": "bump",
