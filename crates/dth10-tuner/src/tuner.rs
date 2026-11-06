@@ -1267,6 +1267,22 @@ impl Tuner {
         }
     }
 
+    /// Read the demodulator status of every system tuned to a channel and
+    /// return its C/N in dB (terrestrial, satellite; `None` for a system
+    /// without a channel, 0.0 when the read failed). Meant to be called about
+    /// once a second while streaming, as the vendor application does: some
+    /// kits follow the carrier offset and acquire the signal again after a
+    /// lost lock only inside the status read.
+    pub fn poll_status(&mut self) -> (Option<f32>, Option<f32>) {
+        let cnr = |t: &mut Self, system: System| t.current_of(system).is_some().then(|| t.signal_level_of(system));
+        let (ter, sat) = (cnr(self, System::IsdbT), cnr(self, System::IsdbS));
+        if ter.is_some() || sat.is_some() {
+            let show = |c: Option<f32>| c.map_or_else(|| "-".to_owned(), |c| format!("{c:.1} dB"));
+            log::debug!("status: C/N ISDB-T {}, ISDB-S {}", show(ter), show(sat));
+        }
+        (ter, sat)
+    }
+
     /// Full signal status of the last tuned system's demodulator.
     pub fn status(&mut self) -> Result<SignalStatus> {
         match self.last {
