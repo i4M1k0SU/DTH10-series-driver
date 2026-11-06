@@ -33,17 +33,22 @@ pub struct Tc90517 {
     pub variant: TerVariant,
 }
 
+/// Highest C/N the newer vendor drivers report for this demodulator [0.001 dB].
+const CNR_MAX_MDB: i32 = 35_000;
+
 /// C/N in 0.001 dB from the 24-bit raw value of register 0x8B.
 ///
 /// `X = log10(5505024 / cndat)`, `cnr = 240X⁴ − 1600X³ + 3900X² + 5491X + 3097.5`
-/// (the original uses 8.24 fixed point; this float version matches within 1 mdB).
+/// (the original uses 8.24 fixed point; this float version matches within 1 mdB),
+/// capped at 35 dB as the newer vendor drivers do. The result falls as the raw
+/// value grows and is still about 1.5 dB at 0xFFFFFF, so it is never negative.
 pub fn cnr_mdb_from_raw(cndat: u32) -> i32 {
     if cndat == 0 {
         return 0;
     }
     let x = (5_505_024.0f64 / cndat as f64).log10();
     let v = 240.0 * x.powi(4) - 1600.0 * x.powi(3) + 3900.0 * x.powi(2) + 5491.0 * x + 3097.5;
-    v.trunc() as i32
+    (v.trunc() as i32).min(CNR_MAX_MDB)
 }
 
 /// BER ×1e-9 from an error count and a period in 204-byte packets.
@@ -317,11 +322,32 @@ mod tests {
 
     #[test]
     fn cnr_matches_reference_table() {
-        for (raw, expect) in [(1000u32, 41453i32), (10000, 28044), (40000, 22049), (100000, 18237), (5505024, 3097)] {
+        for (raw, expect) in [(10000u32, 28044i32), (40000, 22049), (100000, 18237), (5505024, 3097)] {
             let got = cnr_mdb_from_raw(raw);
             assert!((got - expect).abs() <= 1, "raw {raw}: got {got}, expected {expect}");
         }
         assert_eq!(cnr_mdb_from_raw(0), 0);
+    }
+
+    #[test]
+    fn cnr_is_capped_at_35_db() {
+        // 41.453 dB by the formula
+        assert_eq!(cnr_mdb_from_raw(1000), CNR_MAX_MDB);
+        assert_eq!(cnr_mdb_from_raw(1), CNR_MAX_MDB);
+        // the formula crosses 35 dB between these two
+        assert_eq!(cnr_mdb_from_raw(2600), CNR_MAX_MDB);
+        assert_eq!(cnr_mdb_from_raw(2601), 34998);
+    }
+
+    #[test]
+    fn cnr_falls_with_the_raw_value_and_stays_positive() {
+        let mut last = cnr_mdb_from_raw(1);
+        for raw in (1..=0xFF_FFFFu32).step_by(4099).chain([0xFF_FFFF]) {
+            let got = cnr_mdb_from_raw(raw);
+            assert!(got <= last && got > 0, "raw {raw:#x}: {got} after {last}");
+            last = got;
+        }
+        assert!((1500..1600).contains(&last), "{last}");
     }
 
     #[test]
