@@ -142,6 +142,7 @@ pub struct UsbTransport {
     recipient: Recipient,
     index_fix: bool,
     serial: Option<String>,
+    product_id: u16,
     /// Shared by every clone of the transport: see [`UsbControl::hold`].
     hold: std::sync::Arc<CommandHold>,
 }
@@ -181,7 +182,8 @@ fn is_supported(vid: u16, pid: u16) -> bool {
 }
 
 impl UsbTransport {
-    /// Enumerate supported devices (VID 0x0411 and a PID from the INF) through
+    /// Enumerate supported devices (VID 0x0411 and a PID of
+    /// [`dth10_core::SUPPORTED_PIDS`], unverified models included) through
     /// the OS (sysfs on Linux).
     pub fn list() -> Result<Vec<nusb::DeviceInfo>> {
         let it = nusb::list_devices().wait().map_err(map_io)?;
@@ -250,12 +252,13 @@ impl UsbTransport {
         }
         // Detaching is a no-op on Windows; on Linux it frees interface 0 from a
         // kernel driver that may have bound to it.
+        let product_id = device.device_descriptor().product_id();
         let iface = device.detach_and_claim_interface(0).wait().map_err(map_io)?;
         let recipient = match mode {
             RecipientMode::Interface => Recipient::Interface,
             RecipientMode::Device => Recipient::Device,
         };
-        Ok(UsbTransport { device, iface, recipient, index_fix: false, serial, hold: Default::default() })
+        Ok(UsbTransport { device, iface, recipient, index_fix: false, serial, product_id, hold: Default::default() })
     }
 
     /// Open the first supported device found.
@@ -288,6 +291,11 @@ impl UsbTransport {
     /// The device's USB serial number string, when it has one.
     pub fn serial(&self) -> Option<&str> {
         self.serial.as_deref()
+    }
+
+    /// The device's USB product ID.
+    pub fn product_id(&self) -> u16 {
+        self.product_id
     }
 
     pub fn pipes(&self) -> PipeMap {
@@ -545,4 +553,19 @@ impl EventReader {
 /// Allocate a plain buffer (helper for one-off transfers).
 pub fn buffer(len: usize) -> Buffer {
     Buffer::new(len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_supported;
+
+    #[test]
+    fn supported_ids() {
+        assert!(is_supported(0x0411, 0x0199));
+        // The successor models are listed too, as unverified models.
+        assert!(is_supported(0x0411, 0x01FF));
+        assert!(is_supported(0x0411, 0x0202));
+        assert!(!is_supported(0x0411, 0x0200));
+        assert!(!is_supported(0x0412, 0x0199));
+    }
 }
