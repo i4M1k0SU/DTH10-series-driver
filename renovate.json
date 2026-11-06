@@ -1,6 +1,26 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigestsToSemver"
+  ]
+  "timezone": "Asia/Tokyo",
+  "labels": ["renovate"],
+  "rangeStrategy": "bump",
+  "minimumReleaseAge": "7 days",
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "pinDigests": true
+    },
+    {
+      "updateTypes": ["major"],
+      "addLabels": ["update-major"]
+    },
+    {
+      "updateTypes": ["minor", "patch"],
+      "addLabels": ["update-minor"]
+    }
   ]
 }
