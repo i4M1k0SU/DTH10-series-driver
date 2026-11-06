@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dth10_core::cepm;
 use dth10_core::kit::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
-use dth10_core::lj101::Lj101Kit;
+use dth10_core::satellite::SatelliteKit;
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::ts_slot::{self, SlotLayout};
 use dth10_core::{Device, StreamMode, TunerDesc, unverified_kit_error};
@@ -850,9 +850,10 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
         }
         Err(e) => eprintln!("warning: terrestrial kit: {}", unverified_kit_error(t.product_id(), 0, e)),
     }
-    let mut kit = Lj101Kit::new(Device::new(t.clone()).with_tuner_index(a.i2c_tuner), info1.desc.clone())
-        .map_err(|e| unverified_kit_error(t.product_id(), 1, e))?;
-    println!("satellite kit: I2C/GPIO via the tuner #{} path", a.i2c_tuner);
+    let mut kit =
+        SatelliteKit::new(Device::new(t.clone()).with_tuner_index(a.i2c_tuner), info1.desc.clone(), t.product_id())
+            .map_err(|e| unverified_kit_error(t.product_id(), 1, e))?;
+    println!("satellite kit ({}): I2C/GPIO via the tuner #{} path", kit.kind(), a.i2c_tuner);
     kit.init()?;
     if !a.no_start {
         Device::new(t).start()?; // wValue 0 / wIndex 0x10 on the tuner #0 path, as `dth10` sends it
@@ -870,15 +871,15 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
     r
 }
 
-fn sat_probe(kit: &mut Lj101Kit<UsbTransport>, ch: &Channel, a: &TuneSatArgs) -> Res {
+fn sat_probe(kit: &mut SatelliteKit<UsbTransport>, ch: &Channel, a: &TuneSatArgs) -> Res {
     if a.lnb != 0 {
         let healthy = kit.lnb_power(a.lnb)?;
-        let st = kit.dev.gpio_read()?;
+        let st = kit.dev_ref().gpio_read()?;
         println!(
             "LNB {}: healthy={healthy} gpio status {:02x?} readback {:?}",
             a.lnb,
             &st[8..13],
-            dth10_core::device::LnbGpio::of(&kit.desc).map(|g| dth10_core::device::lnb_get(&kit.dev, g))
+            dth10_core::device::LnbGpio::of(kit.desc()).map(|g| dth10_core::device::lnb_get(kit.dev_ref(), g))
         );
     }
     let applied = kit.set_booster(a.booster)?;

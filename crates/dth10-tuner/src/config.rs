@@ -106,7 +106,8 @@ pub struct TunerConfig {
     pub ter_lock_wait_ms: u64,
     /// `[ISDB-T] Attenuator`: the terrestrial attenuator (the vendor
     /// application's "use attenuator"), set on every terrestrial tune. Only
-    /// the `SMT_LJ101` hw 0x102 kit has one (the DT-H70/U2); other kits ignore it.
+    /// the `SMT_LJ101` hw 0x102 kit (the DT-H70/U2) and the `SHARP_8011` hw
+    /// 0x102 kit have one; other kits ignore it.
     pub attenuator: bool,
     /// ISDB-T channel bandwidth in Hz: 6 MHz on the Japanese UHF raster (fixed in the DLL).
     pub ter_bandwidth_hz: u32,

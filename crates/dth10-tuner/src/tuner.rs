@@ -11,7 +11,7 @@ use dth10_core::LockExt;
 use dth10_core::cepm::{self, AppKeys, Decryptor, Handshake};
 use dth10_core::device::LnbGpio;
 use dth10_core::kit::{SignalStatus, TuneRequest, field, lock};
-use dth10_core::lj101::Lj101Kit;
+use dth10_core::satellite::SatelliteKit;
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::{DeviceInformation, TunerDesc};
 use dth10_core::ts_slot::SlotLayout;
@@ -424,13 +424,13 @@ impl Stream {
 
 struct Satellite {
     /// Kit whose `dev` uses `TunerConfig::sat_i2c_path` for I2C/GPIO.
-    kit: Lj101Kit<UsbTransport>,
+    kit: SatelliteKit<UsbTransport>,
     /// Device handle on `TunerConfig::sat_stream_path`, used for the stream-enable command.
     stream_dev: Device<UsbTransport>,
     info: DeviceInformation,
     endpoint: u8,
     lnb_volt: u32,
-    /// `Lj101Kit::init` has run (at open; on first use when that failed).
+    /// The kit's `init` has run (at open; on first use when that failed).
     initialised: bool,
     /// The command path of the satellite kit's I2C and GPIO.
     i2c_path: u8,
@@ -631,7 +631,7 @@ impl Tuner {
                     // path #1 (docs/20 §5.2).
                     let i2c_path = cfg.sat_i2c_path.unwrap_or(if info1.desc.flags & 0x4 != 0 { 0 } else { 1 });
                     let i2c_dev = Device::new(transport.clone()).with_tuner_index(i2c_path);
-                    match Lj101Kit::new(i2c_dev, info1.desc.clone()) {
+                    match SatelliteKit::new(i2c_dev, info1.desc.clone(), pid) {
                         Ok(kit) => {
                             let endpoint = if cfg.sat_endpoint != 0 {
                                 cfg.sat_endpoint
@@ -639,7 +639,8 @@ impl Tuner {
                                 pipes.ts1.map(|(ep, _)| ep).unwrap_or(0x82)
                             };
                             log::info!(
-                                "satellite: I2C via path {} (descriptor flags 0x{:x}), stream via path {} on EP 0x{endpoint:02x}",
+                                "satellite ({} kit): I2C via path {} (descriptor flags 0x{:x}), stream via path {} on EP 0x{endpoint:02x}",
+                                kit.kind(),
                                 i2c_path,
                                 info1.desc.flags,
                                 cfg.sat_stream_path
@@ -717,7 +718,7 @@ impl Tuner {
         // later and switches it off when it is not good. Watched here the same way.
         let lnb_cut = Arc::new(AtomicBool::new(false));
         let lnb_watch = satellite.as_ref().and_then(|s| {
-            let gpio = LnbGpio::of(&s.kit.desc)?;
+            let gpio = LnbGpio::of(s.kit.desc())?;
             Some((Device::new(transport.clone()).with_tuner_index(s.i2c_path), gpio, lnb_cut.clone()))
         });
         let mut events = None;

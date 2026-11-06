@@ -5,6 +5,7 @@
 //! | kit name | kit |
 //! |---|---|
 //! | `TC90517_MxL131RF`, `TC90517_MxL135RF`, `SMT_LJ101` hw 0x102 | [`Tc90517Kit`] |
+//! | `SHARP_8011` hw 0x102 | [`Sharp8011Kit`] |
 //! | `PN2031_MxL135RF` | [`Pn2031Kit`] |
 //! | `BQ200X_MxL135RF`, `BQ200X_E4005` | [`Bq200xKit`] |
 //! | `LGDT3305_MxL5007T` | [`Lgdt3305Kit`] |
@@ -21,11 +22,13 @@ use crate::kit::{SignalStatus, TuneRequest};
 use crate::lgdt3305::Lgdt3305Kit;
 use crate::pn2031::{Pn2031Kit, Pn2031Variant};
 use crate::protocol::UsbControl;
+use crate::sharp8011::Sharp8011Kit;
 use crate::tc90517::Tc90517Kit;
 use crate::tlv::TunerDesc;
 
 pub enum TerrestrialKit<T: UsbControl> {
     Tc90517(Tc90517Kit<T>),
+    Sharp8011(Sharp8011Kit<T>),
     Pn2031(Pn2031Kit<T>),
     Bq200x(Bq200xKit<T>),
     Lgdt3305(Lgdt3305Kit<T>),
@@ -36,6 +39,7 @@ macro_rules! each {
     ($self:expr, $k:ident => $e:expr) => {
         match $self {
             TerrestrialKit::Tc90517($k) => $e,
+            TerrestrialKit::Sharp8011($k) => $e,
             TerrestrialKit::Pn2031($k) => $e,
             TerrestrialKit::Bq200x($k) => $e,
             TerrestrialKit::Lgdt3305($k) => $e,
@@ -58,6 +62,7 @@ impl<T: UsbControl> TerrestrialKit<T> {
                 | "BQ200X_E4005"
                 | "LGDT3305_MxL5007T"
         ) || (desc.kit_name == "SMT_LJ101" && desc.hw_version == 0x102)
+            || Sharp8011Kit::<T>::supports(desc)
     }
 
     /// The kit for `desc` (the descriptor of the tuner it drives) on the
@@ -67,6 +72,7 @@ impl<T: UsbControl> TerrestrialKit<T> {
         Ok(match name {
             "TC90517_MxL131RF" | "TC90517_MxL135RF" => TerrestrialKit::Tc90517(Tc90517Kit::new(dev, desc)?),
             "SMT_LJ101" if desc.hw_version == 0x102 => TerrestrialKit::Tc90517(Tc90517Kit::new(dev, desc)?),
+            "SHARP_8011" if desc.hw_version == 0x102 => TerrestrialKit::Sharp8011(Sharp8011Kit::new(dev, desc)?),
             "PN2031_MxL135RF" => TerrestrialKit::Pn2031(Pn2031Kit::new(dev, desc, Pn2031Variant::for_product(pid))?),
             "BQ200X_MxL135RF" | "BQ200X_E4005" => TerrestrialKit::Bq200x(Bq200xKit::new(dev, desc)?),
             "LGDT3305_MxL5007T" => TerrestrialKit::Lgdt3305(Lgdt3305Kit::new(dev, desc)?),
@@ -83,6 +89,7 @@ impl<T: UsbControl> TerrestrialKit<T> {
     pub fn kind(&self) -> &'static str {
         match self {
             TerrestrialKit::Tc90517(_) => "TC90517",
+            TerrestrialKit::Sharp8011(_) => "SHARP_8011",
             TerrestrialKit::Pn2031(_) => "PN2031",
             TerrestrialKit::Bq200x(_) => "BQ200X",
             TerrestrialKit::Lgdt3305(_) => "LGDT3305",
@@ -138,11 +145,12 @@ impl<T: UsbControl> TerrestrialKit<T> {
     }
 
     /// Whether the kit has the attenuator switch (the vendor application's
-    /// "use attenuator"): `SMT_LJ101` hw 0x102 only; for every other kit the
-    /// vendor driver does nothing with the setting.
+    /// "use attenuator"): `SMT_LJ101` hw 0x102 and `SHARP_8011` hw 0x102 only;
+    /// for every other kit the vendor driver does nothing with the setting.
     pub fn has_attenuator(&self) -> bool {
         match self {
             TerrestrialKit::Tc90517(k) => k.has_attenuator(),
+            TerrestrialKit::Sharp8011(_) => true,
             _ => false,
         }
     }
@@ -152,6 +160,7 @@ impl<T: UsbControl> TerrestrialKit<T> {
     pub fn set_attenuator(&mut self, on: bool) -> Result<bool> {
         match self {
             TerrestrialKit::Tc90517(k) => k.set_attenuator(on),
+            TerrestrialKit::Sharp8011(k) => k.set_attenuator(on),
             _ => Ok(false),
         }
     }
@@ -160,6 +169,7 @@ impl<T: UsbControl> TerrestrialKit<T> {
     pub fn attenuator(&mut self) -> Result<Option<bool>> {
         match self {
             TerrestrialKit::Tc90517(k) => k.attenuator(),
+            TerrestrialKit::Sharp8011(k) => k.attenuator(),
             _ => Ok(None),
         }
     }
@@ -177,6 +187,9 @@ mod tests {
             ("TC90517_MxL135RF", "", 0x101),
             ("SMT_LJ101", "h70", 0x102),
             ("SMT_LJ101", "h70", 0x402),
+            ("SHARP_8011", "", 0x102),
+            ("SHARP_8011", "", 0x402),
+            ("SHARP_8011", "", 0x104),
             ("PN2031_MxL135RF", "", 0x104),
             ("BQ200X_MxL135RF", "", 0x102),
             ("BQ200X_MxL135RF", "h55", 0x102),
@@ -199,5 +212,16 @@ mod tests {
             // Flags bit5 counts on the standard variant only.
             assert_eq!(k.skips_init_config(), variant == Pn2031Variant::Standard);
         }
+    }
+
+    #[test]
+    fn sharp8011_hw_0x102_is_its_own_kit() {
+        let desc = TunerDesc { kit_name: "SHARP_8011".into(), hw_version: 0x102, ..Default::default() };
+        let k = TerrestrialKit::new(Device::new(RegMock::default()), desc, 0x0199).unwrap();
+        assert_eq!(k.kind(), "SHARP_8011");
+        assert!(k.has_attenuator());
+        let desc = TunerDesc { kit_name: "SHARP_8011".into(), hw_version: 0x402, ..Default::default() };
+        let e = TerrestrialKit::new(Device::new(RegMock::default()), desc, 0x0199).err().unwrap();
+        assert!(matches!(e, Error::Unsupported(_)), "{e}");
     }
 }

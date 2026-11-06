@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dth10_core::Device;
 use dth10_core::cepm::AppKeys;
-use dth10_core::lj101::Lj101Kit;
+use dth10_core::satellite::SatelliteKit;
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::DeviceInformation;
 use dth10_tuner::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue, Tuner, TunerConfig, default_tuner};
@@ -279,7 +279,7 @@ fn print_desc(index: u8, di: &DeviceInformation) {
     // second terrestrial one on the two-tuner models
     let role = if TerrestrialKit::<UsbTransport>::supports(d) {
         if index == 0 { "ISDB-T" } else { "ISDB-T (second terrestrial tuner)" }
-    } else if index == 1 && Lj101Kit::<UsbTransport>::supports(d) {
+    } else if index == 1 && SatelliteKit::<UsbTransport>::supports(d) {
         "ISDB-S"
     } else {
         "not supported"
