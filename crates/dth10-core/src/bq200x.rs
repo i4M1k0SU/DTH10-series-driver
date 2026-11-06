@@ -850,7 +850,7 @@ mod tests {
         assert_eq!(ops[0], Op::Gpio(0x82, 0x1006, 0xC0, 0x80));
         let writes: Vec<(u8, u8)> =
             ops.iter().filter_map(|o| if let Op::W(TUNER, r, v) = o { Some((*r, v[0])) } else { None }).collect();
-        // Calibration: 15 + 100 writes of 0x1F, then the average back to 0x1B.
+        // LNA calibration: 15 + 100 requests in 0x1F, then the 0x1B average back to 0x1B.
         assert_eq!(writes.iter().take_while(|&&x| x == (0x1F, 0x1F)).count(), 115);
         let after_cal = &writes[115..];
         assert_eq!(
@@ -884,6 +884,72 @@ mod tests {
         let tail = sync_start_ops(DEMOD, 0x1F, 0xA0);
         assert_eq!(&ops[n - tail.len()..], &tail[..]);
         assert_eq!(&ops[n - tail.len() - 2..n - tail.len()], &gate_ops(false, 0x0C)[..]);
+    }
+
+    #[test]
+    fn e4005_bands_as_the_vendor_sets_them() {
+        let mut k = kit(desc("BQ200X_E4005", "f200", 0), false);
+        k.init().unwrap();
+        k.open().unwrap();
+        take_ops(&k);
+        // (0x0D, then 0x07, 0x88, 0x8D, 0x13, 0x09, 0x0A, 0x0B, 0x10) of the PLL section.
+        let mut pll = |f: u64| -> Vec<(u8, u8)> {
+            k.tune(&TuneRequest::isdb_t(f, 6_000_000)).unwrap();
+            let writes: Vec<(u8, u8)> = take_ops(&k)
+                .iter()
+                .filter_map(|o| if let Op::W(TUNER, r, v) = o { Some((*r, v[0])) } else { None })
+                .collect();
+            let i = writes.iter().position(|w| w.0 == 0x07).unwrap();
+            let d = writes[..i].iter().rev().find(|w| w.0 == 0x0D).copied().unwrap();
+            [vec![d], writes[i..i + 8].to_vec()].concat()
+        };
+        // 100 MHz, band 1: VHF2 code, 3-phase mixing with divider code 5 (×32), tracking filter 1.
+        assert_eq!(
+            pll(100_000_000),
+            [
+                (0x0D, 0x0D),
+                (0x07, 0x00),
+                (0x88, 3),
+                (0x8D, 0x04),
+                (0x13, 0),
+                (0x09, 111),
+                (0x0A, 0x71),
+                (0x0B, 0x1C),
+                (0x10, 1)
+            ]
+        );
+        // 200 MHz, band 3: the vendor uses the UHF code here, no 3-phase mixing, code 5 (×16).
+        assert_eq!(
+            pll(200_000_000),
+            [
+                (0x0D, 0x05),
+                (0x07, 0x04),
+                (0x88, 3),
+                (0x8D, 0x04),
+                (0x13, 0),
+                (0x09, 111),
+                (0x0A, 0x71),
+                (0x0B, 0x1C),
+                (0x10, 0)
+            ]
+        );
+        // 400 MHz, band 5: bit3 set with the VHF2 code, 0x88 = 0, code 3 (×8), tracking filter 15.
+        assert_eq!(
+            pll(400_000_000),
+            [
+                (0x0D, 0x03),
+                (0x07, 0x08),
+                (0x88, 0),
+                (0x8D, 0x04),
+                (0x13, 0),
+                (0x09, 111),
+                (0x0A, 0x71),
+                (0x0B, 0x1C),
+                (0x10, 15)
+            ]
+        );
+        // SYNTH1 is read back, so bit3 stays set on the next tune (as in the vendor driver).
+        assert_eq!(pll(557_142_857)[1], (0x07, 0x0C));
     }
 
     #[test]

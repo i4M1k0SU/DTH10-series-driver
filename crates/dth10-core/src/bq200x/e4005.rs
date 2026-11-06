@@ -7,9 +7,20 @@
 //! IF (kHz, from the descriptor) selects the IF filter set and, when it is not
 //! positive, a second-harmonic step.
 //!
-//! Tune: DC calibration (0x1F/0x1B), PLL (band 0x07, divider 0x0D, N 0x09,
-//! fraction 0x0A/0x0B, RF tracking filter 0x10), a 90-register gain table,
-//! IF filter 0x11..0x13/0x43.
+//! The E4005 is the low-IF member of the E4000 family. Where a register's
+//! meaning is the same as in the E4000, comments use the E4000 names: MASTER1
+//! 0x00, CLK_INP 0x05, REF_CLK 0x06, SYNTH1 0x07 (bits 2:1 band, bit0 PLL lock),
+//! SYNTH3 0x09 (integer Z), SYNTH4/5 0x0A/0x0B (fraction X), SYNTH7 0x0D (bits 2:0
+//! divider, bit3 3-phase mixing), FILT1 0x10 (RF tracking filter), FILT2/3
+//! 0x11/0x12 (IF filters), AGC1 0x1A, AGC2 0x1B, AGC6 0x1F (bit4 LNA calibration
+//! request), AGC7 0x20, DC1 0x29 (bit0 DC offset calibration request), DC5 0x2D.
+//! The E4000's 0x7x block appears to sit at 0x8x here (0x88 is set per band like
+//! BIAS, 0x8A gets the CLKOUT_PWDN value 0x96). 0x13, 0x43/0x44, 0x8D, 0x96 and
+//! the gain table 0x9A..0xF3 are left unnamed.
+//!
+//! Tune: LNA calibration (AGC6/AGC2), PLL (band SYNTH1, divider SYNTH7, Z, X, RF
+//! tracking filter FILT1), a 90-register gain table, DC offset calibration
+//! (DC1), IF filter 0x11..0x13/0x43.
 
 use super::demod::TunerGate;
 use crate::device::Device;
@@ -179,6 +190,11 @@ fn within(f: i32, lo: i32, span: u32) -> bool {
 /// Band of a frequency in kHz: 1 (44–130 MHz), 3 (135–388 MHz and 470–900 MHz),
 /// 5 (393–466 MHz), 4 (1452–1680 MHz), -1 otherwise; with the UHF sub-band
 /// (1 ≤ 600 MHz, 2 ≤ 700, 3 ≤ 800, 4 ≤ 900; 0 elsewhere).
+///
+/// SYNTH1 gets `2 · band − 2`: band 1 = VHF2, 3 = UHF, 4 = L, and band 5 sets
+/// bit3 with the VHF2 code in bits 2:1. The vendor driver puts 135–388 MHz in
+/// the UHF band (an E4000 would use VHF3 there) and never returns band 2; that
+/// is kept as the vendor's choice, as is band 5.
 pub fn band(f_khz: i32) -> (i32, i32) {
     if within(f_khz, 44_000, 86_000) {
         (1, 0)
@@ -209,6 +225,8 @@ pub fn band(f_khz: i32) -> (i32, i32) {
 }
 
 /// The divider selection: `sel` is 1 for band 1, 0 for the other bands, -1 out of range.
+/// `sel` is also SYNTH7 bit3 (3-phase mixing), so the vendor driver uses 3-phase
+/// mixing only at 44–130 MHz (an E4000 uses it below 350 MHz).
 fn divider_sel(f_khz: i32) -> i32 {
     match band(f_khz).0 {
         b if b < 0 => -1,
@@ -216,7 +234,7 @@ fn divider_sel(f_khz: i32) -> i32 {
     }
 }
 
-/// VCO divider for a frequency: `(code for register 0x0D bits 2:0, multiplier)`.
+/// VCO divider for a frequency: `(code for SYNTH7 (0x0D) bits 2:0, multiplier)`.
 pub fn divider(f_khz: i32, sel: i32) -> Option<(u8, i32)> {
     let table: &[(i32, u32, u8, i32)] = if sel == 1 {
         &[
@@ -250,7 +268,7 @@ pub fn multiplier_from_code(code: u8, sel: i32) -> i32 {
     t.get(code as usize).copied().unwrap_or(-1)
 }
 
-/// PLL words: integer N (register 0x09) and 16-bit fraction (0x0A low, 0x0B high),
+/// PLL words: integer Z (SYNTH3, 0x09) and 16-bit fraction X (SYNTH4 0x0A low, SYNTH5 0x0B high),
 /// `f · mult / 28.8 MHz`; the fraction is held within 0x0800..=0xF800.
 pub fn pll_words(f_khz: i32, mult: i32) -> (u8, u16) {
     let x = f_khz as f64 / 1000.0 * mult as f64 / 28.8;
@@ -267,8 +285,9 @@ pub fn pll_words(f_khz: i32, mult: i32) -> (u8, u16) {
     (n as u8, v as u16)
 }
 
-/// RF tracking-filter index (register 0x10): the entry of the band's column
-/// nearest to the frequency.
+/// RF tracking-filter index (FILT1, 0x10): the entry of the band's column
+/// nearest to the frequency. Band 5 reads the next row's first column, whose
+/// centres are all below its frequencies, so it always gets 15.
 pub fn track_index(f_khz: i32, band: i32) -> u8 {
     let at = |i: i32| 1000 * TRACK_TABLE[(4 * i + band - 1) as usize];
     for i in 1..16 {
@@ -316,8 +335,11 @@ pub fn if_step(f_khz: i32, code: u8, if_khz: i32) -> u8 {
     ((vco_mhz / den).round() as i32 as u8).wrapping_mul(2)
 }
 
-/// Register 0x07 value of the second-harmonic step (IF not positive), or 0 when
-/// the channel is not within one bandwidth below a crystal-harmonic edge.
+/// SYNTH1 (0x07) value of the second-harmonic step (IF not positive), or 0 when
+/// the channel is not within one bandwidth below a crystal-harmonic edge. The
+/// step overwrites the whole register (bits 4:3 from `edge / div`, bits 2:0 a
+/// band code with bit0 set: < 140 MHz VHF2, < 460 VHF3, < 868 UHF, else L) and
+/// sets CLK_INP (0x05) to 0x03.
 pub fn harmonic_band(f_khz: i32, bw_khz: i32) -> u8 {
     let f = f_khz as f64 / 1000.0;
     let x = XTAL_KHZ as f64 / 1000.0;
@@ -384,9 +406,10 @@ impl E4005 {
         Ok(b[0])
     }
 
-    /// Initialisation: 0x09/0x05 cleared then 0x09 = 0x80, the two tables,
-    /// 0x06 = 0x20, 0x8A = 0x96. The gate is closed again only on success (as in
-    /// the original).
+    /// Initialisation: Z (0x09) and CLK_INP (0x05) cleared then Z = 0x80, the two
+    /// tables (the second starts with MASTER1 = 0x07: reset, normal standby, POR
+    /// detect), REF_CLK (0x06) = 0x20, CLKOUT_PWDN (0x8A) = 0x96. The gate is
+    /// closed again only on success (as in the original).
     pub fn init<T: UsbControl>(&mut self, dev: &mut Device<T>, desc: &TunerDesc, gate: &TunerGate) -> Result<()> {
         self.if_khz = desc.if_freq_hz / 1000;
         gate.open(dev)?;
@@ -402,19 +425,21 @@ impl E4005 {
         Ok(())
     }
 
-    /// Standby: register 0x00 = 0x00.
+    /// Standby: MASTER1 (0x00) = 0x00.
     pub fn standby<T: UsbControl>(&self, dev: &mut Device<T>, gate: &TunerGate) -> Result<()> {
         gate.with(dev, |d| self.wr(d, 0x00, 0x00))
     }
 
-    /// Wake: register 0x00 = 0x02.
+    /// Wake: MASTER1 (0x00) = 0x02 (normal standby bit).
     pub fn wake<T: UsbControl>(&self, dev: &mut Device<T>, gate: &TunerGate) -> Result<()> {
         gate.with(dev, |d| self.wr(d, 0x00, 0x02))
     }
 
-    /// DC calibration: 0x1F = 0x1F fifteen times, then the average of 100 reads of
-    /// 0x1B (each after 0x1F = 0x1F) goes back to 0x1B with 0x1F = 0x0F, 0xFA = 0x08.
-    fn calibrate<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
+    /// LNA calibration: AGC6 (0x1F) = 0x1F (bit4 = LNA calibration request)
+    /// fifteen times, then the average of 100 reads of AGC2 (0x1B), each after
+    /// another request, goes back to AGC2; AGC6 = 0x0F ends the request, and
+    /// 0xFA = 0x08.
+    fn lna_calibrate<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         for _ in 0..14 {
             self.wr(dev, 0x1F, 0x1F)?;
         }
@@ -430,13 +455,14 @@ impl E4005 {
         self.wr(dev, 0x1B, (sum / 100) as u8)
     }
 
-    /// Start of a tune: calibration, 0x00 = 2, 0x1A = 0x1C, 0x20 bits 1:0 = 0b00 with bit2 set.
+    /// Start of a tune: LNA calibration, MASTER1 (0x00) = 2, AGC1 (0x1A) = 0x1C,
+    /// AGC7 (0x20) bits 1:0 = 0b00 with bit2 set.
     fn prepare<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         self.rd(dev, 0x1A)?;
         let r20 = self.rd(dev, 0x20)?;
         let r8d = self.rd(dev, 0x8D)?;
         // The original ignores the calibration result.
-        let _ = self.calibrate(dev);
+        let _ = self.lna_calibrate(dev);
         self.wr(dev, 0x00, 0x02)?;
         self.wr(dev, 0x1A, 0x1C)?;
         self.wr(dev, 0x20, (r20 & 0xFC) | 0x04)?;
@@ -456,7 +482,7 @@ impl E4005 {
         self.wr(dev, 0x96, 0xFF)
     }
 
-    /// PLL and RF section of a tune.
+    /// PLL and RF section of a tune, ending with a DC offset calibration.
     fn set_pll<T: UsbControl>(&self, dev: &mut Device<T>, f_khz: i32) -> Result<()> {
         let r07 = self.rd(dev, 0x07)?;
         let r0d = self.rd(dev, 0x0D)?;
@@ -467,12 +493,16 @@ impl E4005 {
         if b < 0 {
             return Err(Error::Unsupported(format!("E4005: frequency {f_khz} kHz out of range")));
         }
+        // SYNTH1 band code in bits 2:1; ORed without a mask, so band 5 sets bit3.
         let r07 = (r07 & 0xF9) | ((2 * b - 2) as u8);
+        // 0x88 (the E4000's BIAS position): 3 up to band 3, 0 for bands 4 and 5.
         let r88 = if b > 3 { 0 } else { 3 };
         let (_, sub) = band(f_khz);
         let sel = divider_sel(f_khz);
-        // Without a divider the multiplier slot keeps the sub-band value (as in the original).
+        // Without a divider (44–55 MHz) the code is 0xFF and the multiplier slot keeps the
+        // sub-band value (as in the original).
         let (code, mult) = divider(f_khz, sel).unwrap_or((0xFF, sub));
+        // SYNTH7: divider code in bits 2:0, 3-phase mixing (bit3) for band 1 only.
         let r0d = code | ((((sel as u8) << 3) | (r0d & 0xF7)) & 0xF8);
         self.wr(dev, 0x0D, r0d)?;
         if self.if_khz > 0 {
@@ -499,6 +529,7 @@ impl E4005 {
                 break;
             }
         }
+        // DC offset calibration request (DC1 bit0), then DC5 = 0x1C.
         if self.rd(dev, 0x8D).is_ok() && self.wr(dev, 0x29, 0x01).is_ok() {
             let _ = self.wr(dev, 0x2D, 0x1C);
         }
@@ -529,7 +560,7 @@ impl E4005 {
         gate.open(dev)?;
         self.prepare(dev)?;
         let r8d = self.rd(dev, 0x8D)?;
-        self.wr(dev, 0x8D, (r8d & 0xF9) | 0x04)?;
+        self.wr(dev, 0x8D, (r8d & 0xFD) | 0x04)?;
         self.set_pll(dev, f_khz)?;
         self.set_if_filter(dev, bw_khz)?;
         if self.if_khz <= 0 {
@@ -559,6 +590,28 @@ mod tests {
         assert_eq!(band(400_000), (5, 0));
         assert_eq!(band(1_500_000), (4, 0));
         assert_eq!(band(468_000), (-1, 0));
+        // Edges as in the vendor driver; 135–388 MHz is band 3 (UHF code), there is no band 2.
+        assert_eq!(band(44_000), (1, 0));
+        assert_eq!(band(130_000), (1, 0));
+        assert_eq!(band(130_001), (-1, 0));
+        assert_eq!(band(135_000), (3, 0));
+        assert_eq!(band(388_000), (3, 0));
+        assert_eq!(band(388_001), (-1, 0));
+        assert_eq!(band(393_000), (5, 0));
+        assert_eq!(band(466_000), (5, 0));
+        assert_eq!(band(470_000), (3, 1));
+        assert_eq!(band(600_000), (3, 1));
+        assert_eq!(band(600_001), (3, 2));
+        assert_eq!(band(900_000), (3, 4));
+        assert_eq!(band(900_001), (-1, 0));
+        assert_eq!(band(1_452_000), (4, 0));
+        assert_eq!(band(1_680_000), (4, 0));
+        assert_eq!(band(1_680_001), (-1, 0));
+        // 3-phase mixing (divider table 1) only for band 1.
+        assert_eq!(divider_sel(100_000), 1);
+        assert_eq!(divider_sel(200_000), 0);
+        assert_eq!(divider_sel(400_000), 0);
+        assert_eq!(divider_sel(50_000_000), -1);
     }
 
     #[test]
@@ -568,6 +621,11 @@ mod tests {
         assert_eq!(divider(100_000, 1), Some((5, 32)));
         assert_eq!(divider(1_000_000, 0), Some((0, 2)));
         assert_eq!(divider(50_000, 0), None);
+        // Band 1 below 55 MHz has no divider; band 5 uses the ×8 divider.
+        assert_eq!(divider(50_000, 1), None);
+        assert_eq!(divider(55_000, 1), Some((7, 48)));
+        assert_eq!(divider(400_000, 0), Some((3, 8)));
+        assert_eq!(divider(200_000, 0), Some((5, 16)));
         for code in 0..8u8 {
             assert_eq!(multiplier_from_code(code, 0), [2, 4, 6, 8, 12, 16, 20, 24][code as usize]);
         }
@@ -591,6 +649,11 @@ mod tests {
         assert_eq!(track_index(560_000, 3), 8);
         assert_eq!(track_index(470_000, 3), 5);
         assert_eq!(track_index(990_000, 3), 15);
+        // Band 5 reads the next row's first column (268/299 MHz): always 15.
+        assert_eq!(track_index(393_000, 5), 15);
+        assert_eq!(track_index(466_000, 5), 15);
+        // Band 1 column: 268 MHz from index 1 on, ties keep the later index.
+        assert_eq!(track_index(100_000, 1), 1);
     }
 
     #[test]
@@ -610,5 +673,15 @@ mod tests {
         assert_eq!(harmonic_band(547_000, 6000), 0x0D);
         // 557 MHz is above it.
         assert_eq!(harmonic_band(557_142, 6000), 0);
+        // Exactly on the edge (d = 0) and one bandwidth below it (d = B) still count.
+        assert_eq!(harmonic_band(550_000, 6000), 0x0D);
+        assert_eq!(harmonic_band(544_000, 6000), 0x0D);
+        assert_eq!(harmonic_band(543_000, 6000), 0);
+        // Band codes by frequency: 86 MHz → edge 89 (t 3), div 2, 44.5 → bits 4:3 = 0b01, VHF2 code.
+        assert_eq!(harmonic_band(86_000, 6000), 0x09);
+        // 200 MHz → edge 204 (t 7), div 4, 51 → bits 4:3 = 0b10, VHF3 code (< 460 MHz).
+        assert_eq!(harmonic_band(200_000, 6000), 0x13);
+        // 890 MHz → edge 895 (t 31), div 16, 55.9 → bits 4:3 = 0b10, L code (≥ 868 MHz).
+        assert_eq!(harmonic_band(890_000, 6000), 0x17);
     }
 }
