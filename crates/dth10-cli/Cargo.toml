@@ -21,7 +21,7 @@ clap.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # SIGTERM / SIGINT / SIGHUP end the stream; access(2) for the state directory.
-libc = "0.2"
+libc = "0.2.191"
 
 [target.'cfg(windows)'.dependencies]
 # Ctrl-C ends the stream.
