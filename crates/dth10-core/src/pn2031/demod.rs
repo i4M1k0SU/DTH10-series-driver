@@ -15,7 +15,9 @@
 //! The demodulator never looks at the tune request: the frequency and the
 //! bandwidth go to the tuner. Lock, C/N and the BER of the three ISDB-T
 //! layers are evaluated on demand in [`Pn2031::status`]; there is no
-//! lock-wait loop.
+//! lock-wait loop. The chip measures C/N and BER over a period; the last
+//! completed values are kept and reported until the next measurement
+//! completes.
 
 use core::time::Duration;
 use std::thread::sleep;
@@ -345,16 +347,33 @@ pub fn ber_e9(err: u32) -> u32 {
     (1_000_000_000u64 * err as u64 / 1_632_000) as u32
 }
 
-/// Per-layer BER registers: `(request bit, measurement-done bit of 0x60, first error-count register, counter-restart bit of 0x5F)`.
-const BER_LAYERS: [(u32, u8, u8, u8); 3] =
-    [(field::BER_A, 0x01, 0x64, 0x01), (field::BER_B, 0x02, 0x67, 0x02), (field::BER_C, 0x04, 0x6A, 0x04)];
+/// Bit of register `0x45` set when a C/N measurement has completed.
+const CN_READY: u8 = 0x40;
 
-/// Demodulator instance bound to an I2C address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Sync state (`0x0A & 0x0F`) of full lock, from which the TMCC is decoded.
+const SYNC_LOCKED: u8 = 9;
+
+/// Per-layer BER registers: `(request bit, measurement-done bit of 0x60,
+/// first error-count register, counter-restart bit of 0x5F, TMCC register
+/// with the layer's segment count in bits 7:4, read through 0x6D/0x6E)`.
+const BER_LAYERS: [(u32, u8, u8, u8, u8); 3] = [
+    (field::BER_A, 0x01, 0x64, 0x01, 0x89),
+    (field::BER_B, 0x02, 0x67, 0x02, 0x8D),
+    (field::BER_C, 0x04, 0x6A, 0x04, 0x91),
+];
+
+/// Demodulator instance bound to an I2C address, with the last completed
+/// C/N and BER measurements.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pn2031 {
     pub addr: u8,
     /// The descriptor's stream parameter (`TunerDesc::stream_param`), captured when the kit is built.
     pub stream_param: u32,
+    /// Last completed C/N in 0.001 dB since the last configuration or tune.
+    cnr_last: Option<i32>,
+    /// Last completed post-Viterbi BER ×1e-9 of layers A/B/C since the last
+    /// configuration or tune.
+    ber_last: [Option<u32>; 3],
 }
 
 fn append<T: UsbControl>(dev: &mut Device<T>, addr: u8, pairs: &[(u8, u8)]) -> Result<()> {
@@ -367,7 +386,13 @@ fn append<T: UsbControl>(dev: &mut Device<T>, addr: u8, pairs: &[(u8, u8)]) -> R
 impl Pn2031 {
     /// `addr` 0 selects [`DEFAULT_ADDR`], as the vendor driver does.
     pub fn new(addr: u8, stream_param: u32) -> Self {
-        Pn2031 { addr: if addr == 0 { DEFAULT_ADDR } else { addr }, stream_param }
+        Pn2031 { addr: if addr == 0 { DEFAULT_ADDR } else { addr }, stream_param, cnr_last: None, ber_last: [None; 3] }
+    }
+
+    /// Forget the kept C/N and BER values (their measurements are restarted).
+    fn forget_measurements(&mut self) {
+        self.cnr_last = None;
+        self.ber_last = [None; 3];
     }
 
     fn write1<T: UsbControl>(&self, dev: &mut Device<T>, reg: u8, v: u8) -> Result<()> {
@@ -390,7 +415,8 @@ impl Pn2031 {
     /// indirect `0x71 ← E5` through `0x6D`/`0x6E` (immediate). Every register
     /// write carries one data byte, also the 24-bit words (four writes each).
     /// The configuration is fixed to [`CONFIG_IF_HZ`].
-    pub fn configure<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
+    pub fn configure<T: UsbControl>(&mut self, dev: &mut Device<T>) -> Result<()> {
+        self.forget_measurements();
         self.write1(dev, 0x70, 0x00)?;
         sleep(Duration::from_millis(1));
         self.write1(dev, 0x70, 0xFF)?;
@@ -434,12 +460,14 @@ impl Pn2031 {
 
     /// After the tuner is programmed: `0x08 ← 00`, C/N restart, `0x53 ← 00`
     /// then `07` (immediate), `0x5F ← 00` then `07` (one batch, all three BER
-    /// counters restarted), indirect `0xB1 ← 07` then `00` (immediate). No
-    /// delay, no lock wait.
+    /// counters restarted), indirect `0xB1 ← 07` then `00` (immediate, PER
+    /// counter restart). No delay, no lock wait. The kept C/N and BER values
+    /// belong to the previous channel and are dropped.
     ///
     /// The vendor driver ignores failures after the first write; this
     /// version stops at the first failing transfer and reports it.
-    pub fn post_tune<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
+    pub fn post_tune<T: UsbControl>(&mut self, dev: &mut Device<T>) -> Result<()> {
+        self.forget_measurements();
         self.write1(dev, 0x08, 0x00)?;
         self.restart_cn(dev)?;
         self.write1(dev, 0x53, 0x00)?;
@@ -461,18 +489,33 @@ impl Pn2031 {
         Ok((hi << 16) | (mid << 8) | lo)
     }
 
+    /// Whether the TMCC lists the layer: its segment count (bits 7:4 of the
+    /// TMCC register, read through `0x6D`/`0x6E`) is 1..13. An unused layer
+    /// carries 15.
+    fn layer_present<T: UsbControl>(&self, dev: &mut Device<T>, tmcc_reg: u8) -> Result<bool> {
+        self.write1(dev, 0x6D, tmcc_reg)?;
+        let segments = self.read1(dev, 0x6E)? >> 4;
+        Ok((1..=13).contains(&segments))
+    }
+
     /// Signal status. `st.mask` selects the BER layers to read; lock, C/N,
     /// strength (`18000 − C/N`) and quality are always produced.
     ///
     /// * lock: `0x0A & 0x0F` ≥ 2 → [`lock::SYNC_STARTED`], ≥ 5 → [`lock::SIGNAL`],
     ///   ≥ 9 → [`lock::LOCKED`]; indirect `0x84` (window `0x6D`/`0x6E`) bit0 → 0x100;
-    /// * C/N: raw `0x46`/`0x47`, then the measurement is restarted;
+    /// * C/N: when `0x45` bit6 says a measurement has completed, raw
+    ///   `0x46`/`0x47`, then the measurement is restarted; otherwise the last
+    ///   completed value (none yet: C/N 0 and [`field::CNR`] left clear);
     /// * BER: bit n of `0x60` says the post-Viterbi measurement of layer n has
-    ///   completed; then its error count is read and its counter restarted,
-    ///   else [`BER_UNUSED`];
+    ///   completed; then its error count is read and its counter restarted.
+    ///   Between completions the last completed value is reported. When locked
+    ///   (sync state 9 or more) the TMCC segment count decides whether a layer
+    ///   exists: one that does not gives [`BER_UNUSED`], one that does but has
+    ///   no completed measurement yet leaves its field bit clear. Without lock
+    ///   a layer with no completed measurement gives [`BER_UNUSED`];
     /// * quality: 20 with signal, 60 when locked, then 80 / 90 / 95 above
     ///   22 / 23 / 24 dB C/N (100 instead of 95 when the sync state is 9 or more).
-    pub fn status<T: UsbControl>(&self, dev: &mut Device<T>, st: &mut SignalStatus) -> Result<()> {
+    pub fn status<T: UsbControl>(&mut self, dev: &mut Device<T>, st: &mut SignalStatus) -> Result<()> {
         let requested = st.mask;
         st.lock = 0;
         st.quality = 0;
@@ -502,25 +545,47 @@ impl Pn2031 {
             st.quality = 60;
         }
 
-        let raw = ((self.read1(dev, 0x46)? as u16) << 8) | self.read1(dev, 0x47)? as u16;
-        self.restart_cn(dev)?;
-        let cnr = cnr_mdb_from_raw(raw);
+        if self.read1(dev, 0x45)? & CN_READY != 0 {
+            let raw = ((self.read1(dev, 0x46)? as u16) << 8) | self.read1(dev, 0x47)? as u16;
+            self.restart_cn(dev)?;
+            self.cnr_last = Some(cnr_mdb_from_raw(raw));
+        }
+        let cnr = self.cnr_last.unwrap_or(0);
         st.cnr_mdb = cnr;
         st.strength = 18000 - cnr;
-        mask |= field::CNR | field::STRENGTH;
+        mask |= field::STRENGTH;
+        if self.cnr_last.is_some() {
+            mask |= field::CNR;
+        }
 
         if requested & (field::BER_A | field::BER_B | field::BER_C) != 0 {
-            let active = self.read1(dev, 0x60)?;
-            for (idx, &(bit, active_bit, first, restart_bit)) in BER_LAYERS.iter().enumerate() {
+            let done = self.read1(dev, 0x60)?;
+            for (idx, &(bit, done_bit, first, restart_bit, tmcc_reg)) in BER_LAYERS.iter().enumerate() {
                 if requested & bit == 0 {
                     continue;
                 }
-                st.ber[idx] = if active & active_bit != 0 {
-                    ber_e9(self.layer_errors(dev, first, restart_bit)?)
-                } else {
-                    BER_UNUSED
-                };
-                mask |= bit;
+                let present = if s >= SYNC_LOCKED { Some(self.layer_present(dev, tmcc_reg)?) } else { None };
+                if present == Some(false) {
+                    self.ber_last[idx] = None;
+                    st.ber[idx] = BER_UNUSED;
+                    mask |= bit;
+                    continue;
+                }
+                if done & done_bit != 0 {
+                    self.ber_last[idx] = Some(ber_e9(self.layer_errors(dev, first, restart_bit)?));
+                }
+                match (self.ber_last[idx], present) {
+                    (Some(v), _) => {
+                        st.ber[idx] = v;
+                        mask |= bit;
+                    }
+                    // The layer exists; its first measurement is still running.
+                    (None, Some(true)) => {}
+                    (None, _) => {
+                        st.ber[idx] = BER_UNUSED;
+                        mask |= bit;
+                    }
+                }
             }
         }
 

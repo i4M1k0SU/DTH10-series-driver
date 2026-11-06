@@ -183,25 +183,47 @@ mod tests {
 
     /// Records every control transfer; IN transfers of register reads are
     /// answered from `regs` (wValue, register) → byte, anything else with zeros.
+    /// Reads of the demodulator's `0x6E` are answered from `window`, keyed by
+    /// the last value written to `0x6D`.
     #[derive(Default)]
     struct Mock {
         log: RefCell<Vec<Call>>,
-        regs: HashMap<(u16, u16), u8>,
+        regs: RefCell<HashMap<(u16, u16), u8>>,
+        window: RefCell<HashMap<u8, u8>>,
+        window_addr: RefCell<u8>,
     }
 
     impl UsbControl for Mock {
         fn control_out(&self, _r: u8, v: u16, i: u16, d: &[u8], _: Duration) -> Result<usize> {
             self.log.borrow_mut().push((true, v, i, d.to_vec()));
+            if (v, i) == (REG, 0x6D) {
+                *self.window_addr.borrow_mut() = d[0];
+            }
             Ok(d.len())
         }
         fn control_in(&self, _r: u8, v: u16, i: u16, b: &mut [u8], _: Duration) -> Result<usize> {
             self.log.borrow_mut().push((false, v, i, vec![b.len() as u8]));
             b.fill(0);
-            if let Some(&x) = self.regs.get(&(v, i)) {
+            let x = if (v, i) == (REG, 0x6E) {
+                self.window.borrow().get(&self.window_addr.borrow()).copied()
+            } else {
+                self.regs.borrow().get(&(v, i)).copied()
+            };
+            if let Some(x) = x {
                 b[0] = x;
             }
             Ok(b.len())
         }
+    }
+
+    /// Set a demodulator register the mock answers with.
+    fn set(k: &Pn2031Kit<Mock>, reg: u8, v: u8) {
+        k.dev.transport().regs.borrow_mut().insert((REG, reg as u16), v);
+    }
+
+    /// Set an indirect register read through `0x6D`/`0x6E` (TMCC, `0x84`).
+    fn set_window(k: &Pn2031Kit<Mock>, reg: u8, v: u8) {
+        k.dev.transport().window.borrow_mut().insert(reg, v);
     }
 
     fn desc() -> TunerDesc {
@@ -223,7 +245,7 @@ mod tests {
     }
 
     fn kit_with(regs: HashMap<(u16, u16), u8>, d: TunerDesc) -> Pn2031Kit<Mock> {
-        Pn2031Kit::new(Device::new(Mock { regs, ..Default::default() }), d).unwrap()
+        Pn2031Kit::new(Device::new(Mock { regs: RefCell::new(regs), ..Default::default() }), d).unwrap()
     }
 
     fn take_log(k: &Pn2031Kit<Mock>) -> Vec<Call> {
@@ -436,50 +458,180 @@ mod tests {
         assert_eq!(take_log(&k), vec![gpio(0x1006, 0x4, 0x0), gpio(0x1004, 0x7, 0x7), gpio(0x1006, 0x3, 0)]);
     }
 
-    #[test]
-    fn signal_status_locked_layer_a() {
+    /// Writes and reads of the TMCC segment counts of layers A, B and C.
+    fn tmcc_reads() -> Vec<Call> {
+        vec![w(0x6D, 0x89), r(0x6E), w(0x6D, 0x8D), r(0x6E), w(0x6D, 0x91), r(0x6E)]
+    }
+
+    /// Locked, C/N measurement complete (raw 3180 → 16.0 dB), TMCC: layer A
+    /// 1 segment, layer B 12 segments, layer C unused; layer A's BER
+    /// measurement complete with 1000 errors.
+    fn locked_kit() -> Pn2031Kit<Mock> {
         let mut regs = HashMap::new();
         regs.insert((REG, 0x0A), 0x29); // sync state 9
-        regs.insert((REG, 0x6E), 0x01);
+        regs.insert((REG, 0x45), 0x40); // C/N ready
         regs.insert((REG, 0x46), 0x0C); // raw 0x0C6C = 3180 → 16.0 dB
         regs.insert((REG, 0x47), 0x6C);
-        regs.insert((REG, 0x45), 0x00);
-        regs.insert((REG, 0x60), 0x01); // only layer A in use
+        regs.insert((REG, 0x60), 0x01); // layer A measurement done
         regs.insert((REG, 0x64), 0x00);
         regs.insert((REG, 0x65), 0x03);
         regs.insert((REG, 0x66), 0xE8); // 1000 errors
         regs.insert((REG, 0x5F), 0x07);
-        let mut k = kit_with(regs, desc());
+        let k = kit_with(regs, desc());
+        set_window(&k, 0x84, 0x01);
+        set_window(&k, 0x89, 0x10);
+        set_window(&k, 0x8D, 0xC0);
+        set_window(&k, 0x91, 0xF0);
+        k
+    }
+
+    #[test]
+    fn signal_status_locked_layer_a() {
+        let mut k = locked_kit();
         let st = k.signal_status(field::ALL).unwrap();
         assert_eq!(st.lock, lock::SYNC_STARTED | lock::SIGNAL | lock::LOCKED | lock::REG81_BIT7);
         assert_eq!(st.sync_state, 9);
         assert_eq!(st.cnr_mdb, 16000);
         assert_eq!(st.quality, 60);
-        assert_eq!(st.ber, [612_745, BER_UNUSED, BER_UNUSED]);
+        // Layer B exists but has no completed measurement yet: its field stays invalid.
+        assert_eq!(st.ber, [612_745, 0, BER_UNUSED]);
         // Tuner reading with both MxL registers 0: 1000 × 113.
         assert_eq!(st.strength, 113_000);
-        assert_eq!(st.mask, field::ALL);
+        assert_eq!(st.mask, field::ALL & !field::BER_B);
 
         let log = take_log(&k);
-        let mut expect = vec![r(0x0A), w(0x6D, 0x84), r(0x6E), r(0x46), r(0x47), r(0x45), w(0x45, 0x10), w(0x45, 0x00)];
-        expect.extend([r(0x60), r(0x64), r(0x65), r(0x66), r(0x5F), batch(&[(0x5F, 0x06), (0x5F, 0x07)])]);
+        let mut expect = vec![r(0x0A), w(0x6D, 0x84), r(0x6E), r(0x45), r(0x46), r(0x47)];
+        expect.extend([r(0x45), w(0x45, 0x50), w(0x45, 0x40), r(0x60)]);
+        expect.extend([
+            w(0x6D, 0x89),
+            r(0x6E),
+            r(0x64),
+            r(0x65),
+            r(0x66),
+            r(0x5F),
+            batch(&[(0x5F, 0x06), (0x5F, 0x07)]),
+        ]);
+        expect.extend([w(0x6D, 0x8D), r(0x6E), w(0x6D, 0x91), r(0x6E)]);
         expect.extend(tuner_reg_read(0xCC));
         expect.extend(tuner_reg_read(0xBA));
         assert_eq!(log, expect);
     }
 
     #[test]
-    fn signal_status_quality_from_cnr_without_ber() {
+    fn ber_kept_between_completions() {
+        let mut k = locked_kit();
+        k.signal_status(field::ALL).unwrap();
+        take_log(&k);
+
+        // Next poll: no measurement completed, C/N not ready. The last values
+        // are reported, no counter is read or restarted.
+        set(&k, 0x60, 0x00);
+        set(&k, 0x45, 0x00);
+        let st = k.signal_status(field::ALL).unwrap();
+        assert_eq!(st.ber, [612_745, 0, BER_UNUSED]);
+        assert_eq!(st.cnr_mdb, 16000);
+        assert_eq!(st.mask, field::ALL & !field::BER_B);
+        let mut expect = vec![r(0x0A), w(0x6D, 0x84), r(0x6E), r(0x45), r(0x60)];
+        expect.extend(tmcc_reads());
+        expect.extend(tuner_reg_read(0xCC));
+        expect.extend(tuner_reg_read(0xBA));
+        assert_eq!(take_log(&k), expect);
+
+        // Layer B completes (1632 errors); layer A keeps its value.
+        set(&k, 0x60, 0x02);
+        set(&k, 0x67, 0x00);
+        set(&k, 0x68, 0x06);
+        set(&k, 0x69, 0x60);
+        let st = k.signal_status(field::ALL).unwrap();
+        assert_eq!(st.ber, [612_745, 1_000_000, BER_UNUSED]);
+        assert_eq!(st.mask, field::ALL);
+        let log = take_log(&k);
+        assert!(log.contains(&r(0x67)) && !log.contains(&r(0x64)));
+        assert!(log.contains(&batch(&[(0x5F, 0x05), (0x5F, 0x07)])));
+
+        // A tune restarts every measurement and drops the kept values.
+        k.open().unwrap();
+        k.tune(&TuneRequest::isdb_t(557_142_857, 6_000_000)).unwrap();
+        set(&k, 0x60, 0x00);
+        let st = k.signal_status(field::ALL).unwrap();
+        assert_eq!(st.cnr_mdb, 0);
+        assert_eq!(st.ber, [0, 0, BER_UNUSED]);
+        assert_eq!(st.mask, field::LOCK | field::STRENGTH | field::QUALITY | field::BER_C);
+    }
+
+    #[test]
+    fn layer_presence_from_tmcc() {
+        let mut k = locked_kit();
+        k.signal_status(field::ALL).unwrap();
+        // The TMCC now carries layer A as unused (segment count 15) and C as a
+        // 13-segment layer: A is reported unused although it was measured
+        // before and its done bit is set (its counter is then not read), and
+        // C exists without a measurement.
+        set_window(&k, 0x89, 0xF0);
+        set_window(&k, 0x91, 0xD0);
+        take_log(&k);
+        let st = k.signal_status(field::BER_A | field::BER_C).unwrap();
+        assert_eq!(st.ber, [BER_UNUSED, 0, 0]);
+        assert_eq!(st.mask & (field::BER_A | field::BER_B | field::BER_C), field::BER_A);
+        let log = take_log(&k);
+        assert!(!log.contains(&r(0x64)));
+        // Only the requested layers' TMCC entries are read.
+        assert!(log.contains(&w(0x6D, 0x89)) && !log.contains(&w(0x6D, 0x8D)) && log.contains(&w(0x6D, 0x91)));
+        // Segment counts 0 and 14 are not valid either.
+        for v in [0x00, 0xE0] {
+            set_window(&k, 0x89, v);
+            assert_eq!(k.signal_status(field::BER_A).unwrap().ber[0], BER_UNUSED);
+        }
+    }
+
+    #[test]
+    fn ber_without_lock_uses_done_bits_only() {
+        let mut k = locked_kit();
+        set(&k, 0x0A, 0x05); // signal, not locked: no TMCC
+        set(&k, 0x60, 0x00);
+        let st = k.signal_status(field::ALL).unwrap();
+        assert_eq!(st.ber, [BER_UNUSED; 3]);
+        assert_eq!(st.mask, field::ALL);
+        let log = take_log(&k);
+        assert!(!log.contains(&w(0x6D, 0x89)));
+        // Layer A completes, then stays at its value while the next one runs.
+        set(&k, 0x60, 0x01);
+        assert_eq!(k.signal_status(field::ALL).unwrap().ber, [612_745, BER_UNUSED, BER_UNUSED]);
+        set(&k, 0x60, 0x00);
+        assert_eq!(k.signal_status(field::ALL).unwrap().ber, [612_745, BER_UNUSED, BER_UNUSED]);
+    }
+
+    #[test]
+    fn cnr_read_only_when_ready() {
         let mut regs = HashMap::new();
         regs.insert((REG, 0x0A), 0x05); // signal, not locked
         regs.insert((REG, 0x46), 0x03); // raw 788 → 30.0 dB
         regs.insert((REG, 0x47), 0x14);
         let mut k = kit_with(regs, desc());
+        // Not ready and nothing measured yet: C/N 0, field invalid, no restart.
         let st = k.signal_status(field::ALL_BASIC).unwrap();
-        assert_eq!(st.lock, lock::SYNC_STARTED | lock::SIGNAL);
+        assert_eq!(st.cnr_mdb, 0);
+        assert_eq!(st.quality, 20);
+        assert_eq!(st.mask, field::ALL_BASIC & !field::CNR);
+        let log = take_log(&k);
+        assert!(log.contains(&r(0x45)) && !log.contains(&r(0x46)) && !log.iter().any(|c| c.0 && c.2 == 0x45));
+
+        // Ready (other bits of 0x45 kept by the restart, bit7 dropped).
+        set(&k, 0x45, 0xC4);
+        let st = k.signal_status(field::ALL_BASIC).unwrap();
         assert_eq!(st.cnr_mdb, 30000);
         assert_eq!(st.quality, 95);
         assert_eq!(st.mask, field::ALL_BASIC);
-        assert!(!take_log(&k).contains(&r(0x60)));
+        let log = take_log(&k);
+        assert_eq!(&log[3..9], &[r(0x45), r(0x46), r(0x47), r(0x45), w(0x45, 0xD4), w(0x45, 0x44)]);
+        assert!(!log.contains(&r(0x60)));
+
+        // Not ready again: the last value, without reading 0x46/0x47.
+        set(&k, 0x45, 0x04);
+        set(&k, 0x46, 0x0C);
+        let st = k.signal_status(field::ALL_BASIC).unwrap();
+        assert_eq!(st.cnr_mdb, 30000);
+        assert_eq!(st.mask, field::ALL_BASIC);
+        assert!(!take_log(&k).contains(&r(0x46)));
     }
 }
