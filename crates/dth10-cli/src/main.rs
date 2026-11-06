@@ -156,6 +156,13 @@ struct TuneArgs {
     /// has no such supply (the setting is for family models that have one).
     #[arg(long, value_name = "V", default_value_t = 0)]
     lnb: u32,
+    /// ISDB-T: switch the attenuator on (the vendor application's "use attenuator";
+    /// kits without one ignore it).
+    #[arg(long)]
+    attenuator: bool,
+    /// ISDB-S: switch the booster on (the vendor application's "use booster"; separate from --lnb).
+    #[arg(long)]
+    booster: bool,
     /// ISDB-T: how long to wait for lock before streaming [ms].
     #[arg(long, value_name = "MS", default_value_t = 1200)]
     ter_lock_wait: u64,
@@ -423,12 +430,14 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
         exclusive: true,
         log_events: false,
         ter_lock_wait_ms: a.ter_lock_wait,
+        attenuator: a.attenuator,
         ter_bandwidth_hz: 6_000_000,
         sat_i2c_path: a.sat_i2c_path.map(|p| p.min(1)),
         sat_stream_path: a.sat_stream_path.min(1),
         sat_endpoint: a.sat_endpoint,
         lnb_voltage,
         lnb_power,
+        booster: a.booster,
         sat_lock_wait_ms: a.sat_lock_wait,
     };
     let queue = TsQueue::new();
@@ -545,5 +554,13 @@ mod tests {
         assert_eq!(lnb_of(0), (0, false));
         assert_eq!(lnb_of(11), (110, true));
         assert_eq!(lnb_of(150), (150, true));
+    }
+
+    #[test]
+    fn switches_default_off() {
+        let a = args(&["tune", "-c", "27"]);
+        assert_eq!((a.attenuator, a.booster, a.lnb), (false, false, 0));
+        let a = args(&["tune", "-c", "27", "--attenuator", "--booster"]);
+        assert_eq!((a.attenuator, a.booster, a.lnb), (true, true, 0), "the booster does not imply the LNB supply");
     }
 }

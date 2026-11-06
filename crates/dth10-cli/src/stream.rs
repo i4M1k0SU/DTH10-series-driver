@@ -28,6 +28,14 @@ pub struct StreamArgs {
     /// Stream mode (BS/CS always run in device mode).
     #[arg(long, value_enum, default_value_t = Mode::Device)]
     mode: Mode,
+    /// ISDB-T attenuator for this stream: --attenuator (= 1) or --attenuator=0
+    /// (default: the daemon's setting).
+    #[arg(long, value_name = "0|1", num_args = 0..=1, require_equals = true, default_missing_value = "1", value_parser = clap::value_parser!(u8).range(0..=1))]
+    attenuator: Option<u8>,
+    /// ISDB-S booster for this stream: --booster (= 1) or --booster=0
+    /// (default: the daemon's setting).
+    #[arg(long, value_name = "0|1", num_args = 0..=1, require_equals = true, default_missing_value = "1", value_parser = clap::value_parser!(u8).range(0..=1))]
+    booster: Option<u8>,
     /// Fail instead of taking the stream over from another client that holds it.
     #[arg(long)]
     if_free: bool,
@@ -51,6 +59,8 @@ pub fn run(a: &StreamArgs) -> Result<(), Box<dyn Error>> {
         client: None,
         // the daemon's LNB and lock-wait settings
         lnb: None,
+        attenuator: a.attenuator.map(|v| v != 0),
+        booster: a.booster.map(|v| v != 0),
         lock_wait_ms: None,
     });
     let target = Target::resolve(a.socket.as_deref(), a.connect.as_deref());
@@ -160,5 +170,28 @@ pub fn status(a: &StatusArgs) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         Reply::Busy(why) | Reply::Error(why) => Err(why.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::{Cli, Cmd};
+
+    fn args(v: &[&str]) -> super::StreamArgs {
+        match Cli::parse_from(std::iter::once("dth10").chain(v.iter().copied())).cmd {
+            Cmd::Stream(s) => *s,
+            _ => panic!("not stream"),
+        }
+    }
+
+    #[test]
+    fn switches_are_optional() {
+        let a = args(&["stream", "-c", "27"]);
+        assert_eq!((a.attenuator, a.booster), (None, None), "the daemon's settings");
+        let a = args(&["stream", "-c", "27", "--attenuator", "--booster=0"]);
+        assert_eq!((a.attenuator, a.booster), (Some(1), Some(0)));
+        assert!(Cli::try_parse_from(["dth10", "stream", "-c", "27", "--booster=2"]).is_err());
     }
 }
