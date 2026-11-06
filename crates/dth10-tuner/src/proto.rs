@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! > stream ter=557142857 name=27 program=1024
-//! > stream unit=04110199-110822N0326 sat=1318000000 tsid=40f1 program=101 busy=fail client=4120-1 lnb=0 lock_wait=1500
+//! > stream unit=04110199-110822N0326 sat=1318000000 tsid=40f1 program=101 busy=fail client=4120-1 lnb=0 boost=0 lock_wait=1500
 //! > stream sat=1318000000 slot=1 program=first
 //! < ok 04110199-110822N0326 ISDB-S 1318000000 Hz C/N 18.6 dB
 //! < busy ISDB-S stream of unit 04110199-110822N0326 is held by connection 3
@@ -23,8 +23,9 @@
 //! holds over, unless it says `busy=fail`, in which case the answer is `busy`
 //! at once; a request whose `client=` id is the one the holder gave replaces
 //! that stream even then (it is the same client changing channel). `lnb`
-//! (antenna supply: `0` off, `110`, `150` volts; satellite only) and
-//! `lock_wait` (ms to wait for lock on this tune) apply to this request's
+//! (antenna supply: `0` off, `110`, `150` volts; satellite only), `att`
+//! (terrestrial attenuator, `0` / `1`), `boost` (satellite booster, `0` /
+//! `1`) and `lock_wait` (ms to wait for lock on this tune) apply to this request's
 //! unit and tune only; without them the daemon's own settings apply, so two
 //! clients of two units each get their own values.
 //! `status` (with an optional `unit=`) answers with the C/N of both systems
@@ -64,6 +65,12 @@ pub struct StreamRequest {
     /// Antenna (LNB) supply for this tune: 0 = off, else the voltage (110 /
     /// 150); `None` = the daemon's setting. Used by satellite tunes only.
     pub lnb: Option<u32>,
+    /// Terrestrial attenuator for this tune (key `att=0|1`); `None` = the
+    /// daemon's setting. Used by terrestrial tunes only.
+    pub attenuator: Option<bool>,
+    /// Satellite booster for this tune (key `boost=0|1`); `None` = the
+    /// daemon's setting. Used by satellite tunes only.
+    pub booster: Option<bool>,
     /// How long this tune waits for lock, in ms; `None` = the daemon's setting.
     pub lock_wait_ms: Option<u64>,
 }
@@ -110,6 +117,12 @@ impl Request {
                 if let Some(v) = r.lnb {
                     s.push_str(&format!(" lnb={v}"));
                 }
+                if let Some(on) = r.attenuator {
+                    s.push_str(&format!(" att={}", u8::from(on)));
+                }
+                if let Some(on) = r.booster {
+                    s.push_str(&format!(" boost={}", u8::from(on)));
+                }
                 if let Some(ms) = r.lock_wait_ms {
                     s.push_str(&format!(" lock_wait={ms}"));
                 }
@@ -139,6 +152,7 @@ impl Request {
         let (mut raw, mut busy_fail) = (false, false);
         let mut client = None;
         let (mut lnb, mut lock_wait_ms) = (None, None);
+        let (mut attenuator, mut booster) = (None, None);
         for word in words {
             let (key, value) = word.split_once('=').ok_or_else(|| format!("{word:?}: expected key=value"))?;
             match key {
@@ -175,6 +189,8 @@ impl Request {
                         v => return Err(format!("lnb {v}: 0, 110 or 150")),
                     })
                 }
+                "att" => attenuator = Some(parse_switch(key, value)?),
+                "boost" => booster = Some(parse_switch(key, value)?),
                 "lock_wait" => {
                     lock_wait_ms = Some(parse_num(value).ok_or_else(|| format!("lock_wait {value:?}: not a number"))?)
                 }
@@ -197,7 +213,26 @@ impl Request {
         if let Some(n) = name {
             channel.name = n;
         }
-        Ok(Request::Stream(StreamRequest { unit, channel, program, raw, busy_fail, client, lnb, lock_wait_ms }))
+        Ok(Request::Stream(StreamRequest {
+            unit,
+            channel,
+            program,
+            raw,
+            busy_fail,
+            client,
+            lnb,
+            attenuator,
+            booster,
+            lock_wait_ms,
+        }))
+    }
+}
+
+fn parse_switch(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(format!("{key} {value:?}: 0 or 1")),
     }
 }
 
@@ -333,6 +368,8 @@ mod tests {
             busy_fail,
             client: None,
             lnb: None,
+            attenuator: None,
+            booster: None,
             lock_wait_ms: None,
         })
     }
@@ -352,6 +389,29 @@ mod tests {
         assert_eq!((r.lnb, r.lock_wait_ms), (None, None));
         assert!(Request::parse("stream sat=1318000000 lnb=12").is_err());
         assert!(Request::parse("stream sat=1318000000 lock_wait=x").is_err());
+    }
+
+    #[test]
+    fn attenuator_and_booster_round_trip() {
+        let Request::Stream(r) = Request::parse("stream ter=557142857 client=1-1 att=1 boost=0").unwrap() else {
+            panic!()
+        };
+        assert_eq!((r.attenuator, r.booster), (Some(true), Some(false)));
+        let line = Request::Stream(r.clone()).to_line();
+        assert!(line.ends_with(" client=1-1 att=1 boost=0"), "{line}");
+        assert_eq!(Request::parse(&line).unwrap(), Request::Stream(r));
+        let Request::Stream(r) = Request::parse("stream sat=1318000000 lnb=0 att=0 boost=1 lock_wait=1500").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((r.lnb, r.attenuator, r.booster, r.lock_wait_ms), (Some(0), Some(false), Some(true), Some(1500)));
+        assert_eq!(Request::parse(&Request::Stream(r.clone()).to_line()).unwrap(), Request::Stream(r));
+        // absent: the daemon's settings
+        let Request::Stream(r) = Request::parse("stream ter=557142857").unwrap() else { panic!() };
+        assert_eq!((r.attenuator, r.booster), (None, None));
+        assert!(!Request::Stream(r).to_line().contains("att="));
+        assert!(Request::parse("stream ter=557142857 att=2").is_err());
+        assert!(Request::parse("stream sat=1318000000 boost=on").is_err());
     }
 
     #[test]

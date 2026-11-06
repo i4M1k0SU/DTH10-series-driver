@@ -70,6 +70,14 @@ pub struct ServeArgs {
     /// has no such supply (the setting is for family models that have one).
     #[arg(long, value_name = "V", default_value_t = 0)]
     lnb: u32,
+    /// ISDB-T: switch the attenuator on for requests that do not say (the vendor
+    /// application's "use attenuator"; kits without one ignore it).
+    #[arg(long)]
+    attenuator: bool,
+    /// ISDB-S: switch the booster on for requests that do not say (the vendor
+    /// application's "use booster"; separate from --lnb).
+    #[arg(long)]
+    booster: bool,
     /// ISDB-T: how long to wait for lock before streaming [ms].
     #[arg(long, value_name = "MS", default_value_t = 1200)]
     ter_lock_wait: u64,
@@ -424,16 +432,18 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
             }
             t.set_stream_mode(if req.raw { StreamModeCfg::Raw } else { StreamModeCfg::Device });
             t.set_device_program(program);
-            // The LNB supply and the lock wait of this request (each client asks
-            // with its own, e.g. two BonDriver DLLs of two units), else the
-            // daemon's: set on every tune, so one client's values do not stay
-            // behind for the next.
+            // The LNB supply, the attenuator / booster and the lock wait of this
+            // request (each client asks with its own, e.g. two BonDriver DLLs of
+            // two units), else the daemon's: set on every tune, so one client's
+            // values do not stay behind for the next.
             let d = &unit.cfg;
             t.set_lnb(match req.lnb {
                 Some(v) => lnb_of(v).0,
                 None if d.lnb_power => d.lnb_voltage,
                 None => 0,
             });
+            t.set_attenuator(req.attenuator.unwrap_or(d.attenuator));
+            t.set_booster(req.booster.unwrap_or(d.booster));
             let wait = match system {
                 System::IsdbT => d.ter_lock_wait_ms,
                 System::IsdbS => d.sat_lock_wait_ms,
@@ -649,6 +659,8 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             sat_lock_wait_ms: a.sat_lock_wait,
             lnb_voltage,
             lnb_power,
+            attenuator: a.attenuator,
+            booster: a.booster,
             ..TunerConfig::default()
         };
         Arc::new(Unit {

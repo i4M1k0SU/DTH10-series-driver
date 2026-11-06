@@ -27,6 +27,8 @@ pub mod lj101;
 pub mod mxl13xrf;
 pub mod pn2031;
 pub mod protocol;
+#[cfg(test)]
+mod regmock;
 pub mod tc90517;
 pub mod terrestrial;
 pub mod tlv;

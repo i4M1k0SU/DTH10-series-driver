@@ -430,6 +430,10 @@ struct Satellite {
     i2c_path: u8,
 }
 
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
 /// The device's report that the antenna supply may be over-current: event
 /// 0x0000/0x1011 for the satellite filter with bit 0 of its fifth payload byte set.
 fn lnb_overcurrent_report(ev: &dth10_core::events::Event) -> bool {
@@ -744,6 +748,16 @@ impl Tuner {
         }
     }
 
+    /// Change the terrestrial attenuator for the following terrestrial tunes.
+    pub fn set_attenuator(&mut self, on: bool) {
+        self.cfg.attenuator = on;
+    }
+
+    /// Change the satellite booster for the following satellite tunes.
+    pub fn set_booster(&mut self, on: bool) {
+        self.cfg.booster = on;
+    }
+
     /// Change how long the following tunes of `system` wait for lock.
     pub fn set_lock_wait_ms(&mut self, system: System, ms: u64) {
         match system {
@@ -879,6 +893,23 @@ impl Tuner {
             s.stop();
         }
         self.queues[i].purge();
+    }
+
+    /// Set the terrestrial attenuator from the configuration (failures are
+    /// logged only: the vendor driver ignores them too).
+    fn apply_attenuator(&mut self) {
+        let on = self.cfg.attenuator;
+        if !self.terrestrial.has_attenuator() {
+            if on {
+                log::info!("ISDB-T attenuator: the {} kit has none (setting ignored)", self.terrestrial.kind());
+            }
+            return;
+        }
+        match self.terrestrial.set_attenuator(on) {
+            Ok(true) => log::info!("ISDB-T attenuator {}", on_off(on)),
+            Ok(false) => log::info!("ISDB-T attenuator not switched: the module selects no chip for it"),
+            Err(e) => log::warn!("ISDB-T attenuator {}: {e}", on_off(on)),
+        }
     }
 
     /// Stop both streams.
@@ -1088,6 +1119,9 @@ impl Tuner {
                 if !self.terrestrial.is_open() {
                     self.terrestrial.open()?;
                 }
+                // Like the vendor application, on every tune: the chip keeps it
+                // only until the next kit Init.
+                self.apply_attenuator();
                 let req = TuneRequest::isdb_t(ch.frequency_hz as u64, self.cfg.ter_bandwidth_hz);
                 self.terrestrial.tune(&req)?;
                 let wait = Duration::from_millis(self.cfg.ter_lock_wait_ms);
@@ -1169,6 +1203,14 @@ impl Tuner {
                         log::warn!("LNB supply reported unhealthy (over-current?), switched off");
                     }
                     sat.lnb_volt = lnb_volt;
+                }
+                // Like the vendor application, on every tune after the supply:
+                // the chip keeps it only until the next kit Init.
+                let on = self.cfg.booster;
+                match sat.kit.set_booster(on) {
+                    Ok(true) => log::info!("ISDB-S booster {}", on_off(on)),
+                    Ok(false) => log::info!("ISDB-S booster not switched: the module selects no chip for it"),
+                    Err(e) => log::warn!("ISDB-S booster {}: {e}", on_off(on)),
                 }
                 sat.kit.tune(ch.frequency_hz as u64)?;
                 // Wait for lock, then pick the TSID: the TMCC table entry of the

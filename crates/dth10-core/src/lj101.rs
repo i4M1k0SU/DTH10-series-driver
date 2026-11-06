@@ -148,17 +148,87 @@ impl<T: UsbControl> Lj101Kit<T> {
         Ok(st)
     }
 
-    /// LNB power: demodulator pin (mode 1) and, for model "h70", the bridge
-    /// GPIO supply (mode 2, 0 / 110 / 150 = off / 11 V / 15 V). Returns
-    /// whether the bridge reported the supply as healthy (`false` = switched
-    /// off again by the over-current check, see `device::lnb_set`).
+    /// Antenna (LNB) power: for model "h70" the bridge GPIO supply (0 / 110 /
+    /// 150 = off / 11 V / 15 V); no effect on other models, as in the vendor
+    /// driver. Returns whether the bridge reported the supply as healthy
+    /// (`false` = switched off again by the over-current check, see
+    /// `device::lnb_set`). The booster is a separate switch ([`set_booster`](Self::set_booster)).
     pub fn lnb_power(&mut self, volt: u32) -> Result<bool> {
-        if let Err(e) = self.demod.lnb_enable(&mut self.dev, volt != 0) {
-            log::debug!("demod LNB pin: {e}");
-        }
         if self.desc.model_is("h70") {
             return device::lnb_set(&self.dev, volt);
         }
         Ok(true)
+    }
+
+    /// The booster (the vendor application's "use booster" for BS/CS): the
+    /// module's switch bits in the demodulator register 0x1C. It stays set
+    /// until the next kit Init. `Ok(false)`: the module selects no chip for
+    /// it, nothing was written.
+    pub fn set_booster(&mut self, on: bool) -> Result<bool> {
+        self.demod.set_booster(&mut self.dev, on)
+    }
+
+    /// Whether the booster is on (read back from the demodulator).
+    pub fn booster(&mut self) -> Result<bool> {
+        self.demod.booster(&mut self.dev)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::regmock::{Op, RegMock};
+
+    fn kit(model: &str, regs: &[(u8, u8, u8)]) -> Lj101Kit<RegMock> {
+        let desc = TunerDesc {
+            kit_name: "SMT_LJ101".into(),
+            hw_version: 0x402,
+            demod_i2c_addr: 0x19,
+            model: model.into(),
+            ..Default::default()
+        };
+        Lj101Kit::new(Device::new(RegMock::with_regs(regs)), desc).unwrap()
+    }
+
+    #[test]
+    fn booster_switches_bits_1_0_of_the_selected_chip() {
+        // 0x0F = 0x34 (the Open configuration): bits 5:4 = 11 -> 0x19
+        let mut k = kit("h70", &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0xFA), (0x18, 0x1C, 0x28)]);
+        assert!(k.set_booster(true).unwrap());
+        assert_eq!(k.dev.transport().take(), vec![Op::R(0x18, 0x0F), Op::R(0x19, 0x1C), Op::W(0x19, 0x1C, 0xFB)]);
+        assert!(k.booster().unwrap());
+        assert!(k.set_booster(false).unwrap());
+        assert_eq!(k.dev.transport().reg(0x19, 0x1C), 0xFA);
+        assert!(!k.booster().unwrap());
+        assert_eq!(k.dev.transport().reg(0x18, 0x1C), 0x28, "the other chip is left alone");
+
+        // bits 5:4 = 01 -> 0x18
+        let mut k = kit("h70", &[(0x18, 0x0F, 0x14), (0x18, 0x1C, 0x28)]);
+        assert!(k.set_booster(true).unwrap());
+        assert_eq!(k.dev.transport().take(), vec![Op::R(0x18, 0x0F), Op::R(0x18, 0x1C), Op::W(0x18, 0x1C, 0x2B)]);
+    }
+
+    #[test]
+    fn booster_is_left_alone_when_no_chip_is_selected() {
+        for sel in [0x04u8, 0x24] {
+            let mut k = kit("h70", &[(0x18, 0x0F, sel), (0x19, 0x1C, 0x0A)]);
+            assert!(!k.set_booster(true).unwrap(), "0x0F = {sel:#04x}");
+            assert_eq!(k.dev.transport().take(), vec![Op::R(0x18, 0x0F)]);
+        }
+    }
+
+    #[test]
+    fn lnb_power_does_not_touch_the_booster() {
+        // another model: no effect at all
+        let mut k = kit("", &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0x0A)]);
+        assert!(k.lnb_power(150).unwrap());
+        assert!(k.lnb_power(0).unwrap());
+        assert_eq!(k.dev.transport().take(), vec![]);
+        // model "h70": the bridge GPIO only, no I2C
+        let mut k = kit("h70", &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0x0A)]);
+        let _ = k.lnb_power(150).unwrap();
+        let ops = k.dev.transport().take();
+        assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, Op::Other)), "{ops:?}");
+        assert_eq!(k.dev.transport().reg(0x19, 0x1C), 0x0A);
     }
 }

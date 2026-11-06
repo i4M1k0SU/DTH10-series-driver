@@ -196,6 +196,7 @@ impl Config {
             t.device_program = DeviceProgram::parse(&p).unwrap_or(DeviceProgram::First);
         }
         t.ter_lock_wait_ms = f.u64("ISDB-T", "LockWaitMs", t.ter_lock_wait_ms);
+        t.attenuator = f.bool("ISDB-T", "Attenuator", t.attenuator);
         t.lnb_voltage = match f.u64("ISDB-S", "LnbVoltage", t.lnb_voltage as u64) {
             0 => 0,
             11 | 110 => 110,
@@ -203,6 +204,7 @@ impl Config {
             _ => 150,
         };
         t.lnb_power = f.bool("ISDB-S", "LnbPower", t.lnb_power);
+        t.booster = f.bool("ISDB-S", "Booster", t.booster);
         t.sat_lock_wait_ms = f.u64("ISDB-S", "LockWaitMs", t.sat_lock_wait_ms);
         c.server.idle_exit_secs = f.u64("Server", "IdleExitSec", c.server.idle_exit_secs);
         c.server.start_timeout_secs = f.u64("Server", "StartTimeoutSec", c.server.start_timeout_secs);
@@ -267,6 +269,7 @@ mod tests {
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")));
         assert_eq!((t.ter_lock_wait_ms, t.sat_lock_wait_ms), (1200, 1500));
         assert_eq!((t.lnb_voltage, t.lnb_power), (150, false));
+        assert_eq!((t.attenuator, t.booster), (false, false));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (5, 5));
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("warn", ""));
         assert_fixed(t);
@@ -289,6 +292,7 @@ mod tests {
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")), "the key file next to the DLL");
         assert_eq!((t.ter_lock_wait_ms, t.sat_lock_wait_ms), (u.ter_lock_wait_ms, u.sat_lock_wait_ms));
         assert_eq!((t.lnb_voltage, t.lnb_power), (u.lnb_voltage, u.lnb_power));
+        assert_eq!((t.attenuator, t.booster), (u.attenuator, u.booster));
         assert_eq!(
             (c.server.idle_exit_secs, c.server.start_timeout_secs),
             (d.server.idle_exit_secs, d.server.start_timeout_secs)
@@ -305,8 +309,10 @@ mod tests {
         ("Stream", "Mode"),
         ("Stream", "Program"),
         ("ISDB-T", "LockWaitMs"),
+        ("ISDB-T", "Attenuator"),
         ("ISDB-S", "LnbPower"),
         ("ISDB-S", "LnbVoltage"),
+        ("ISDB-S", "Booster"),
         ("ISDB-S", "LockWaitMs"),
         ("Log", "Level"),
         ("Log", "File"),
@@ -338,8 +344,8 @@ mod tests {
     fn reads_every_current_key() {
         let ini = "[Device]\r\nSerial=SN1\r\nSpaces=BS,CS\r\n\
                    [Stream]\r\nMode=raw\r\nProgram=0x400\r\n\
-                   [ISDB-T]\r\nLockWaitMs=2000\r\n\
-                   [ISDB-S]\r\nLnbVoltage=110\r\nLnbPower=1\r\nLockWaitMs=2500\r\n\
+                   [ISDB-T]\r\nLockWaitMs=2000\r\nAttenuator=1\r\n\
+                   [ISDB-S]\r\nLnbVoltage=110\r\nLnbPower=1\r\nBooster=yes\r\nLockWaitMs=2500\r\n\
                    [Log]\r\nLevel=debug\r\nFile=C:\\logs\\bon.log\r\n\
                    [Server]\r\nIdleExitSec=9\r\nStartTimeoutSec=7\r\n";
         let (c, dir) = load_with("keys", Some(ini));
@@ -349,6 +355,7 @@ mod tests {
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")));
         assert_eq!((t.ter_lock_wait_ms, t.sat_lock_wait_ms), (2000, 2500));
         assert_eq!((t.lnb_voltage, t.lnb_power), (110, true));
+        assert_eq!((t.attenuator, t.booster), (true, true));
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("debug", "C:\\logs\\bon.log"));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (9, 7));
         assert_fixed(t);

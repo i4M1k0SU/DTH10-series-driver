@@ -136,10 +136,12 @@ struct Inner {
     unit: Option<String>,
     program: String,
     raw: bool,
-    /// This DLL's `[ISDB-S] LnbPower` / `LnbVoltage` (0 = off) and lock waits,
-    /// sent with every stream request: they apply to this DLL's unit only,
-    /// whichever DLL started the server.
+    /// This DLL's `[ISDB-S] LnbPower` / `LnbVoltage` (0 = off), `[ISDB-T]
+    /// Attenuator`, `[ISDB-S] Booster` and lock waits, sent with every stream
+    /// request: they apply to this DLL's unit only, whichever DLL started the server.
     lnb: u32,
+    attenuator: bool,
+    booster: bool,
     ter_lock_wait_ms: u64,
     sat_lock_wait_ms: u64,
     queue: TsQueue,
@@ -372,6 +374,8 @@ impl Inner {
             busy_fail: true,
             client: Some(self.client.clone()),
             lnb: Some(self.lnb),
+            attenuator: Some(self.attenuator),
+            booster: Some(self.booster),
             lock_wait_ms: Some(match ch.system {
                 System::IsdbT => self.ter_lock_wait_ms,
                 System::IsdbS => self.sat_lock_wait_ms,
@@ -517,6 +521,8 @@ impl Client {
             program: program_text(cfg.tuner.device_program),
             raw: cfg.tuner.stream_mode == StreamModeCfg::Raw,
             lnb: if cfg.tuner.lnb_power { cfg.tuner.lnb_voltage } else { 0 },
+            attenuator: cfg.tuner.attenuator,
+            booster: cfg.tuner.booster,
             ter_lock_wait_ms: cfg.tuner.ter_lock_wait_ms,
             sat_lock_wait_ms: cfg.tuner.sat_lock_wait_ms,
             queue,
@@ -753,7 +759,7 @@ mod tests {
         // (request kind, unit, client id) of every request the fake server got
         type Seen = Arc<Mutex<Vec<(&'static str, Option<String>, Option<String>)>>>;
         let seen: Seen = Arc::default();
-        type Lnbs = Arc<Mutex<Vec<(Option<String>, Option<u32>, Option<u64>)>>>;
+        type Lnbs = Arc<Mutex<Vec<(Option<String>, Option<u32>, Option<u64>, Option<bool>, Option<bool>)>>>;
         let lnbs: Lnbs = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
         let server = {
@@ -782,7 +788,7 @@ mod tests {
                         }
                         Ok(Request::Stream(r)) => {
                             seen.locked().push(("stream", r.unit.clone(), r.client.clone()));
-                            lnbs.locked().push((r.unit.clone(), r.lnb, r.lock_wait_ms));
+                            lnbs.locked().push((r.unit.clone(), r.lnb, r.lock_wait_ms, r.attenuator, r.booster));
                             // the stream ends at once; this test only looks at the requests
                             let _ = c.write_all(
                                 b"ok X ISDB-T 557142857 Hz C/N 30.0 dB
@@ -796,11 +802,12 @@ mod tests {
             })
         };
 
-        // unit A without, unit B with an antenna supply; different lock waits
+        // unit A without, unit B with an antenna supply and booster; different lock waits
         let open = |serial: &str, lnb_power: bool, sat_wait: u64| {
             let mut cfg = Config { dll_dir: Some(dir.clone()), ..Config::default() };
             cfg.tuner.serial = serial.into();
             cfg.tuner.lnb_power = lnb_power;
+            cfg.tuner.booster = lnb_power;
             cfg.tuner.sat_lock_wait_ms = sat_wait;
             Client::open(&cfg, TsQueue::new()).expect("open against the fake server")
         };
@@ -824,10 +831,10 @@ mod tests {
             seen.iter().filter(|(k, ..)| *k == "status").all(|(_, u, _)| u.is_some()),
             "every status request names the unit: {seen:?}"
         );
-        // each DLL's own LNB and lock wait went with its own requests
+        // each DLL's own LNB, switches and lock wait went with its own requests
         let lnbs = lnbs.locked();
-        assert_eq!(lnbs[0], (Some("SN-A".into()), Some(0), Some(1500)));
-        assert_eq!(lnbs[1], (Some("SN-B".into()), Some(150), Some(2500)));
+        assert_eq!(lnbs[0], (Some("SN-A".into()), Some(0), Some(1500), Some(false), Some(false)));
+        assert_eq!(lnbs[1], (Some("SN-B".into()), Some(150), Some(2500), Some(false), Some(true)));
     }
 
     #[test]

@@ -103,6 +103,10 @@ pub struct TunerConfig {
     pub log_events: bool,
     /// `[ISDB-T] LockWaitMs`
     pub ter_lock_wait_ms: u64,
+    /// `[ISDB-T] Attenuator`: the terrestrial attenuator (the vendor
+    /// application's "use attenuator"), set on every terrestrial tune. Only
+    /// the `SMT_LJ101` hw 0x102 kit has one (the DT-H70/U2); other kits ignore it.
+    pub attenuator: bool,
     /// ISDB-T channel bandwidth in Hz: 6 MHz on the Japanese UHF raster (fixed in the DLL).
     pub ter_bandwidth_hz: u32,
     /// Command path (bRequest bit7) for the satellite demodulator/tuner I2C and
@@ -125,6 +129,9 @@ pub struct TunerConfig {
     /// when this is on, but powers nothing on this product); the setting is
     /// for family models that have one.
     pub lnb_power: bool,
+    /// `[ISDB-S] Booster`: the satellite booster (the vendor application's
+    /// "use booster"), set on every satellite tune; separate from the LNB supply.
+    pub booster: bool,
     /// `[ISDB-S] LockWaitMs`
     pub sat_lock_wait_ms: u64,
 }
@@ -144,12 +151,14 @@ impl Default for TunerConfig {
             exclusive: true,
             log_events: false,
             ter_lock_wait_ms: 1200,
+            attenuator: false,
             ter_bandwidth_hz: 6_000_000,
             sat_i2c_path: None,
             sat_stream_path: 1,
             sat_endpoint: 0,
             lnb_voltage: 150,
             lnb_power: false,
+            booster: false,
             sat_lock_wait_ms: 1500,
         }
     }
