@@ -21,11 +21,11 @@ clap.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # SIGTERM / SIGINT / SIGHUP end the stream; access(2) for the state directory.
-libc = "0.2"
+libc = "0.2.191"
 
 [target.'cfg(windows)'.dependencies]
 # Ctrl-C ends the stream.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [build-dependencies]
 jiff.workspace = true

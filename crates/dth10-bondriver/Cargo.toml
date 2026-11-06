@@ -17,7 +17,7 @@ log.workspace = true
 env_logger.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_WindowsProgramming"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_WindowsProgramming"] }
 
 [features]
 # `cargo test --features rtti-check`: a C++ test (tests/rtti_check.cpp, built
@@ -27,5 +27,5 @@ rtti-check = []
 
 [build-dependencies]
 jiff.workspace = true
-cc = "1"
+cc = "1.10.0"
 winresource.workspace = true
