@@ -10,7 +10,7 @@ use std::thread::sleep;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::kit::{BER_UNUSED, SignalStatus, field, lock};
+use crate::kit::{BER_UNUSED, SignalStatus, VendorDriver, field, lock};
 use crate::lj101::demod::module_chip;
 use crate::protocol::UsbControl;
 use crate::tlv::TunerDesc;
@@ -24,6 +24,10 @@ pub enum TerVariant {
     Tc90517Mxl,
     /// `SMT_LJ101` hw 0x102: its own Open configuration, TS-mode values and post-tune steps.
     SmtLj101,
+    /// The TC90522 / TC90532 hw 0x102 kits ([`crate::tc9052x`]) of the given
+    /// vendor driver: their own configuration and TS pins
+    /// ([`crate::tc9052x::demod`]), the SMT_LJ101 kit's post-tune steps.
+    Tc9052x(VendorDriver),
 }
 
 /// Demodulator instance bound to an I2C address (`TunerDesc::demod_i2c_addr`).
@@ -74,6 +78,7 @@ impl Tc90517 {
         match self.variant {
             TerVariant::Tc90517Mxl => self.configure_mxl_kit(dev, desc),
             TerVariant::SmtLj101 => self.configure_lj101_kit(dev, desc),
+            TerVariant::Tc9052x(driver) => crate::tc9052x::demod::configure(dev, self.addr, desc, driver),
         }
     }
 
@@ -137,6 +142,7 @@ impl Tc90517 {
     /// TS output / pin control: registers 0x1E/0x1F.
     /// MxL kit: mode 0 = `80/08`, 1 = `A8/A8`, 2 = `94/58`.
     /// SMT_LJ101 kit: mode 0 = `A2/08`, 1 = `AA/A8`, 2 = `A6/58`.
+    /// TC90522 / TC90532 kits: [`crate::tc9052x::demod::set_ts_pins`].
     pub fn set_ts_mode<T: UsbControl>(&self, dev: &mut Device<T>, mode: u8) -> Result<()> {
         let (r1e, r1f) = match (self.variant, mode) {
             (TerVariant::Tc90517Mxl, 0) => (0x80, 0x08),
@@ -145,6 +151,7 @@ impl Tc90517 {
             (TerVariant::SmtLj101, 0) => (0xA2, 0x08),
             (TerVariant::SmtLj101, 1) => (0xAA, 0xA8),
             (TerVariant::SmtLj101, 2) => (0xA6, 0x58),
+            (TerVariant::Tc9052x(_), _) => return crate::tc9052x::demod::set_ts_pins(dev, self.addr, mode),
             _ => return dev.i2c_batch_flush(),
         };
         dev.i2c_batch_append(self.addr, 0x1E, &[r1e])?;
@@ -184,7 +191,7 @@ impl Tc90517 {
     }
 
     /// Post-tune. MxL kit: `0x01 <- 40`, `0x23 &= ~1`, `0x76 <- 8F`
-    /// (batch), 20 ms, TS on. SMT_LJ101 kit: `0x01 <- 40`,
+    /// (batch), 20 ms, TS on. SMT_LJ101 and TC90522 / TC90532 kits: `0x01 <- 40`,
     /// `0x23 &= ~1` (immediate), 20 ms, TS on.
     pub fn post_tune<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         dev.i2c_reg_write(self.addr, 0x01, &[0x40])?;
@@ -195,7 +202,7 @@ impl Tc90517 {
                 dev.i2c_batch_append(self.addr, 0x76, &[0x8F])?;
                 dev.i2c_batch_flush()?;
             }
-            TerVariant::SmtLj101 => {
+            TerVariant::SmtLj101 | TerVariant::Tc9052x(_) => {
                 dev.i2c_reg_write(self.addr, 0x23, &[v & !0x01])?;
             }
         }
