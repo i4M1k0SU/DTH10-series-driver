@@ -152,4 +152,86 @@ impl<T: UsbControl> Tc90517Kit<T> {
     pub fn last_request(&self) -> Option<&TuneRequest> {
         self.last_request.as_ref()
     }
+
+    /// Whether the kit has the attenuator switch: the `SMT_LJ101` hw 0x102
+    /// kit only (the vendor driver does nothing for `TC90517_MxL13xRF`).
+    pub fn has_attenuator(&self) -> bool {
+        self.demod.variant == TerVariant::SmtLj101
+    }
+
+    /// The attenuator (the vendor application's "use attenuator"). It stays
+    /// set until the next kit Init. `Ok(false)`: not switched (no attenuator
+    /// on this kit, or the module selects no chip for it).
+    pub fn set_attenuator(&mut self, on: bool) -> Result<bool> {
+        if !self.has_attenuator() {
+            return Ok(false);
+        }
+        self.demod.set_attenuator(&mut self.dev, on)
+    }
+
+    /// Whether the attenuator is on; `None` when the kit has none or the
+    /// module selects no chip for it.
+    pub fn attenuator(&mut self) -> Result<Option<bool>> {
+        if !self.has_attenuator() {
+            return Ok(None);
+        }
+        self.demod.attenuator(&mut self.dev)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::regmock::{Op, RegMock};
+
+    fn kit(name: &str, regs: &[(u8, u8, u8)]) -> Tc90517Kit<RegMock> {
+        let desc = TunerDesc {
+            kit_name: name.into(),
+            hw_version: 0x102,
+            demod_i2c_addr: 0x18,
+            tuner_i2c_addr: 0x60,
+            ..Default::default()
+        };
+        Tc90517Kit::new(Device::new(RegMock::with_regs(regs)), desc).unwrap()
+    }
+
+    #[test]
+    fn attenuator_switches_bits_3_2_of_the_selected_chip() {
+        // 0x0F = 0x34 (the Open configuration): bits 3:2 = 01 -> 0x18
+        let mut k = kit("SMT_LJ101", &[(0x18, 0x0F, 0x34), (0x18, 0x1C, 0x28), (0x19, 0x1C, 0x0A)]);
+        assert!(k.set_attenuator(true).unwrap());
+        assert_eq!(k.dev.transport().take(), vec![Op::R(0x18, 0x0F), Op::R(0x18, 0x1C), Op::W(0x18, 0x1C, 0x2C)]);
+        assert_eq!(k.attenuator().unwrap(), Some(true));
+        assert!(k.set_attenuator(false).unwrap());
+        assert_eq!(k.dev.transport().reg(0x18, 0x1C), 0x28);
+        assert_eq!(k.attenuator().unwrap(), Some(false));
+        assert_eq!(k.dev.transport().reg(0x19, 0x1C), 0x0A, "the other chip is left alone");
+
+        // bits 3:2 = 11 -> 0x19; the other bits of 0x1C are kept
+        let mut k = kit("SMT_LJ101", &[(0x18, 0x0F, 0x3C), (0x19, 0x1C, 0xF3)]);
+        assert!(k.set_attenuator(false).unwrap());
+        assert_eq!(k.dev.transport().take(), vec![Op::R(0x18, 0x0F), Op::R(0x19, 0x1C), Op::W(0x19, 0x1C, 0xFB)]);
+        assert_eq!(k.attenuator().unwrap(), Some(false));
+        assert!(k.set_attenuator(true).unwrap());
+        assert_eq!(k.dev.transport().reg(0x19, 0x1C), 0xFF);
+    }
+
+    #[test]
+    fn attenuator_is_left_alone_when_no_chip_is_selected() {
+        for sel in [0x30u8, 0x38] {
+            let mut k = kit("SMT_LJ101", &[(0x18, 0x0F, sel), (0x18, 0x1C, 0x28)]);
+            assert!(!k.set_attenuator(true).unwrap(), "0x0F = {sel:#04x}");
+            assert_eq!(k.dev.transport().take(), vec![Op::R(0x18, 0x0F)]);
+            assert_eq!(k.attenuator().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn tc90517_mxl_kit_has_no_attenuator() {
+        let mut k = kit("TC90517_MxL135RF", &[(0x18, 0x0F, 0x34), (0x18, 0x1C, 0x28)]);
+        assert!(!k.has_attenuator());
+        assert!(!k.set_attenuator(true).unwrap());
+        assert_eq!(k.attenuator().unwrap(), None);
+        assert_eq!(k.dev.transport().take(), vec![]);
+    }
 }

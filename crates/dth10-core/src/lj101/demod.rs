@@ -4,7 +4,7 @@
 //! S1/S2).
 
 use crate::device::Device;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::kit::{BER_UNUSED, SignalStatus, field, lock};
 use crate::protocol::UsbControl;
 use crate::tlv::TunerDesc;
@@ -338,24 +338,40 @@ impl Tc90517Sat {
         Ok(())
     }
 
-    /// Demodulator-pin LNB control, mode 1: `0x1C[1:0] = 3` (on) / `2` (off)
-    /// on whichever chip register `0x18:0x0F[5:4]` selects.
-    pub fn lnb_enable<T: UsbControl>(&self, dev: &mut Device<T>, on: bool) -> Result<()> {
+    /// The satellite booster (the vendor application's "use booster"):
+    /// `0x1C[1:0] = 3` (on) / `2` (off), read-modify-write, on the chip that
+    /// `0x18:0x0F[5:4]` selects ([`module_chip`]). `Ok(false)`: the bits
+    /// select neither chip and nothing is written, as in the vendor driver.
+    pub fn set_booster<T: UsbControl>(&self, dev: &mut Device<T>, on: bool) -> Result<bool> {
         let mut v = [0u8; 1];
         dev.i2c_reg_read(ADDR_TER, 0x0F, &mut v)?;
-        let chip = match ((v[0] >> 4) & 3).wrapping_sub(1) {
-            0 => ADDR_TER,
-            2 => ADDR_SAT,
-            _ => return Err(Error::Protocol("LNB control chip selection invalid")),
+        let Some(chip) = module_chip(v[0] >> 4) else {
+            return Ok(false);
         };
         let mut c = [0u8; 1];
         dev.i2c_reg_read(chip, 0x1C, &mut c)?;
-        dev.i2c_reg_write(chip, 0x1C, &[(c[0] & 0xFC) | if on { 0x03 } else { 0x02 }])
+        dev.i2c_reg_write(chip, 0x1C, &[(c[0] & 0xFC) | if on { 0x03 } else { 0x02 }])?;
+        Ok(true)
     }
 
-    /// LNB state read-back, mode 1: `(0x1C & 3) == 3`.
-    pub fn lnb_enabled<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<bool> {
+    /// Booster read-back: `(0x1C & 3) == 3` of this demodulator (the vendor
+    /// driver reads its own address here, without the chip selection).
+    pub fn booster<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<bool> {
         Ok(self.read1(dev, 0x1C)? & 0x03 == 0x03)
+    }
+}
+
+/// The module's chip selection for its RF switches: a 2-bit field of
+/// `0x18:0x0F` (bits 5:4 for the satellite booster, bits 3:2 for the
+/// terrestrial attenuator), `01` = the terrestrial side 0x18, `11` = the
+/// satellite side 0x19, anything else = neither (the switch is left alone).
+/// The Open configuration sets `0x0F = 0x34`: the attenuator on 0x18, the
+/// booster on 0x19.
+pub fn module_chip(bits: u8) -> Option<u8> {
+    match bits & 3 {
+        0b01 => Some(ADDR_TER),
+        0b11 => Some(ADDR_SAT),
+        _ => None,
     }
 }
 

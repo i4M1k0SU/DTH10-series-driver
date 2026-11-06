@@ -106,4 +106,31 @@ impl<T: UsbControl> TerrestrialKit<T> {
     pub fn signal_status(&mut self, mask: u32) -> Result<SignalStatus> {
         each!(self, k => k.signal_status(mask))
     }
+
+    /// Whether the kit has the attenuator switch (the vendor application's
+    /// "use attenuator"): `SMT_LJ101` hw 0x102 only; for every other kit the
+    /// vendor driver does nothing with the setting.
+    pub fn has_attenuator(&self) -> bool {
+        match self {
+            TerrestrialKit::Tc90517(k) => k.has_attenuator(),
+            _ => false,
+        }
+    }
+
+    /// Switch the attenuator. `Ok(false)`: not switched (the kit has none,
+    /// or the module selects no chip for it), as in the vendor driver.
+    pub fn set_attenuator(&mut self, on: bool) -> Result<bool> {
+        match self {
+            TerrestrialKit::Tc90517(k) => k.set_attenuator(on),
+            _ => Ok(false),
+        }
+    }
+
+    /// Whether the attenuator is on; `None` when it cannot be read (no attenuator).
+    pub fn attenuator(&mut self) -> Result<Option<bool>> {
+        match self {
+            TerrestrialKit::Tc90517(k) => k.attenuator(),
+            _ => Ok(None),
+        }
+    }
 }

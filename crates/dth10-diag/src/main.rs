@@ -226,6 +226,9 @@ struct TuneArgs {
     /// Skip the device start command (wValue 0 / wIndex 0x10) after the kit Init.
     #[arg(long)]
     no_start: bool,
+    /// Switch the attenuator on before tuning (kits without one ignore it).
+    #[arg(long)]
+    attenuator: bool,
     /// After lock, capture stream #0 to this file (raw mode unless --enable-bytes; stops the
     /// satellite stream until the device is power-cycled, see the description above).
     #[arg(long, value_name = "FILE", help_heading = "Capture (raw mode)")]
@@ -261,6 +264,9 @@ struct TuneSatArgs {
     /// (the setting is for family models that have one).
     #[arg(long, value_name = "V", default_value_t = 0, value_parser = parse_lnb)]
     lnb: u32,
+    /// Switch the booster on before tuning (separate from --lnb).
+    #[arg(long)]
+    booster: bool,
     /// Command path (bRequest bit7) of the satellite kit's I2C/GPIO: 0 = the tuner #0 path, which
     /// reaches the satellite demodulator on the DT-H70/U2; 1 = the tuner #1 path, whose I2C reaches
     /// nothing on the DT-H70/U2 and takes about 1 s per transfer (docs/40).
@@ -304,6 +310,10 @@ fn parse_hex_bytes(s: &str) -> Result<HexBytes, String> {
 fn parse_enable_bytes(s: &str) -> Result<[u8; 16], String> {
     let b = parse_hex_bytes(s)?.0;
     b.as_slice().try_into().map_err(|_| format!("{} bytes given, the stream-enable payload has 16", b.len()))
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
 }
 
 fn parse_lnb(s: &str) -> Result<u32, String> {
@@ -646,6 +656,12 @@ fn tune(o: &Opener, a: &TuneArgs) -> Res {
 
 fn ter_probe(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs) -> Res {
     let ch = &a.channel;
+    if kit.has_attenuator() {
+        let applied = kit.set_attenuator(a.attenuator)?;
+        println!("attenuator {}: applied={applied} readback {:?}", on_off(a.attenuator), kit.attenuator()?);
+    } else if a.attenuator {
+        println!("attenuator: the {} kit has none", kit.kind());
+    }
     kit.tune(&TuneRequest::isdb_t(ch.frequency_hz as u64, 6_000_000))?;
     let tuned = Instant::now();
     println!("tuned to {} ({} Hz)", ch.name, ch.frequency_hz);
@@ -855,6 +871,8 @@ fn sat_probe(kit: &mut Lj101Kit<UsbTransport>, ch: &Channel, a: &TuneSatArgs) ->
             dth10_core::device::lnb_get(&kit.dev)
         );
     }
+    let applied = kit.set_booster(a.booster)?;
+    println!("booster {}: applied={applied} readback {:?}", on_off(a.booster), kit.booster()?);
     kit.tune(ch.frequency_hz as u64)?;
     println!("tuned to {} (IF {} Hz)", ch.name, ch.frequency_hz);
     let (last, _) = wait_lock(

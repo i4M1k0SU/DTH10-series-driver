@@ -11,6 +11,7 @@ use std::thread::sleep;
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::kit::{BER_UNUSED, SignalStatus, field, lock};
+use crate::lj101::demod::module_chip;
 use crate::protocol::UsbControl;
 use crate::tlv::TunerDesc;
 
@@ -195,6 +196,38 @@ impl Tc90517 {
         }
         sleep(Duration::from_millis(20));
         self.set_ts_mode(dev, 0)
+    }
+
+    /// The chip that this demodulator's `0x0F[3:2]` selects for the
+    /// SMT_LJ101 module's attenuator ([`module_chip`]).
+    fn attenuator_chip<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<Option<u8>> {
+        Ok(module_chip(self.read1(dev, 0x0F)? >> 2))
+    }
+
+    /// The terrestrial attenuator of the SMT_LJ101 module (the vendor
+    /// application's "use attenuator"): `0x1C[3:2] = 3` (on) / `2` (off),
+    /// read-modify-write, on the selected chip. `Ok(false)`: the bits select
+    /// neither chip and nothing is written, as in the vendor driver. Only the
+    /// [`TerVariant::SmtLj101`] kit has it (the caller checks).
+    pub fn set_attenuator<T: UsbControl>(&self, dev: &mut Device<T>, on: bool) -> Result<bool> {
+        let Some(chip) = self.attenuator_chip(dev)? else {
+            return Ok(false);
+        };
+        let mut c = [0u8; 1];
+        dev.i2c_reg_read(chip, 0x1C, &mut c)?;
+        dev.i2c_reg_write(chip, 0x1C, &[(c[0] & 0xF3) | if on { 0x0C } else { 0x08 }])?;
+        Ok(true)
+    }
+
+    /// Attenuator read-back: `(0x1C & 0x0C) == 0x0C` of the selected chip;
+    /// `None` when neither chip is selected.
+    pub fn attenuator<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<Option<bool>> {
+        let Some(chip) = self.attenuator_chip(dev)? else {
+            return Ok(None);
+        };
+        let mut c = [0u8; 1];
+        dev.i2c_reg_read(chip, 0x1C, &mut c)?;
+        Ok(Some(c[0] & 0x0C == 0x0C))
     }
 
     /// Signal status. `st.mask` selects the BER layers to read;
