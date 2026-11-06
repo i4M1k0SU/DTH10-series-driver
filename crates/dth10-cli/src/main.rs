@@ -239,7 +239,7 @@ fn list() -> Result<(), Box<dyn Error>> {
             "{:04x}:{:04x} {} serial {} ({})",
             d.vendor_id,
             d.product_id,
-            d.product_name(),
+            dth10_core::product_label(d.product_id),
             d.serial.as_deref().unwrap_or("-"),
             d.location
         );
@@ -270,6 +270,7 @@ fn print_desc(index: u8, di: &DeviceInformation) {
 
 fn info(d: &DeviceArgs) -> Result<(), Box<dyn Error>> {
     let t = open_transport(d)?;
+    println!("model: {} ({:04x})", dth10_core::product_label(t.product_id()), t.product_id());
     println!("serial: {}", t.serial().unwrap_or("-"));
     println!("endpoints: {:?}", t.pipes());
     let dev0 = Device::new(t.clone());
