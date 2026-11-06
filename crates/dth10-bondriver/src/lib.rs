@@ -194,11 +194,12 @@ pub extern "C" fn CreateBonDriver() -> *mut c_void {
         init_logging(&config);
         install_panic_hook();
         log::info!(
-            "BonDriver_DTH10 {} ini {:?} mode {:?} spaces {:?}",
+            "BonDriver_DTH10 {} ini {:?} mode {:?} spaces {:?} tuner {}",
             env!("CARGO_PKG_VERSION"),
             config.ini_path,
             config.tuner.stream_mode,
-            config.spaces
+            config.spaces,
+            config.ter_tuner
         );
         let obj = Box::new(Obj {
             vtbl: &VTABLE.vt,

@@ -36,14 +36,14 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dth10_core::LockExt;
 use dth10_tuner::ipc::{self, Conn, Target};
-use dth10_tuner::proto::{MAX_LINE, Reply, Request, Status, StreamRequest};
+use dth10_tuner::proto::{MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice, reply_tuner};
 use dth10_tuner::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue};
 
 use crate::config::Config;
@@ -144,6 +144,11 @@ struct Inner {
     booster: bool,
     ter_lock_wait_ms: u64,
     sat_lock_wait_ms: u64,
+    /// `[Device] Tuner`, sent with every terrestrial stream request.
+    ter_tuner: TunerChoice,
+    /// The tuner the server put the current stream on (its reply says it on
+    /// a unit with two terrestrial tuners): whose C/N is the signal level.
+    on_tuner: AtomicUsize,
     queue: TsQueue,
     launch: Launch,
     start_timeout: Duration,
@@ -152,10 +157,11 @@ struct Inner {
     stream: Mutex<Option<ClientStream>>,
     /// Serialises stop/start of the stream between TVTest's thread and the supervisor.
     ops: Mutex<()>,
-    /// The C/N of both systems as last read by the supervisor, so that
-    /// `signal_level` answers at once: TVTest calls it on the thread that also
-    /// reads the TS, and a status request can wait for a tune in the server.
-    cnr: Mutex<(Option<f32>, Option<f32>)>,
+    /// The unit's status (the C/N of its tuners) as last read by the
+    /// supervisor, so that `signal_level` answers at once: TVTest calls it on
+    /// the thread that also reads the TS, and a status request can wait for a
+    /// tune in the server.
+    cnr: Mutex<Status>,
     /// The stream wanted is not running: the reader thread saw it end
     /// without being told to stop, or it could not be started yet.
     lost: AtomicBool,
@@ -380,6 +386,7 @@ impl Inner {
                 System::IsdbT => self.ter_lock_wait_ms,
                 System::IsdbS => self.sat_lock_wait_ms,
             }),
+            tuner: (ch.system == System::IsdbT).then_some(self.ter_tuner),
         });
         // Our own previous stream (same client id) is replaced at once by the
         // server; one held by another window is answered "busy" at once, and
@@ -396,7 +403,10 @@ impl Inner {
             .read_line(&mut line)
             .map_err(|e| format!("no reply from the server: {e}"))?;
         match Reply::parse(&line) {
-            Reply::Ok(info) => log::info!("server: streaming {} after {:?}: {info}", ch.name, t0.elapsed()),
+            Reply::Ok(info) => {
+                log::info!("server: streaming {} after {:?}: {info}", ch.name, t0.elapsed());
+                self.on_tuner.store(reply_tuner(&info), Ordering::Relaxed);
+            }
             Reply::Busy(why) => return Err(format!("busy: {why}")),
             Reply::Error(e) => return Err(e),
         }
@@ -460,11 +470,11 @@ fn supervise(inner: Arc<Inner>) {
     while !inner.closing.load(Ordering::Relaxed) {
         let alive = match inner.status() {
             Ok(st) => {
-                *inner.cnr.locked() = st.map(|s| s.cnr()).unwrap_or((None, None));
+                *inner.cnr.locked() = st.unwrap_or_default();
                 true
             }
             Err(e) => {
-                *inner.cnr.locked() = (None, None);
+                *inner.cnr.locked() = Status::default();
                 // A server that is there but slow is not replaced by a second one.
                 matches!(e, NoAnswer::Failed(_))
             }
@@ -525,13 +535,15 @@ impl Client {
             booster: cfg.tuner.booster,
             ter_lock_wait_ms: cfg.tuner.ter_lock_wait_ms,
             sat_lock_wait_ms: cfg.tuner.sat_lock_wait_ms,
+            ter_tuner: cfg.ter_tuner,
+            on_tuner: AtomicUsize::new(0),
             queue,
             launch,
             start_timeout: Duration::from_secs(cfg.server.start_timeout_secs.max(1)),
             want: Mutex::new(None),
             stream: Mutex::new(None),
             ops: Mutex::new(()),
-            cnr: Mutex::new((None, None)),
+            cnr: Mutex::new(Status::default()),
             lost: AtomicBool::new(false),
             closing: AtomicBool::new(false),
         });
@@ -560,14 +572,11 @@ impl Client {
         })
     }
 
-    /// C/N of the current channel's system, as last read by the supervisor (never waits).
+    /// C/N of the current channel's tuner, as last read by the supervisor (never waits).
     pub fn signal_level(&mut self) -> f32 {
         let Some(system) = self.inner.want.locked().as_ref().map(|c| c.system) else { return 0.0 };
-        let (ter, sat) = *self.inner.cnr.locked();
-        match system {
-            System::IsdbT => ter.unwrap_or(0.0),
-            System::IsdbS => sat.unwrap_or(0.0),
-        }
+        let tuner = self.inner.on_tuner.load(Ordering::Relaxed);
+        self.inner.cnr.locked().cnr_of(system, tuner).unwrap_or(0.0)
     }
 
     /// End the stream and the supervisor; the server releases the stream (and
@@ -835,6 +844,67 @@ mod tests {
         let lnbs = lnbs.locked();
         assert_eq!(lnbs[0], (Some("SN-A".into()), Some(0), Some(1500), Some(false), Some(false)));
         assert_eq!(lnbs[1], (Some("SN-B".into()), Some(150), Some(2500), Some(false), Some(true)));
+    }
+
+    /// A unit with two terrestrial tuners: the DLL's `[Device] Tuner` goes with
+    /// its terrestrial requests (not with satellite ones), and its signal level
+    /// is the C/N of the tuner the server's reply names.
+    #[test]
+    fn second_terrestrial_tuner() {
+        let dir = dll_folder("second-ter");
+        let target = server_target(&dir);
+        let listener = Listener::bind(&target).expect("bind the fake server");
+        // (system, tuner=) of every stream request
+        type Seen = Arc<Mutex<Vec<(System, Option<TunerChoice>)>>>;
+        let tuners: Seen = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = {
+            let (tuners, stop, target) = (tuners.clone(), stop.clone(), target.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok(conn) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue;
+                    };
+                    let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
+                    let mut line = String::new();
+                    let _ = (&mut BufReader::new(&conn)).take(MAX_LINE as u64).read_line(&mut line);
+                    let mut c = &conn;
+                    let answer: &[u8] = match Request::parse(line.trim_end()) {
+                        Ok(Request::Status { .. }) => b"ok X ter=30.0 sat=- ter1=28.0\n",
+                        Ok(Request::Stream(r)) => {
+                            tuners.locked().push((r.channel.system, r.tuner));
+                            match r.channel.system {
+                                System::IsdbT => b"ok X ISDB-T 557142857 Hz C/N 28.0 dB tuner=1\n",
+                                System::IsdbS => b"ok X ISDB-S 1318000000 Hz C/N 18.0 dB\n",
+                            }
+                        }
+                        Err(e) => panic!("bad request {line:?}: {e}"),
+                    };
+                    let _ = c.write_all(answer);
+                }
+                listener.cleanup(&target);
+            })
+        };
+
+        let mut cfg = Config { dll_dir: Some(dir.clone()), ..Config::default() };
+        cfg.ter_tuner = TunerChoice::Index(1);
+        let mut h = Client::open(&cfg, TsQueue::new()).expect("open against the fake server");
+        h.set_channel(&Channel::parse("BS15_0").expect("BS channel")).expect("satellite stream");
+        h.set_channel(&Channel::terrestrial(27).expect("UHF channel")).expect("terrestrial stream");
+        let t0 = Instant::now();
+        while h.signal_level() == 0.0 && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(h.signal_level(), 28.0, "the C/N of tuner 1, not of tuner 0");
+        h.close();
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let tuners = tuners.locked();
+        assert_eq!(tuners[0], (System::IsdbS, None), "no tuner= with a satellite request");
+        assert_eq!(tuners[1], (System::IsdbT, Some(TunerChoice::Index(1))));
     }
 
     #[test]

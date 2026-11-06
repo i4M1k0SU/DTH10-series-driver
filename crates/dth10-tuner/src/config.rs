@@ -93,10 +93,11 @@ pub struct TunerConfig {
     /// original driver) on Windows, 16 elsewhere, where hubs and older
     /// kernels have shown completion gaps of over 100 ms.
     pub read_depth: usize,
-    /// One stream at a time (TVTest, `dth10 tune`): tuning a channel of one
-    /// system stops the other system's stream and puts its kit to standby.
-    /// `false` (`dth10 serve`): the terrestrial and satellite streams run
-    /// independently, each in the device's own mode (docs/40).
+    /// One stream at a time (TVTest, `dth10 tune`): tuning a channel on one
+    /// tuner stops the other tuner's stream and puts its kit to standby.
+    /// `false` (`dth10 serve`): the streams of the two tuners (terrestrial and
+    /// satellite, or two terrestrial ones) run independently, each in the
+    /// device's own mode (docs/40).
     pub exclusive: bool,
     /// Log the device's interrupt events (card events) while open
     /// (`dth10 serve`; `DTH10_EVENTS=1` does the same for every front end).

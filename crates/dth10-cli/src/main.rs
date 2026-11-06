@@ -33,8 +33,10 @@ use std::time::{Duration, Instant};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dth10_core::Device;
 use dth10_core::cepm::AppKeys;
+use dth10_core::lj101::Lj101Kit;
+use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::DeviceInformation;
-use dth10_tuner::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue, Tuner, TunerConfig};
+use dth10_tuner::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue, Tuner, TunerConfig, default_tuner};
 use dth10_usb::{RecipientMode, UsbTransport};
 
 #[derive(Parser)]
@@ -126,6 +128,10 @@ struct TuneArgs {
     /// Stream mode.
     #[arg(long, value_enum, default_value_t = Mode::Device)]
     mode: Mode,
+    /// ISDB-T: the terrestrial tuner to use on a unit with two (tuner 1 = the second
+    /// terrestrial tuner of the two-tuner models; default 0).
+    #[arg(long, value_name = "0|1", value_parser = clap::value_parser!(u8).range(0..=1))]
+    tuner: Option<u8>,
     /// Device mode: the program the device descrambles: first, a service id
     /// (decimal or 0x hex), or all (= the last program of the PAT: the device
     /// descrambles exactly one program per tuning).
@@ -269,8 +275,17 @@ fn open_transport(d: &DeviceArgs) -> Result<UsbTransport, Box<dyn Error>> {
 
 fn print_desc(index: u8, di: &DeviceInformation) {
     let d = &di.desc;
+    // what this crate makes of the kit: tuner #1 is a satellite tuner, or a
+    // second terrestrial one on the two-tuner models
+    let role = if TerrestrialKit::<UsbTransport>::supports(d) {
+        if index == 0 { "ISDB-T" } else { "ISDB-T (second terrestrial tuner)" }
+    } else if index == 1 && Lj101Kit::<UsbTransport>::supports(d) {
+        "ISDB-S"
+    } else {
+        "not supported"
+    };
     println!(
-        "tuner #{index}: kit {:?} model {:?} hw 0x{:x} flags 0x{:x} demod 0x{:02x} tuner 0x{:02x} IF {} Hz",
+        "tuner #{index}: kit {:?} model {:?} hw 0x{:x} flags 0x{:x} demod 0x{:02x} tuner 0x{:02x} IF {} Hz: {role}",
         d.kit_name, d.model, d.hw_version, d.flags, d.demod_i2c_addr, d.tuner_i2c_addr, d.if_freq_hz
     );
 }
@@ -376,6 +391,15 @@ pub(crate) fn state_file_for(dir: &Path, serial: Option<&str>) -> Option<PathBuf
     Some(dir.join(format!("DTH10_{name}.cepm")))
 }
 
+/// The tuner of `--tuner` for a channel of `system`: terrestrial channels only.
+pub(crate) fn tuner_of(tuner: Option<u8>, system: System) -> Result<usize, String> {
+    match (tuner, system) {
+        (Some(_), System::IsdbS) => Err("--tuner applies to ISDB-T channels only".into()),
+        (Some(n), System::IsdbT) => Ok(n as usize),
+        (None, s) => Ok(default_tuner(s)),
+    }
+}
+
 /// The LNB option: (voltage, on).
 pub(crate) fn lnb_of(v: u32) -> (u32, bool) {
     let volt = match v {
@@ -388,6 +412,7 @@ pub(crate) fn lnb_of(v: u32) -> (u32, bool) {
 
 fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
     let ch = channel_of(&a.chan)?;
+    let tuner_index = tuner_of(a.tuner, ch.system)?;
     let program = DeviceProgram::parse(&a.program).ok_or_else(|| format!("bad --program {:?}", a.program))?;
     let state_dir = a.state_dir.clone().unwrap_or_else(default_state_dir);
     let decrypt = !a.no_decrypt;
@@ -446,7 +471,7 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
         tuner.with_app_keys(k);
     }
     log::info!("device ready in {:?}", t0.elapsed());
-    tuner.set_channel(&ch)?;
+    tuner.set_channel_on(tuner_index, &ch)?;
     log::info!("streaming {} after {:?}, C/N {:.1} dB", ch.name, t0.elapsed(), tuner.signal_level());
 
     let mut out: Box<dyn Write> = match a.output.as_ref() {
@@ -483,12 +508,8 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
         // follow the carrier offset and acquire the signal again after a lost
         // lock only inside the status read.
         if last_stats.elapsed() >= Duration::from_secs(1) {
-            let (ter, sat) = tuner.poll_status();
+            let cnr = tuner.poll_status()[tuner_index];
             if a.stats {
-                let cnr = match ch.system {
-                    System::IsdbT => ter,
-                    System::IsdbS => sat,
-                };
                 let dt = last_stats.elapsed().as_secs_f64();
                 eprintln!(
                     "[t+{:6.1}s] {:6.0} pkt/s {:5.2} MB/s  C/N {:5.1} dB  total {:.1} MB",
@@ -562,5 +583,16 @@ mod tests {
         assert_eq!((a.attenuator, a.booster, a.lnb), (false, false, 0));
         let a = args(&["tune", "-c", "27", "--attenuator", "--booster"]);
         assert_eq!((a.attenuator, a.booster, a.lnb), (true, true, 0), "the booster does not imply the LNB supply");
+    }
+
+    #[test]
+    fn tuner_option() {
+        assert_eq!(args(&["tune", "-c", "27"]).tuner, None);
+        assert_eq!(args(&["tune", "-c", "27", "--tuner", "1"]).tuner, Some(1));
+        assert!(Cli::try_parse_from(["dth10", "tune", "-c", "27", "--tuner", "2"]).is_err());
+        assert_eq!(tuner_of(None, System::IsdbT), Ok(0));
+        assert_eq!(tuner_of(None, System::IsdbS), Ok(1));
+        assert_eq!(tuner_of(Some(1), System::IsdbT), Ok(1));
+        assert!(tuner_of(Some(0), System::IsdbS).is_err(), "BS/CS always use the satellite tuner");
     }
 }

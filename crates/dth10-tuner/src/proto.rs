@@ -9,10 +9,14 @@
 //! > stream unit=04110199-110822N0326 sat=1318000000 tsid=40f1 program=101 busy=fail client=4120-1 lnb=0 boost=0 lock_wait=1500
 //! > stream sat=1318000000 slot=1 program=first
 //! < ok 04110199-110822N0326 ISDB-S 1318000000 Hz C/N 18.6 dB
+//! > stream unit=SN-U2W ter=557142857 name=27 tuner=auto client=4120-1
+//! < ok SN-U2W ISDB-T 557142857 Hz C/N 28.0 dB tuner=1
 //! < busy ISDB-S stream of unit 04110199-110822N0326 is held by connection 3
 //! < error no unit 04110199-110822N0326
 //! > status
 //! < ok 04110199-110822N0326 ter=30.1 sat=18.6 ter_ch=27 ter_by=5/4120-1 sat_ch=BS15_0 sat_by=7
+//! > status unit=SN-U2W
+//! < ok SN-U2W ter=30.1 sat=- ter1=28.0 ter1_ch=27 ter1_by=8/4120-1
 //! ```
 //!
 //! `ter` / `sat` are frequencies in Hz (ISDB-T centre, ISDB-S IF), `tsid` the
@@ -28,11 +32,20 @@
 //! `1`) and `lock_wait` (ms to wait for lock on this tune) apply to this request's
 //! unit and tune only; without them the daemon's own settings apply, so two
 //! clients of two units each get their own values.
+//! `tuner` (terrestrial only) picks the tuner on a unit whose tuner #1 is a
+//! second terrestrial tuner (the two-tuner models): `0` (also without the
+//! key), `1`, or `auto`: the tuner this client (by its `client=` id) streams
+//! already, else the first free one, else tuner 0. On other units `auto` is
+//! tuner 0 and `1` an error. A satellite request always goes to the satellite
+//! tuner (tuner #1). On such a unit the `ok` of a terrestrial stream ends with
+//! `tuner=<n>`.
 //! `status` (with an optional `unit=`) answers with the C/N of both systems
 //! in dB (`-` when not tuned) and, for each system that is streaming, the
 //! channel (`ter_ch=`, `sat_ch=`) and the holder (`ter_by=`, `sat_by=`: the
 //! connection id, then `/` and the client id when it gave one); `busy` at
 //! the end means a tune is in progress and the C/N values are the last read.
+//! A unit with two terrestrial tuners adds `ter1=` (the C/N of tuner #1) and
+//! names the holder of tuner #1 `ter1_ch=` / `ter1_by=`; its `sat=` stays `-`.
 //! The connection ends after the reply. The text form does not depend on the
 //! platform, so its tests run everywhere.
 
@@ -41,6 +54,36 @@ use crate::{Channel, System};
 
 /// The longest line either side reads.
 pub const MAX_LINE: usize = 512;
+
+/// Which terrestrial tuner a stream request asks for (key `tuner=`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunerChoice {
+    /// The tuner of that index (0 or 1).
+    Index(u8),
+    /// The tuner the same client streams already, else the first free one, else tuner 0.
+    Auto,
+}
+
+impl TunerChoice {
+    /// `0`, `1` or `auto`.
+    pub fn parse(s: &str) -> Option<TunerChoice> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "0" => Some(TunerChoice::Index(0)),
+            "1" => Some(TunerChoice::Index(1)),
+            "auto" => Some(TunerChoice::Auto),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TunerChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TunerChoice::Index(n) => write!(f, "{n}"),
+            TunerChoice::Auto => f.write_str("auto"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -73,6 +116,8 @@ pub struct StreamRequest {
     pub booster: Option<bool>,
     /// How long this tune waits for lock, in ms; `None` = the daemon's setting.
     pub lock_wait_ms: Option<u64>,
+    /// Terrestrial only: which tuner (key `tuner=`); `None` = tuner 0.
+    pub tuner: Option<TunerChoice>,
 }
 
 impl Request {
@@ -126,6 +171,9 @@ impl Request {
                 if let Some(ms) = r.lock_wait_ms {
                     s.push_str(&format!(" lock_wait={ms}"));
                 }
+                if let Some(t) = r.tuner {
+                    s.push_str(&format!(" tuner={t}"));
+                }
                 s
             }
         }
@@ -153,6 +201,7 @@ impl Request {
         let mut client = None;
         let (mut lnb, mut lock_wait_ms) = (None, None);
         let (mut attenuator, mut booster) = (None, None);
+        let mut tuner = None;
         for word in words {
             let (key, value) = word.split_once('=').ok_or_else(|| format!("{word:?}: expected key=value"))?;
             match key {
@@ -194,6 +243,9 @@ impl Request {
                 "lock_wait" => {
                     lock_wait_ms = Some(parse_num(value).ok_or_else(|| format!("lock_wait {value:?}: not a number"))?)
                 }
+                "tuner" => {
+                    tuner = Some(TunerChoice::parse(value).ok_or_else(|| format!("tuner {value:?}: 0, 1 or auto"))?)
+                }
                 _ => return Err(format!("{word:?}: unknown")),
             }
         }
@@ -204,6 +256,7 @@ impl Request {
                 }
                 Channel::terrestrial_hz(hz)
             }
+            (None, Some(_)) if tuner.is_some() => return Err("tuner= goes with ter=".into()),
             (None, Some(hz)) => Channel::satellite_hz(hz, tsid),
             _ => return Err("expected ter=HZ or sat=HZ".into()),
         };
@@ -224,6 +277,7 @@ impl Request {
             attenuator,
             booster,
             lock_wait_ms,
+            tuner,
         }))
     }
 }
@@ -275,7 +329,13 @@ impl Reply {
     }
 }
 
-/// Who streams one system, as a status reply tells it.
+/// The tuner the `ok` reply to a stream request names (`tuner=<n>`, on units
+/// with two terrestrial tuners); tuner 0 when it names none.
+pub fn reply_tuner(info: &str) -> usize {
+    info.split_whitespace().find_map(|w| w.strip_prefix("tuner=")?.parse().ok()).filter(|&n| n < 2).unwrap_or(0)
+}
+
+/// Who streams one tuner, as a status reply tells it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Holder {
     /// The daemon's connection id of the stream.
@@ -286,15 +346,20 @@ pub struct Holder {
     pub channel: String,
 }
 
-/// What a status reply says: `<serial> ter=30.1 sat=- [ter_ch=27 ter_by=5/4120-1]
-/// [sat_ch=BS15_0 sat_by=7] [busy]`.
+/// What a status reply says: `<serial> ter=30.1 sat=- [ter1=28.0] [ter_ch=27 ter_by=5/4120-1]
+/// [sat_ch=BS15_0 sat_by=7 | ter1_ch=27 ter1_by=8] [busy]`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Status {
-    /// C/N in dB of the terrestrial demodulator (`None` = `-`, not tuned).
+    /// C/N in dB of the terrestrial demodulator of tuner #0 (`None` = `-`, not tuned).
     pub ter: Option<f32>,
     /// C/N in dB of the satellite demodulator.
     pub sat: Option<f32>,
-    /// Per system (0 = terrestrial, 1 = satellite): the client streaming it.
+    /// Tuner #1 is a second terrestrial tuner (the reply has `ter1=`).
+    pub second_ter: bool,
+    /// C/N in dB of the second terrestrial tuner.
+    pub ter1: Option<f32>,
+    /// Per tuner (0 = terrestrial, 1 = satellite or the second terrestrial
+    /// tuner): the client streaming it.
     pub holders: [Option<Holder>; 2],
     /// A tune was in progress; the C/N values are the last ones read.
     pub busy: bool,
@@ -305,9 +370,16 @@ impl Status {
     pub fn to_info(&self, serial: &str) -> String {
         let show = |v: Option<f32>| v.map_or("-".to_owned(), |x| format!("{x:.1}"));
         let mut s = format!("{serial} ter={} sat={}", show(self.ter), show(self.sat));
+        if self.second_ter {
+            s.push_str(&format!(" ter1={}", show(self.ter1)));
+        }
         for (i, h) in self.holders.iter().enumerate() {
             let Some(h) = h else { continue };
-            let sys = if i == 0 { "ter" } else { "sat" };
+            let sys = match i {
+                0 => "ter",
+                _ if self.second_ter => "ter1",
+                _ => "sat",
+            };
             let ch: String = h.channel.split_whitespace().collect::<Vec<_>>().join("_");
             s.push_str(&format!(" {sys}_ch={} {sys}_by={}", if ch.is_empty() { "?" } else { &ch }, h.conn));
             if let Some(c) = h.client.as_ref() {
@@ -329,10 +401,14 @@ impl Status {
             match word.split_once('=') {
                 Some(("ter", v)) => st.ter = v.parse().ok(),
                 Some(("sat", v)) => st.sat = v.parse().ok(),
+                Some(("ter1", v)) => {
+                    st.second_ter = true;
+                    st.ter1 = v.parse().ok();
+                }
                 Some(("ter_ch", v)) => ch[0] = Some(v.to_owned()),
-                Some(("sat_ch", v)) => ch[1] = Some(v.to_owned()),
+                Some(("sat_ch" | "ter1_ch", v)) => ch[1] = Some(v.to_owned()),
                 Some(("ter_by", v)) => by[0] = Some(v.to_owned()),
-                Some(("sat_by", v)) => by[1] = Some(v.to_owned()),
+                Some(("sat_by" | "ter1_by", v)) => by[1] = Some(v.to_owned()),
                 None if word == "busy" => st.busy = true,
                 _ => {}
             }
@@ -349,9 +425,18 @@ impl Status {
         st
     }
 
-    /// The C/N values alone.
+    /// The C/N values alone (tuner #0's terrestrial, the satellite).
     pub fn cnr(&self) -> (Option<f32>, Option<f32>) {
         (self.ter, self.sat)
+    }
+
+    /// The C/N of a stream of `system` on `tuner` (as [`reply_tuner`] names it).
+    pub fn cnr_of(&self, system: System, tuner: usize) -> Option<f32> {
+        match system {
+            System::IsdbT if tuner == 1 && self.second_ter => self.ter1,
+            System::IsdbT => self.ter,
+            System::IsdbS => self.sat,
+        }
     }
 }
 
@@ -371,7 +456,34 @@ mod tests {
             attenuator: None,
             booster: None,
             lock_wait_ms: None,
+            tuner: None,
         })
+    }
+
+    #[test]
+    fn tuner_round_trips() {
+        for (word, want) in
+            [("tuner=0", TunerChoice::Index(0)), ("tuner=1", TunerChoice::Index(1)), ("tuner=auto", TunerChoice::Auto)]
+        {
+            let Request::Stream(r) = Request::parse(&format!("stream ter=557142857 client=1-1 {word}")).unwrap() else {
+                panic!()
+            };
+            assert_eq!(r.tuner, Some(want));
+            let line = Request::Stream(r.clone()).to_line();
+            assert!(line.ends_with(&format!(" client=1-1 {word}")), "{line}");
+            assert_eq!(Request::parse(&line).unwrap(), Request::Stream(r));
+        }
+        // absent: tuner 0, and no key in the line
+        let Request::Stream(r) = Request::parse("stream ter=557142857").unwrap() else { panic!() };
+        assert_eq!(r.tuner, None);
+        assert!(!Request::Stream(r).to_line().contains("tuner="));
+        for bad in ["stream ter=557142857 tuner=2", "stream ter=557142857 tuner=", "stream sat=1318000000 tuner=1"] {
+            assert!(Request::parse(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(TunerChoice::parse(" AUTO "), Some(TunerChoice::Auto));
+        assert_eq!(reply_tuner("X ISDB-T 557142857 Hz C/N 28.0 dB tuner=1"), 1);
+        assert_eq!(reply_tuner("X ISDB-T 557142857 Hz C/N 28.0 dB"), 0);
+        assert_eq!(reply_tuner("X ISDB-T 557142857 Hz C/N 28.0 dB tuner=7"), 0);
     }
 
     #[test]
@@ -503,6 +615,8 @@ mod tests {
         let st = Status {
             ter: Some(30.1),
             sat: None,
+            second_ter: false,
+            ter1: None,
             holders: [
                 Some(Holder { conn: 5, client: Some("4120-1".into()), channel: "27".into() }),
                 Some(Holder { conn: 7, client: None, channel: "BS15 0".into() }),
@@ -521,5 +635,33 @@ mod tests {
         assert_eq!(back.cnr(), (Some(30.1), None));
         assert_eq!(Status::parse("X ter=- sat=-"), Status::default());
         assert_eq!(Status::parse("X ter=- sat=- ter_by=nonsense"), Status::default());
+    }
+
+    #[test]
+    fn status_of_two_terrestrial_tuners() {
+        let st = Status {
+            ter: Some(30.1),
+            sat: None,
+            second_ter: true,
+            ter1: Some(28.0),
+            holders: [None, Some(Holder { conn: 8, client: Some("4120-1".into()), channel: "27".into() })],
+            busy: false,
+        };
+        let info = st.to_info("X");
+        assert_eq!(info, "X ter=30.1 sat=- ter1=28.0 ter1_ch=27 ter1_by=8/4120-1");
+        assert_eq!(Status::parse(&info), st);
+        assert_eq!(
+            (st.cnr_of(System::IsdbT, 0), st.cnr_of(System::IsdbT, 1), st.cnr_of(System::IsdbS, 1)),
+            (Some(30.1), Some(28.0), None)
+        );
+        // not tuned: still a unit with two terrestrial tuners
+        let idle = Status::parse("X ter=- sat=- ter1=-");
+        assert!(idle.second_ter && idle.ter1.is_none());
+        assert_eq!(idle.to_info("X"), "X ter=- sat=- ter1=-");
+        // a satellite unit's reply is as before, and its tuner 1 is the satellite one
+        let sat = Status::parse("X ter=30.1 sat=18.6 sat_ch=BS15_0 sat_by=7");
+        assert!(!sat.second_ter);
+        assert_eq!(sat.to_info("X"), "X ter=30.1 sat=18.6 sat_ch=BS15_0 sat_by=7");
+        assert_eq!((sat.cnr_of(System::IsdbT, 1), sat.cnr_of(System::IsdbS, 1)), (Some(30.1), Some(18.6)));
     }
 }

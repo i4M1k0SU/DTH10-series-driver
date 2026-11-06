@@ -39,6 +39,7 @@
 use std::path::{Path, PathBuf};
 
 use dth10_tuner::config::{DeviceProgram, StreamModeCfg, TunerConfig, parse_num};
+use dth10_tuner::proto::TunerChoice;
 
 use crate::client::ServerConfig;
 use windows_sys::Win32::System::LibraryLoader::{
@@ -57,6 +58,10 @@ pub struct Config {
     /// `[Device] Spaces`: the tuning spaces this DLL shows, as indices of
     /// `channels::space_name` (0 = terrestrial, 1 = BS, 2 = CS110); all by default.
     pub spaces: Vec<u32>,
+    /// `[Device] Tuner`: the terrestrial tuner this DLL asks for on a unit with
+    /// two (`0`, `1`; `auto` or empty = the first free one). Units with one
+    /// terrestrial tuner always use tuner 0.
+    pub ter_tuner: TunerChoice,
     /// `[Server]` keys.
     pub server: ServerConfig,
     /// `[Log] Level` (`error|warn|info|debug|trace`), `[Log] File`
@@ -73,6 +78,7 @@ impl Default for Config {
             // terrestrial stream would stop them until a power cycle (docs/40).
             tuner: TunerConfig { stream_mode: StreamModeCfg::Device, ..TunerConfig::default() },
             spaces: vec![0, 1, 2],
+            ter_tuner: TunerChoice::Auto,
             server: ServerConfig::default(),
             log_level: "warn".into(),
             log_file: String::new(),
@@ -184,6 +190,9 @@ impl Config {
         if let Some(sp) = f.get("Device", "Spaces") {
             c.spaces = parse_spaces(&sp);
         }
+        if let Some(t) = f.get("Device", "Tuner") {
+            c.ter_tuner = TunerChoice::parse(&t).unwrap_or(TunerChoice::Auto);
+        }
         let t = &mut c.tuner;
         t.serial = f.get("Device", "Serial").unwrap_or_default();
         if let Some(m) = f.get("Stream", "Mode") {
@@ -262,6 +271,7 @@ mod tests {
         let t = &c.tuner;
         assert_eq!(c.ini_path, None);
         assert_eq!(c.spaces, vec![0, 1, 2]);
+        assert_eq!(c.ter_tuner, TunerChoice::Auto);
         assert_eq!(
             (t.serial.as_str(), t.stream_mode, t.device_program),
             ("", StreamModeCfg::Device, DeviceProgram::First)
@@ -285,6 +295,7 @@ mod tests {
         let (t, u) = (&c.tuner, &d.tuner);
         assert_eq!(c.ini_path, Some(dir.join("BonDriver_Test.ini")));
         assert_eq!(c.spaces, d.spaces);
+        assert_eq!(c.ter_tuner, d.ter_tuner);
         assert_eq!(
             (t.serial.as_str(), t.stream_mode, t.device_program),
             (u.serial.as_str(), u.stream_mode, u.device_program)
@@ -306,6 +317,7 @@ mod tests {
     const KEYS: &[(&str, &str)] = &[
         ("Device", "Serial"),
         ("Device", "Spaces"),
+        ("Device", "Tuner"),
         ("Stream", "Mode"),
         ("Stream", "Program"),
         ("ISDB-T", "LockWaitMs"),
@@ -342,7 +354,7 @@ mod tests {
     /// Every key of the current ini, set to something other than its default.
     #[test]
     fn reads_every_current_key() {
-        let ini = "[Device]\r\nSerial=SN1\r\nSpaces=BS,CS\r\n\
+        let ini = "[Device]\r\nSerial=SN1\r\nSpaces=BS,CS\r\nTuner=1\r\n\
                    [Stream]\r\nMode=raw\r\nProgram=0x400\r\n\
                    [ISDB-T]\r\nLockWaitMs=2000\r\nAttenuator=1\r\n\
                    [ISDB-S]\r\nLnbVoltage=110\r\nLnbPower=1\r\nBooster=yes\r\nLockWaitMs=2500\r\n\
@@ -351,6 +363,7 @@ mod tests {
         let (c, dir) = load_with("keys", Some(ini));
         let t = &c.tuner;
         assert_eq!((t.serial.as_str(), c.spaces.as_slice()), ("SN1", &[1, 2][..]));
+        assert_eq!(c.ter_tuner, TunerChoice::Index(1));
         assert_eq!((t.stream_mode, t.device_program), (StreamModeCfg::Raw, DeviceProgram::Id(0x400)));
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")));
         assert_eq!((t.ter_lock_wait_ms, t.sat_lock_wait_ms), (2000, 2500));
@@ -359,6 +372,26 @@ mod tests {
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("debug", "C:\\logs\\bon.log"));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (9, 7));
         assert_fixed(t);
+    }
+
+    #[test]
+    fn tuner_values() {
+        for (index, (value, expected)) in [
+            ("0", TunerChoice::Index(0)),
+            ("1", TunerChoice::Index(1)),
+            ("auto", TunerChoice::Auto),
+            ("AUTO", TunerChoice::Auto),
+            ("", TunerChoice::Auto),
+            ("2", TunerChoice::Auto),
+            ("x", TunerChoice::Auto),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ini = format!("[Device]\r\nTuner={value}\r\n");
+            let (c, _) = load_with(&format!("tuner-{index}"), Some(&ini));
+            assert_eq!(c.ter_tuner, expected, "Tuner={value}");
+        }
     }
 
     #[test]

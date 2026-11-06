@@ -20,4 +20,4 @@ pub mod tuner;
 
 pub use channels::{Channel, System};
 pub use config::{DeviceProgram, StreamModeCfg, TunerConfig};
-pub use tuner::{Aligner, TsQueue, Tuner};
+pub use tuner::{Aligner, TsQueue, Tuner, default_tuner};
