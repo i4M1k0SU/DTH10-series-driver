@@ -9,4 +9,4 @@ license.workspace = true
 dth10-core.workspace = true
 dth10-usb.workspace = true
 log.workspace = true
-socket2 = "0.6"
+socket2 = "0.6.5"
