@@ -169,10 +169,10 @@ struct TuneArgs {
     /// ISDB-S: switch the booster on (the vendor application's "use booster"; separate from --lnb).
     #[arg(long)]
     booster: bool,
-    /// ISDB-T: how long to wait for lock before streaming [ms].
+    /// ISDB-T: how long to wait for lock before streaming [ms] (up to 2 s longer while there is a signal).
     #[arg(long, value_name = "MS", default_value_t = 1200)]
     ter_lock_wait: u64,
-    /// ISDB-S: how long to wait for lock and the TMCC TS-ID table [ms].
+    /// ISDB-S: how long to wait for lock and the TMCC TS-ID table [ms] (up to 2 s longer while there is a signal).
     #[arg(long, value_name = "MS", default_value_t = 1500)]
     sat_lock_wait: u64,
     /// ISDB-S: command path (bRequest bit7) of the satellite demodulator's I2C

@@ -81,10 +81,10 @@ pub struct ServeArgs {
     /// application's "use booster"; separate from --lnb).
     #[arg(long)]
     booster: bool,
-    /// ISDB-T: how long to wait for lock before streaming [ms].
+    /// ISDB-T: how long to wait for lock before streaming [ms] (up to 2 s longer while there is a signal).
     #[arg(long, value_name = "MS", default_value_t = 1200)]
     ter_lock_wait: u64,
-    /// ISDB-S: how long to wait for lock and the TMCC TS-ID table [ms].
+    /// ISDB-S: how long to wait for lock and the TMCC TS-ID table [ms] (up to 2 s longer while there is a signal).
     #[arg(long, value_name = "MS", default_value_t = 1500)]
     sat_lock_wait: u64,
     /// Bulk IN transfers kept in flight per stream (39936 bytes each; default 16 on Linux, 4 on Windows).

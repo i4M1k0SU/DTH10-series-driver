@@ -222,6 +222,51 @@ fn send_program_lists(dev: &Device<UsbTransport>, lists: &[(u32, Vec<u16>)]) {
     }
 }
 
+/// How much longer the lock wait goes on when the demodulator reports a
+/// signal at the end of the configured wait. Demodulators differ in how long
+/// they take from a signal to the full lock: the TC90517 kits lock within
+/// about 0.5 s, the PN2031 (DT-H11/U2) takes about 1.1–1.3 s, which is right
+/// at the default wait of 1.2 s. A channel without a signal still fails after
+/// the configured wait, so a channel scan does not get slower.
+const SIGNAL_GRACE: Duration = Duration::from_secs(2);
+
+/// Read `status` until it reports lock, for at most `timeout`, or for up to
+/// `grace` longer when the last read at the end of `timeout` still reported a
+/// signal (the signal bit of [`lock`]). `None` when there is no lock or a
+/// status read fails.
+fn wait_lock_with<F: FnMut() -> Result<SignalStatus>>(
+    mut status: F,
+    timeout: Duration,
+    grace: Duration,
+    interval: Duration,
+    what: &str,
+) -> Option<SignalStatus> {
+    let start = Instant::now();
+    let mut deadline = start + timeout;
+    let mut extended = false;
+    loop {
+        let signal = match status() {
+            Ok(st) if st.lock & lock::LOCKED != 0 => return Some(st),
+            Ok(st) => st.lock & lock::SIGNAL != 0,
+            Err(e) => {
+                log::debug!("status during lock wait: {e}");
+                return None;
+            }
+        };
+        if Instant::now() >= deadline {
+            if signal && !extended {
+                extended = true;
+                deadline += grace;
+                log::debug!("{what}: signal but no lock within {timeout:?}, waiting up to {grace:?} longer");
+            } else {
+                log::info!("{what}: no lock within {:?}", start.elapsed());
+                return None;
+            }
+        }
+        std::thread::sleep(interval);
+    }
+}
+
 /// A raw (byte0=1) stream enable that the device refuses with a STALL: this
 /// firmware has no raw mode (seen on the DT-F100/U2, 0.8.17). Reported as
 /// unsupported rather than as a USB failure, so a server keeps the device open.
@@ -1193,27 +1238,8 @@ impl Tuner {
         lists
     }
 
-    fn wait_lock<F: FnMut() -> Result<SignalStatus>>(
-        mut status: F,
-        timeout: Duration,
-        what: &str,
-    ) -> Option<SignalStatus> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match status() {
-                Ok(st) if st.lock & lock::LOCKED != 0 => return Some(st),
-                Ok(_) => {}
-                Err(e) => {
-                    log::debug!("status during lock wait: {e}");
-                    return None;
-                }
-            }
-            if Instant::now() >= deadline {
-                log::info!("{what}: no lock within {timeout:?}");
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+    fn wait_lock<F: FnMut() -> Result<SignalStatus>>(status: F, timeout: Duration, what: &str) -> Option<SignalStatus> {
+        wait_lock_with(status, timeout, SIGNAL_GRACE, Duration::from_millis(50), what)
     }
 
     /// Tune to `ch` on its default tuner ([`default_tuner`]) and start streaming into the queue.
@@ -1622,6 +1648,62 @@ impl Drop for Tuner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status_of(bits: u32) -> Result<SignalStatus> {
+        Ok(SignalStatus { lock: bits, ..Default::default() })
+    }
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    #[test]
+    fn a_slow_lock_with_a_signal_gets_the_grace() {
+        // Signal at once, lock only after the configured wait (like the PN2031).
+        let t0 = Instant::now();
+        let got = wait_lock_with(
+            || {
+                if t0.elapsed() < MS(60) {
+                    status_of(lock::SYNC_STARTED | lock::SIGNAL)
+                } else {
+                    status_of(lock::LOCKED)
+                }
+            },
+            MS(20),
+            MS(500),
+            MS(5),
+            "test",
+        );
+        assert!(got.is_some());
+        assert!(t0.elapsed() < MS(500));
+    }
+
+    #[test]
+    fn no_signal_fails_after_the_configured_wait() {
+        let t0 = Instant::now();
+        let got = wait_lock_with(|| status_of(lock::SYNC_STARTED), MS(20), MS(2000), MS(5), "test");
+        assert!(got.is_none());
+        assert!(t0.elapsed() < MS(1000), "no signal must not wait for the grace");
+    }
+
+    #[test]
+    fn a_signal_without_lock_fails_after_the_grace() {
+        let t0 = Instant::now();
+        let got = wait_lock_with(|| status_of(lock::SIGNAL), MS(20), MS(60), MS(5), "test");
+        assert!(got.is_none());
+        assert!(t0.elapsed() >= MS(80));
+    }
+
+    #[test]
+    fn a_failed_status_read_ends_the_wait() {
+        let got = wait_lock_with(|| Err(Error::Protocol("test")), MS(20), MS(60), MS(5), "test");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn a_lock_within_the_wait_returns_at_once() {
+        let t0 = Instant::now();
+        assert!(wait_lock_with(|| status_of(lock::LOCKED | lock::SIGNAL), MS(1000), MS(1000), MS(5), "test").is_some());
+        assert!(t0.elapsed() < MS(500));
+    }
 
     #[test]
     fn aligner_extracts_188_of_256() {
