@@ -1,5 +1,6 @@
-//! The kit of tuner #0 (the terrestrial filter), chosen by the kit name of the
-//! device's descriptor exactly as the vendor driver chooses its kit object:
+//! The kit of a terrestrial tuner (tuner #0, and tuner #1 of the two-tuner
+//! models), chosen by the kit name of that tuner's descriptor exactly as the
+//! vendor driver chooses its kit object:
 //!
 //! | kit name | kit |
 //! |---|---|
@@ -41,7 +42,23 @@ macro_rules! each {
 }
 
 impl<T: UsbControl> TerrestrialKit<T> {
-    /// The kit for `desc` (tuner #0's descriptor).
+    /// Whether `desc` names one of these kits (whose variant [`Self::new`] may
+    /// still refuse): on tuner #1 such a descriptor makes the tuner a second
+    /// terrestrial tuner (the vendor driver builds each filter's kit from that
+    /// filter's own descriptor).
+    pub fn supports(desc: &TunerDesc) -> bool {
+        matches!(
+            desc.kit_name.as_str(),
+            "TC90517_MxL131RF"
+                | "TC90517_MxL135RF"
+                | "PN2031_MxL135RF"
+                | "BQ200X_MxL135RF"
+                | "BQ200X_E4005"
+                | "LGDT3305_MxL5007T"
+        ) || (desc.kit_name == "SMT_LJ101" && desc.hw_version == 0x102)
+    }
+
+    /// The kit for `desc` (the descriptor of the tuner it drives).
     pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
         let name = desc.kit_name.as_str();
         Ok(match name {
@@ -69,7 +86,7 @@ impl<T: UsbControl> TerrestrialKit<T> {
         }
     }
 
-    /// The bridge, for the stream and GPIO commands of tuner #0.
+    /// The bridge (on tuner #0 also the one of its stream commands).
     pub fn dev(&mut self) -> &mut Device<T> {
         each!(self, k => &mut k.dev)
     }
@@ -131,6 +148,31 @@ impl<T: UsbControl> TerrestrialKit<T> {
         match self {
             TerrestrialKit::Tc90517(k) => k.attenuator(),
             _ => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::regmock::RegMock;
+
+    #[test]
+    fn supports_names_the_kits_new_builds() {
+        for (name, model, hw) in [
+            ("TC90517_MxL131RF", "", 0x101),
+            ("TC90517_MxL135RF", "", 0x101),
+            ("SMT_LJ101", "h70", 0x102),
+            ("SMT_LJ101", "h70", 0x402),
+            ("PN2031_MxL135RF", "", 0x104),
+            ("BQ200X_MxL135RF", "", 0x102),
+            ("BQ200X_MxL135RF", "h55", 0x102),
+            ("LGDT3305_MxL5007T", "", 0x101),
+            ("SOMETHING_ELSE", "", 0x102),
+        ] {
+            let desc = TunerDesc { kit_name: name.into(), model: model.into(), hw_version: hw, ..Default::default() };
+            let built = TerrestrialKit::new(Device::new(RegMock::default()), desc.clone()).is_ok();
+            assert_eq!(TerrestrialKit::<RegMock>::supports(&desc), built, "{name} hw 0x{hw:x}");
         }
     }
 }

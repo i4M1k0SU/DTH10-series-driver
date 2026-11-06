@@ -33,8 +33,13 @@ pub struct Lj101Kit<T: UsbControl> {
 }
 
 impl<T: UsbControl> Lj101Kit<T> {
+    /// Whether `desc` names this kit (`SMT_LJ101` hw 0x402).
+    pub fn supports(desc: &TunerDesc) -> bool {
+        desc.kit_name.starts_with("SMT_LJ101") && desc.hw_version == 0x402
+    }
+
     pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
-        if !desc.kit_name.starts_with("SMT_LJ101") || desc.hw_version != 0x402 {
+        if !Self::supports(&desc) {
             // Other satellite kits of the series are not implemented yet (no
             // such unit was available to check the vendor driver's tables).
             return Err(Error::Unsupported(format!(
