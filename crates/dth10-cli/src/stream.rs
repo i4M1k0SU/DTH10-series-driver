@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use clap::Args;
 
 use crate::{ChannelArgs, Mode, channel_of, stop};
+use dth10_tuner::System;
 use dth10_tuner::ipc::{Conn, Target};
-use dth10_tuner::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest};
+use dth10_tuner::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice};
 
 #[derive(Args)]
 pub struct StreamArgs {
@@ -28,6 +29,10 @@ pub struct StreamArgs {
     /// Stream mode (BS/CS always run in device mode).
     #[arg(long, value_enum, default_value_t = Mode::Device)]
     mode: Mode,
+    /// ISDB-T: the terrestrial tuner on a unit with two (the two-tuner models): 0 (default),
+    /// 1, or auto (the first free one). One recorder tuner entry per tuner: 0 and 1.
+    #[arg(long, value_name = "0|1|auto", value_parser = parse_tuner)]
+    tuner: Option<TunerChoice>,
     /// ISDB-T attenuator for this stream: --attenuator (= 1) or --attenuator=0
     /// (default: the daemon's setting).
     #[arg(long, value_name = "0|1", num_args = 0..=1, require_equals = true, default_missing_value = "1", value_parser = clap::value_parser!(u8).range(0..=1))]
@@ -48,8 +53,15 @@ pub struct StreamArgs {
     connect: Option<String>,
 }
 
+fn parse_tuner(s: &str) -> Result<TunerChoice, String> {
+    TunerChoice::parse(s).ok_or_else(|| format!("{s:?}: 0, 1 or auto"))
+}
+
 pub fn run(a: &StreamArgs) -> Result<(), Box<dyn Error>> {
     let channel = channel_of(&a.chan)?;
+    if a.tuner.is_some() && channel.system == System::IsdbS {
+        return Err("--tuner applies to ISDB-T channels only".into());
+    }
     let req = Request::Stream(StreamRequest {
         unit: a.serial.clone(),
         channel,
@@ -62,6 +74,7 @@ pub fn run(a: &StreamArgs) -> Result<(), Box<dyn Error>> {
         attenuator: a.attenuator.map(|v| v != 0),
         booster: a.booster.map(|v| v != 0),
         lock_wait_ms: None,
+        tuner: a.tuner,
     });
     let target = Target::resolve(a.socket.as_deref(), a.connect.as_deref());
     stop::install();
@@ -163,7 +176,11 @@ pub fn status(a: &StatusArgs) -> Result<(), Box<dyn Error>> {
             };
             println!("{info}");
             println!("ISDB-T C/N {}, {}", show(st.ter), held(&st.holders[0]));
-            println!("ISDB-S C/N {}, {}", show(st.sat), held(&st.holders[1]));
+            if st.second_ter {
+                println!("ISDB-T #1 C/N {}, {}", show(st.ter1), held(&st.holders[1]));
+            } else {
+                println!("ISDB-S C/N {}, {}", show(st.sat), held(&st.holders[1]));
+            }
             if st.busy {
                 println!("(a tune is in progress; the C/N values are the last read)");
             }
@@ -193,5 +210,14 @@ mod tests {
         let a = args(&["stream", "-c", "27", "--attenuator", "--booster=0"]);
         assert_eq!((a.attenuator, a.booster), (Some(1), Some(0)));
         assert!(Cli::try_parse_from(["dth10", "stream", "-c", "27", "--booster=2"]).is_err());
+    }
+
+    #[test]
+    fn tuner_is_optional() {
+        use dth10_tuner::proto::TunerChoice;
+        assert_eq!(args(&["stream", "-c", "27"]).tuner, None, "no key: tuner 0");
+        assert_eq!(args(&["stream", "-c", "27", "--tuner", "1"]).tuner, Some(TunerChoice::Index(1)));
+        assert_eq!(args(&["stream", "-c", "27", "--tuner", "auto"]).tuner, Some(TunerChoice::Auto));
+        assert!(Cli::try_parse_from(["dth10", "stream", "-c", "27", "--tuner", "2"]).is_err());
     }
 }

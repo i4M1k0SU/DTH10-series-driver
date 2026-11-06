@@ -430,6 +430,36 @@ struct Satellite {
     i2c_path: u8,
 }
 
+/// Tuner #1 as a second terrestrial tuner (the two-tuner models, with
+/// diversity off as the vendor driver starts them): its kit is built from the
+/// tuner #1 descriptor, and its stream, program lists and CEPM handshake go
+/// over request path #1, as with the vendor driver's filter #1.
+struct SecondTerrestrial {
+    /// Kit whose `dev` sends I2C and GPIO on the path the satellite kit would
+    /// use: path #0 when the descriptor's flags bit2 is set, else path #1.
+    kit: TerrestrialKit<UsbTransport>,
+    /// Device handle on path #1: stream enable / disable and program lists.
+    stream_dev: Device<UsbTransport>,
+    info: DeviceInformation,
+    endpoint: u8,
+    /// The kit's `init` has run (at open; on first use when that failed).
+    initialised: bool,
+}
+
+/// The tuner a channel of `system` goes to by default: terrestrial channels
+/// to tuner #0, satellite channels to the satellite tuner (#1).
+pub fn default_tuner(system: System) -> usize {
+    match system {
+        System::IsdbT => 0,
+        System::IsdbS => 1,
+    }
+}
+
+/// The log name of a terrestrial tuner.
+fn ter_label(t: usize) -> &'static str {
+    if t == 0 { "ISDB-T" } else { "ISDB-T #1" }
+}
+
 fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
@@ -460,22 +490,26 @@ fn check_lnb_supply(dev: &Device<UsbTransport>, cut: &AtomicBool) {
     }
 }
 
-/// An opened device: terrestrial kit on tuner #0, optional satellite kit.
+/// An opened device: terrestrial kit on tuner #0; on tuner #1 an optional
+/// satellite kit or second terrestrial kit.
 pub struct Tuner {
     cfg: TunerConfig,
     transport: UsbTransport,
     terrestrial: TerrestrialKit<UsbTransport>,
     info0: DeviceInformation,
     satellite: Option<Satellite>,
-    /// The running streams by system: 0 = terrestrial (tuner #0), 1 = satellite.
+    /// Tuner #1 when it is a terrestrial one (then `satellite` is `None`).
+    second: Option<SecondTerrestrial>,
+    /// The running streams by tuner: 0 = terrestrial (tuner #0), 1 = tuner #1
+    /// (satellite, or the second terrestrial tuner).
     streams: [Option<Stream>; 2],
-    /// Where each system's TS goes: both the queue given at open unless
+    /// Where each tuner's TS goes: both the queue given at open unless
     /// [`Tuner::set_queue`] changed one.
     queues: [TsQueue; 2],
-    /// The channel each system is tuned to.
+    /// The channel each tuner is tuned to.
     current: [Option<Channel>; 2],
-    /// The system of the last `set_channel`.
-    last: Option<System>,
+    /// The tuner of the last `set_channel`.
+    last: Option<usize>,
     /// CEPM handshake results per request path (device mode with link decryption),
     /// loaded from `TunerConfig::cepm_state` or done on demand; shared with the
     /// reader thread, which replaces one when the device no longer honours it.
@@ -520,8 +554,8 @@ impl Tuner {
     }
 
     /// Initialise an already opened device: device information of both tuner
-    /// paths, terrestrial kit init, satellite kit init, device start (the
-    /// original driver's order).
+    /// paths, terrestrial kit init, tuner #1's kit init (satellite or second
+    /// terrestrial), device start (the original driver's order).
     pub fn open_with(transport: UsbTransport, cfg: &TunerConfig, queue: TsQueue) -> Result<Self> {
         let t_start = Instant::now();
         let pipes = transport.pipes();
@@ -542,9 +576,43 @@ impl Tuner {
         }
 
         // Second tuner/filter exists when TunerDesc flags bit0 is set (as in the original driver).
+        let mut second = None;
         let satellite = if info0.desc.flags & 0x1 != 0 {
             let dev1 = Device::new(transport.clone()).with_tuner_index(1);
             match dev1.read_device_information() {
+                Ok(info1) if TerrestrialKit::<UsbTransport>::supports(&info1.desc) => {
+                    // A terrestrial kit on tuner #1 (the two-tuner models): with
+                    // diversity off, as the vendor driver starts the device, it is a
+                    // second terrestrial tuner of its own. Its I2C and GPIO take the
+                    // path the satellite kit's would (below), its stream path #1.
+                    log::info!(
+                        "tuner #1 kit {:?} model {:?} hw 0x{:x}",
+                        info1.desc.kit_name,
+                        info1.desc.model,
+                        info1.desc.hw_version
+                    );
+                    let i2c_path = if info1.desc.flags & 0x4 != 0 { 0 } else { 1 };
+                    let i2c_dev = Device::new(transport.clone()).with_tuner_index(i2c_path);
+                    match TerrestrialKit::new(i2c_dev, info1.desc.clone()) {
+                        Ok(kit) => {
+                            let endpoint = pipes.ts1.map(|(ep, _)| ep).unwrap_or(0x82);
+                            log::info!(
+                                "tuner #1: second terrestrial tuner ({} kit): I2C via path {i2c_path} (descriptor flags 0x{:x}), stream via path 1 on EP 0x{endpoint:02x}",
+                                kit.kind(),
+                                info1.desc.flags
+                            );
+                            second = Some(SecondTerrestrial {
+                                kit,
+                                stream_dev: Device::new(transport.clone()).with_tuner_index(1),
+                                info: info1,
+                                endpoint,
+                                initialised: false,
+                            });
+                        }
+                        Err(e) => log::warn!("tuner #1 not supported: {}", dth10_core::unverified_kit_error(pid, 1, e)),
+                    }
+                    None
+                }
                 Ok(info1) => {
                     log::info!(
                         "tuner #1 kit {:?} model {:?} hw 0x{:x}",
@@ -613,11 +681,27 @@ impl Tuner {
                 Err(e) => log::warn!("satellite kit init failed ({e}); retried on first use"),
             }
         }
+        if let Some(ter1) = second.as_mut() {
+            let t = Instant::now();
+            match ter1.kit.init() {
+                Ok(()) => {
+                    ter1.initialised = true;
+                    log::info!("second terrestrial kit init done in {:?}", t.elapsed());
+                }
+                Err(e) => log::warn!("second terrestrial kit init failed ({e}); retried on first use"),
+            }
+        }
         // As in the original driver, the device start (wValue 0 / wIndex 0x10) comes
-        // after kit Init, followed by the kit's power-down when desc flags bit5 is set.
+        // after kit Init, followed by each kit's power-down when its desc flags bit5 is set.
         terrestrial.dev().start()?;
         if info0.desc.skip_init_config() {
             terrestrial.dev().power_down(&info0.desc)?;
+        }
+        if let Some(ter1) = second.as_mut()
+            && ter1.info.desc.skip_init_config()
+            && let Err(e) = ter1.kit.dev().power_down(&ter1.info.desc)
+        {
+            log::warn!("second terrestrial kit power-down after the device start: {e}");
         }
 
         let log_events = cfg.log_events || std::env::var_os("DTH10_EVENTS").is_some();
@@ -705,6 +789,7 @@ impl Tuner {
             terrestrial,
             info0,
             satellite,
+            second,
             streams: [None, None],
             queues: [queue.clone(), queue],
             current: [None, None],
@@ -722,10 +807,10 @@ impl Tuner {
         self.keys = Some(keys);
     }
 
-    /// Send one system's TS to its own queue (both go to the queue given at
-    /// open otherwise). Takes effect at that system's next `set_channel`.
-    pub fn set_queue(&mut self, system: System, queue: TsQueue) {
-        self.queues[slot(system)] = queue;
+    /// Send one tuner's TS to its own queue (both go to the queue given at
+    /// open otherwise). Takes effect at that tuner's next `set_channel`.
+    pub fn set_queue(&mut self, tuner: usize, queue: TsQueue) {
+        self.queues[tuner] = queue;
     }
 
     /// Change the stream mode for the following `set_channel` calls.
@@ -766,14 +851,14 @@ impl Tuner {
         }
     }
 
-    /// Stop one system's stream and forget its channel. With both systems
+    /// Stop one tuner's stream and forget its channel. With both tuners
     /// idle the kits go to standby ([`Tuner::close`]); otherwise the other
     /// stream and its kit are left alone.
-    pub fn release(&mut self, system: System) {
-        self.stop_stream_of(system);
-        self.current[slot(system)] = None;
-        if self.last == Some(system) {
-            self.last = [System::IsdbT, System::IsdbS].into_iter().find(|s| self.current[slot(*s)].is_some());
+    pub fn release(&mut self, tuner: usize) {
+        self.stop_stream_of(tuner);
+        self.current[tuner] = None;
+        if self.last == Some(tuner) {
+            self.last = (0..2).find(|&t| self.current[t].is_some());
         }
         if self.streams.iter().all(Option::is_none) {
             self.close();
@@ -799,21 +884,29 @@ impl Tuner {
 
     /// Request path of the CEPM context serving a stream: the stream of tuner
     /// #n is bound to the handshake done on tuner #n's request path (docs/22).
-    fn cepm_flags_for(&self, system: System) -> u8 {
-        match system {
-            System::IsdbT => cepm::path_flags(0),
-            System::IsdbS => cepm::path_flags(self.cfg.sat_stream_path),
+    fn cepm_flags_for(&self, tuner: usize) -> u8 {
+        match tuner {
+            0 => cepm::path_flags(0),
+            _ if self.satellite.is_some() => cepm::path_flags(self.cfg.sat_stream_path),
+            _ => cepm::path_flags(1),
         }
     }
 
-    fn start_stream(&mut self, ep: u8, system: System, decrypt: bool, restart: Option<StreamRestart>) -> Result<()> {
+    fn start_stream(
+        &mut self,
+        ep: u8,
+        tuner: usize,
+        system: System,
+        decrypt: bool,
+        restart: Option<StreamRestart>,
+    ) -> Result<()> {
         let reader = StreamReader::new(
             self.transport.bulk_in(ep)?,
             StreamReader::DEFAULT_TRANSFER_LEN,
             self.cfg.read_depth.max(1),
         )?;
-        let name = if system == System::IsdbT { "dth10-ts0" } else { "dth10-ts1" };
-        let flags = self.cepm_flags_for(system);
+        let name = if tuner == 0 { "dth10-ts0" } else { "dth10-ts1" };
+        let flags = self.cepm_flags_for(tuner);
         let dec = if decrypt {
             let keys = self.app_keys()?;
             self.cepm
@@ -825,9 +918,9 @@ impl Tuner {
             None
         };
         let state = self.cfg.cepm_state.clone().map(|p| (p, self.cepm.clone()));
-        self.streams[slot(system)] = Some(Stream::spawn(
+        self.streams[tuner] = Some(Stream::spawn(
             reader,
-            self.queues[slot(system)].clone(),
+            self.queues[tuner].clone(),
             system,
             self.cfg.drop_filler,
             name,
@@ -841,11 +934,11 @@ impl Tuner {
 
     /// Device mode with link decryption: make sure a CEPM handshake exists for the
     /// stream's request path (docs/22). Failure is logged and the stream stays encrypted.
-    fn ensure_cepm(&mut self, system: System) -> bool {
+    fn ensure_cepm(&mut self, tuner: usize) -> bool {
         if !self.cfg.device_decrypt {
             return false;
         }
-        let flags = self.cepm_flags_for(system);
+        let flags = self.cepm_flags_for(tuner);
         let keys = match self.app_keys() {
             Ok(k) => k,
             Err(e) => {
@@ -876,16 +969,17 @@ impl Tuner {
         set.iter().any(|(f, _)| *f == flags)
     }
 
-    /// Stop one system's stream: the 0xCBDA/2 disable command first
+    /// Stop one tuner's stream: the 0xCBDA/2 disable command first
     /// (RUN→PAUSE), then the bulk reads are cancelled (PAUSE→ACQUIRE), the
     /// original driver's order (docs/21 §4.1).
-    fn stop_stream_of(&mut self, system: System) {
-        let i = slot(system);
+    fn stop_stream_of(&mut self, i: usize) {
         if let Some(mut s) = self.streams[i].take() {
-            debug_assert_eq!(s.system, system);
-            let r = match system {
-                System::IsdbT => self.terrestrial.dev().stream_disable(),
-                System::IsdbS => self.satellite.as_ref().map_or(Ok(()), |sat| sat.stream_dev.stream_disable()),
+            debug_assert_eq!(Some(s.system), self.system_of(i));
+            let r = match (i, self.satellite.as_ref(), self.second.as_ref()) {
+                (0, ..) => self.terrestrial.dev().stream_disable(),
+                (_, Some(sat), _) => sat.stream_dev.stream_disable(),
+                (_, _, Some(ter1)) => ter1.stream_dev.stream_disable(),
+                _ => Ok(()),
             };
             if let Err(e) = r {
                 log::warn!("stream disable: {e}");
@@ -895,27 +989,41 @@ impl Tuner {
         self.queues[i].purge();
     }
 
-    /// Set the terrestrial attenuator from the configuration (failures are
-    /// logged only: the vendor driver ignores them too).
-    fn apply_attenuator(&mut self) {
+    /// Set the attenuator of terrestrial tuner `t` from the configuration
+    /// (failures are logged only: the vendor driver ignores them too).
+    fn apply_attenuator(&mut self, t: usize) {
         let on = self.cfg.attenuator;
-        if !self.terrestrial.has_attenuator() {
+        let Ok(kit) = self.ter_kit(t) else { return };
+        let label = ter_label(t);
+        if !kit.has_attenuator() {
             if on {
-                log::info!("ISDB-T attenuator: the {} kit has none (setting ignored)", self.terrestrial.kind());
+                log::info!("{label} attenuator: the {} kit has none (setting ignored)", kit.kind());
             }
             return;
         }
-        match self.terrestrial.set_attenuator(on) {
-            Ok(true) => log::info!("ISDB-T attenuator {}", on_off(on)),
-            Ok(false) => log::info!("ISDB-T attenuator not switched: the module selects no chip for it"),
-            Err(e) => log::warn!("ISDB-T attenuator {}: {e}", on_off(on)),
+        match kit.set_attenuator(on) {
+            Ok(true) => log::info!("{label} attenuator {}", on_off(on)),
+            Ok(false) => log::info!("{label} attenuator not switched: the module selects no chip for it"),
+            Err(e) => log::warn!("{label} attenuator {}: {e}", on_off(on)),
+        }
+    }
+
+    /// The kit of terrestrial tuner `t` (0, or 1 on the two-tuner models).
+    fn ter_kit(&mut self, t: usize) -> Result<&mut TerrestrialKit<UsbTransport>> {
+        match t {
+            0 => Ok(&mut self.terrestrial),
+            _ => self
+                .second
+                .as_mut()
+                .map(|s| &mut s.kit)
+                .ok_or(Error::Unsupported("this device has no second terrestrial tuner".into())),
         }
     }
 
     /// Stop both streams.
     fn stop_streams(&mut self) {
-        self.stop_stream_of(System::IsdbT);
-        self.stop_stream_of(System::IsdbS);
+        self.stop_stream_of(0);
+        self.stop_stream_of(1);
     }
 
     /// Stop streaming and put the kits to standby (LNB supply off).
@@ -934,6 +1042,12 @@ impl Tuner {
                 let _ = sat.kit.lnb_power(0);
                 sat.lnb_volt = 0;
             }
+        }
+        if let Some(ter1) = self.second.as_mut()
+            && ter1.initialised
+            && let Err(e) = ter1.kit.close()
+        {
+            log::warn!("second terrestrial kit close: {e}");
         }
         self.current = [None, None];
         self.last = None;
@@ -1089,51 +1203,93 @@ impl Tuner {
         }
     }
 
-    /// Tune to `ch` and start streaming into the queue.
+    /// Tune to `ch` on its default tuner ([`default_tuner`]) and start streaming into the queue.
     pub fn set_channel(&mut self, ch: &Channel) -> Result<()> {
+        self.set_channel_on(default_tuner(ch.system), ch)
+    }
+
+    /// Tune tuner `t` to `ch` and start streaming into its queue: a
+    /// terrestrial channel on tuner 0, or on tuner 1 when that is a second
+    /// terrestrial tuner; a satellite channel on the satellite tuner (1).
+    pub fn set_channel_on(&mut self, t: usize, ch: &Channel) -> Result<()> {
         log::info!("set_channel {:?} {} Hz tsid 0x{:04x} slot {:?}", ch.system, ch.frequency_hz, ch.tsid, ch.slot);
+        match (ch.system, t) {
+            (System::IsdbT, 0) | (System::IsdbS, 1) => {}
+            (System::IsdbT, 1) if self.second.is_some() => {}
+            (System::IsdbT, 1) => {
+                return Err(Error::Unsupported(
+                    "this device has no second terrestrial tuner (tuner #1 is not a terrestrial one)".into(),
+                ));
+            }
+            (System::IsdbS, 0) => return Err(Error::Unsupported("satellite channels go to tuner #1".into())),
+            _ => return Err(Error::Unsupported(format!("no tuner #{t}"))),
+        }
         let pipes = self.transport.pipes();
         let device_mode = self.cfg.stream_mode == StreamModeCfg::Device;
-        let i = slot(ch.system);
+        let i = t;
         if self.cfg.exclusive {
-            // One stream at a time: the other system's stream ends here and
+            // One stream at a time: the other tuner's stream ends here and
             // its kit goes to standby below.
-            let other = if ch.system == System::IsdbT { System::IsdbS } else { System::IsdbT };
+            let other = 1 - t;
             self.stop_stream_of(other);
-            self.current[slot(other)] = None;
+            self.current[other] = None;
         }
         if device_mode {
             // The PID list is per channel: the stream is always started over.
-            self.stop_stream_of(ch.system);
+            self.stop_stream_of(t);
         }
         match ch.system {
             System::IsdbT => {
-                let (ep, _) = pipes.ts0.ok_or(Error::Protocol("no TS endpoint for tuner #0"))?;
-                if let Some(sat) = self.satellite.as_mut()
-                    && sat.initialised
-                    && self.cfg.exclusive
-                    && self.streams.iter().all(Option::is_none)
-                {
-                    let _ = sat.kit.close();
+                let ep = match self.second.as_ref() {
+                    Some(ter1) if t == 1 => ter1.endpoint,
+                    _ => pipes.ts0.ok_or(Error::Protocol("no TS endpoint for tuner #0"))?.0,
+                };
+                let label = ter_label(t);
+                if self.cfg.exclusive && self.streams.iter().all(Option::is_none) {
+                    if let Some(sat) = self.satellite.as_mut()
+                        && sat.initialised
+                    {
+                        let _ = sat.kit.close();
+                    }
+                    // the other terrestrial kit
+                    let _ = if t == 0 {
+                        self.second.as_mut().map_or(Ok(()), |s| s.kit.close())
+                    } else {
+                        self.terrestrial.close()
+                    };
                 }
-                if !self.terrestrial.is_open() {
-                    self.terrestrial.open()?;
+                if let Some(ter1) = self.second.as_mut()
+                    && t == 1
+                    && !ter1.initialised
+                {
+                    let t0 = Instant::now();
+                    ter1.kit.init()?;
+                    ter1.initialised = true;
+                    log::info!("second terrestrial kit init done in {:?}", t0.elapsed());
+                }
+                let kit = self.ter_kit(t)?;
+                if !kit.is_open() {
+                    kit.open()?;
                 }
                 // Like the vendor application, on every tune: the chip keeps it
                 // only until the next kit Init.
-                self.apply_attenuator();
+                self.apply_attenuator(t);
                 let req = TuneRequest::isdb_t(ch.frequency_hz as u64, self.cfg.ter_bandwidth_hz);
-                self.terrestrial.tune(&req)?;
                 let wait = Duration::from_millis(self.cfg.ter_lock_wait_ms);
-                let ter = &mut self.terrestrial;
-                if Self::wait_lock(|| ter.signal_status(field::LOCK), wait, "ISDB-T").is_none() {
+                let ter = self.ter_kit(t)?;
+                ter.tune(&req)?;
+                if Self::wait_lock(|| ter.signal_status(field::LOCK), wait, label).is_none() {
                     // Without lock there is nothing to learn or stream; failing here
                     // keeps a channel without signal from costing the PSI learn's
                     // full wait (and TVTest's channel scan from crawling).
-                    return Err(Error::Protocol("ISDB-T: no lock (no signal on this channel)"));
+                    return Err(Error::Protocol(if t == 0 {
+                        "ISDB-T: no lock (no signal on this channel)"
+                    } else {
+                        "ISDB-T #1: no lock (no signal on this channel)"
+                    }));
                 }
-                if self.streams[0].is_none() {
-                    let desc = self.info0.desc.clone();
+                if self.streams[t].is_none() {
+                    let desc = self.ter_kit(t)?.desc().clone();
                     let mode = if device_mode { StreamMode::EncryptedPartial } else { StreamMode::RawFullTs };
                     if !device_mode && self.satellite.is_some() {
                         // docs/40: once stream #0 ran in raw mode, the next satellite
@@ -1144,18 +1300,18 @@ impl Tuner {
                     }
                     let mut restart = None;
                     if device_mode {
-                        let dev = Device::new(self.transport.clone());
+                        let dev = Device::new(self.transport.clone()).with_tuner_index(t as u8);
                         let pids = if self.cfg.device_decrypt {
                             // Learn the PSI in the device's own mode through the link
                             // decryption: a raw (byte0=1) enable on stream #0 would stop
                             // the satellite stream until the next power cycle (docs/40),
                             // so a failed handshake fails the tune rather than fall back.
-                            if !self.ensure_cepm(System::IsdbT) {
+                            if !self.ensure_cepm(t) {
                                 return Err(Error::Protocol(
                                     "CEPM handshake for the terrestrial stream failed (application key file?); no raw fallback, that would stop BS/CS until a power cycle",
                                 ));
                             }
-                            let flags = self.cepm_flags_for(System::IsdbT);
+                            let flags = self.cepm_flags_for(t);
                             self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags)?
                         } else {
                             if self.satellite.is_some() {
@@ -1167,11 +1323,14 @@ impl Tuner {
                         };
                         restart = Some(StreamRestart { dev, desc: desc.clone(), mode, pids });
                     }
-                    let decrypt = device_mode && self.ensure_cepm(System::IsdbT);
+                    let decrypt = device_mode && self.ensure_cepm(t);
                     let lists = restart.as_ref().map(|r| r.pids.clone()).unwrap_or_default();
                     // KS pin order (docs/21): bulk reads start before the stream-enable command.
-                    self.start_stream(ep, System::IsdbT, decrypt, restart)?;
-                    let dev = self.terrestrial.dev();
+                    self.start_stream(ep, t, System::IsdbT, decrypt, restart)?;
+                    let dev = match self.second.as_ref() {
+                        Some(ter1) if t == 1 => &ter1.stream_dev,
+                        _ => self.terrestrial.dev_ref(),
+                    };
                     dev.stream_enable_mode(&desc, mode).map_err(|e| stream_enable_error(mode, e))?;
                     send_program_lists(dev, &lists);
                 }
@@ -1262,8 +1421,8 @@ impl Tuner {
                         ));
                     }
                     let mode = StreamMode::EncryptedPartial;
-                    let flags = self.cepm_flags_for(System::IsdbS);
-                    if !self.ensure_cepm(System::IsdbS) {
+                    let flags = self.cepm_flags_for(1);
+                    if !self.ensure_cepm(1) {
                         return Err(Error::Protocol("CEPM handshake for the satellite stream failed"));
                     }
                     let dev = Device::new(self.transport.clone()).with_tuner_index(self.cfg.sat_stream_path);
@@ -1271,7 +1430,7 @@ impl Tuner {
                     let lists = pids.clone();
                     let restart = Some(StreamRestart { dev, desc: desc.clone(), mode, pids });
                     let decrypt = true;
-                    self.start_stream(ep, System::IsdbS, decrypt, restart)?;
+                    self.start_stream(ep, 1, System::IsdbS, decrypt, restart)?;
                     let sat = self.satellite.as_mut().expect("checked above");
                     sat.stream_dev.stream_enable_mode(&desc, mode)?;
                     send_program_lists(&sat.stream_dev, &lists);
@@ -1279,26 +1438,25 @@ impl Tuner {
             }
         }
         self.current[i] = Some(ch.clone());
-        self.last = Some(ch.system);
+        self.last = Some(t);
         Ok(())
     }
 
-    /// C/N in dB of the last tuned system's channel (0.0 when unavailable).
+    /// C/N in dB of the last tuned tuner's channel (0.0 when unavailable).
     pub fn signal_level(&mut self) -> f32 {
         match self.last {
-            Some(system) => self.signal_level_of(system),
+            Some(t) => self.signal_level_of(t),
             None => 0.0,
         }
     }
 
-    /// C/N in dB of one system's demodulator (0.0 when unavailable).
-    pub fn signal_level_of(&mut self, system: System) -> f32 {
-        let r = match system {
-            System::IsdbT => self.terrestrial.signal_status(field::ALL_BASIC),
-            System::IsdbS => match self.satellite.as_mut() {
-                Some(sat) => sat.kit.signal_status(field::ALL_BASIC),
-                None => return 0.0,
-            },
+    /// C/N in dB of one tuner's demodulator (0.0 when unavailable).
+    pub fn signal_level_of(&mut self, tuner: usize) -> f32 {
+        let r = match (tuner, self.satellite.as_mut(), self.second.as_mut()) {
+            (0, ..) => self.terrestrial.signal_status(field::ALL_BASIC),
+            (1, Some(sat), _) => sat.kit.signal_status(field::ALL_BASIC),
+            (1, _, Some(ter1)) => ter1.kit.signal_status(field::ALL_BASIC),
+            _ => return 0.0,
         };
         match r {
             Ok(st) => st.cnr_mdb as f32 / 1000.0,
@@ -1309,29 +1467,30 @@ impl Tuner {
         }
     }
 
-    /// Read the demodulator status of every system tuned to a channel and
-    /// return its C/N in dB (terrestrial, satellite; `None` for a system
-    /// without a channel, 0.0 when the read failed). Meant to be called about
-    /// once a second while streaming, as the vendor application does: some
-    /// kits follow the carrier offset and acquire the signal again after a
-    /// lost lock only inside the status read.
-    pub fn poll_status(&mut self) -> (Option<f32>, Option<f32>) {
-        let cnr = |t: &mut Self, system: System| t.current_of(system).is_some().then(|| t.signal_level_of(system));
-        let (ter, sat) = (cnr(self, System::IsdbT), cnr(self, System::IsdbS));
-        if ter.is_some() || sat.is_some() {
+    /// Read the demodulator status of every tuner tuned to a channel and
+    /// return its C/N in dB, by tuner (0 = terrestrial, 1 = satellite or the
+    /// second terrestrial tuner; `None` for a tuner without a channel, 0.0
+    /// when the read failed). Meant to be called about once a second while
+    /// streaming, as the vendor application does: some kits follow the
+    /// carrier offset and acquire the signal again after a lost lock only
+    /// inside the status read.
+    pub fn poll_status(&mut self) -> [Option<f32>; 2] {
+        let cnr: [Option<f32>; 2] =
+            std::array::from_fn(|t| self.current_of(t).is_some().then(|| self.signal_level_of(t)));
+        if cnr.iter().any(Option::is_some) {
             let show = |c: Option<f32>| c.map_or_else(|| "-".to_owned(), |c| format!("{c:.1} dB"));
-            log::debug!("status: C/N ISDB-T {}, ISDB-S {}", show(ter), show(sat));
+            let second = if self.second.is_some() { "ISDB-T #1" } else { "ISDB-S" };
+            log::debug!("status: C/N ISDB-T {}, {second} {}", show(cnr[0]), show(cnr[1]));
         }
-        (ter, sat)
+        cnr
     }
 
-    /// Full signal status of the last tuned system's demodulator.
+    /// Full signal status of the last tuned tuner's demodulator.
     pub fn status(&mut self) -> Result<SignalStatus> {
-        match self.last {
-            Some(System::IsdbS) => match self.satellite.as_mut() {
-                Some(sat) => sat.kit.signal_status(field::ALL | field::TSID_TABLE),
-                None => Err(Error::Unsupported("no ISDB-S tuner".into())),
-            },
+        match (self.last, self.satellite.as_mut(), self.second.as_mut()) {
+            (Some(1), Some(sat), _) => sat.kit.signal_status(field::ALL | field::TSID_TABLE),
+            (Some(1), _, Some(ter1)) => ter1.kit.signal_status(field::ALL),
+            (Some(1), ..) => Err(Error::Unsupported("no ISDB-S tuner".into())),
             _ => self.terrestrial.signal_status(field::ALL),
         }
     }
@@ -1341,9 +1500,9 @@ impl Tuner {
         &self.info0
     }
 
-    /// Device information of tuner #1, when the device has one.
+    /// Device information of tuner #1, when the device has one this crate can drive.
     pub fn info1(&self) -> Option<&DeviceInformation> {
-        self.satellite.as_ref().map(|s| &s.info)
+        self.satellite.as_ref().map(|s| &s.info).or(self.second.as_ref().map(|s| &s.info))
     }
 
     /// Whether the device advertises a satellite tuner this crate can drive.
@@ -1351,29 +1510,45 @@ impl Tuner {
         self.satellite.is_some()
     }
 
+    /// Whether tuner #1 is a second terrestrial tuner this crate can drive
+    /// (the two-tuner models).
+    pub fn has_second_terrestrial(&self) -> bool {
+        self.second.is_some()
+    }
+
+    /// The system tuner `tuner` receives (`None`: no such tuner here).
+    pub fn system_of(&self, tuner: usize) -> Option<System> {
+        match tuner {
+            0 => Some(System::IsdbT),
+            1 if self.satellite.is_some() => Some(System::IsdbS),
+            1 if self.second.is_some() => Some(System::IsdbT),
+            _ => None,
+        }
+    }
+
     pub fn transport(&self) -> &UsbTransport {
         &self.transport
     }
 
-    /// The queue one system's TS goes to.
-    pub fn queue(&self, system: System) -> &TsQueue {
-        &self.queues[slot(system)]
+    /// The queue one tuner's TS goes to.
+    pub fn queue(&self, tuner: usize) -> &TsQueue {
+        &self.queues[tuner]
     }
 
     /// The channel of the last `set_channel`.
     pub fn current(&self) -> Option<&Channel> {
-        self.last.and_then(|s| self.current[slot(s)].as_ref())
+        self.last.and_then(|t| self.current[t].as_ref())
     }
 
-    /// One system's stream has given itself up (its bulk reads kept failing:
+    /// One tuner's stream has given itself up (its bulk reads kept failing:
     /// the device is gone). The stream counts as running until released.
-    pub fn stream_failed(&self, system: System) -> bool {
-        self.streams[slot(system)].as_ref().is_some_and(|s| s.failed.load(Ordering::Relaxed))
+    pub fn stream_failed(&self, tuner: usize) -> bool {
+        self.streams[tuner].as_ref().is_some_and(|s| s.failed.load(Ordering::Relaxed))
     }
 
-    /// The channel one system is tuned to.
-    pub fn current_of(&self, system: System) -> Option<&Channel> {
-        self.current[slot(system)].as_ref()
+    /// The channel one tuner is tuned to.
+    pub fn current_of(&self, tuner: usize) -> Option<&Channel> {
+        self.current[tuner].as_ref()
     }
 }
 
@@ -1422,14 +1597,6 @@ fn select_programs(programs: &[Program], choice: DeviceProgram) -> (Vec<&Program
                 (v, None)
             }
         }
-    }
-}
-
-/// Index of a system's stream, queue and channel.
-fn slot(system: System) -> usize {
-    match system {
-        System::IsdbT => 0,
-        System::IsdbS => 1,
     }
 }
 

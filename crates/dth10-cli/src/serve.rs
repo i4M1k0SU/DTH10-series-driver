@@ -6,7 +6,10 @@
 //! The device's terrestrial and satellite streams are independent here
 //! (docs/40): a recorder lists one unit as two tuners, one for GR and one for
 //! BS/CS, and both can run at the same time; two TVTest windows do the same
-//! through two copies of the BonDriver. A client only asks for a stream and
+//! through two copies of the BonDriver. On a unit whose tuner #1 is a second
+//! terrestrial tuner (the two-tuner models) the two streams are two GR
+//! tuners instead, picked by the request's `tuner=` (`0` without it, `1`, or
+//! `auto` = the first free one). A client only asks for a stream and
 //! reads it. When the client goes away (a recorder kills `dth10 stream`,
 //! TVTest closes), the connection closes and the daemon stops that stream
 //! while the other one goes on; with both idle the kits go to standby. The
@@ -35,12 +38,12 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use dth10_core::LockExt;
 use dth10_core::cepm::AppKeys;
-use dth10_tuner::{DeviceProgram, StreamModeCfg, System, TsQueue, Tuner, TunerConfig};
+use dth10_tuner::{DeviceProgram, StreamModeCfg, System, TsQueue, Tuner, TunerConfig, default_tuner};
 use dth10_usb::{RecipientMode, UsbTransport};
 
 use crate::{RecipientArg, app_keys_path, default_state_dir, lnb_of, state_file_for, stop};
 use dth10_tuner::ipc::{Conn, Listener, Target};
-use dth10_tuner::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest};
+use dth10_tuner::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice};
 
 #[derive(Args)]
 pub struct ServeArgs {
@@ -139,13 +142,15 @@ struct Unit {
     cfg: TunerConfig,
     keys: Arc<Keys>,
     recipient: RecipientMode,
-    /// The TS of each system: 0 = terrestrial, 1 = satellite.
+    /// The TS of each tuner: 0 = terrestrial, 1 = satellite (or the second terrestrial tuner).
     queues: [TsQueue; 2],
     /// `None` while the unit is not open (lost; opened again on the next request).
     tuner: Mutex<Option<Tuner>>,
-    /// Per system: the connection streaming it and the flag that ends that connection's stream.
+    /// Whether tuner #1 is a second terrestrial tuner; `None` until the unit was first opened.
+    second_ter: Mutex<Option<bool>>,
+    /// Per tuner: the connection streaming it and the flag that ends that connection's stream.
     slots: [Mutex<Slot>; 2],
-    /// The last C/N read of each system, answered to a status request while
+    /// The last C/N read of each tuner, answered to a status request while
     /// the tuner is busy with a tune (a tune can take seconds; a client's
     /// signal-level poll must not wait for it).
     cnr: Mutex<Cnr>,
@@ -154,22 +159,25 @@ struct Unit {
     tuning: AtomicUsize,
 }
 
-/// The C/N of each system as last read, and when the status was last read.
+/// The C/N of each tuner as last read, and when the status was last read.
 #[derive(Default)]
 struct Cnr {
-    ter: Option<f32>,
-    sat: Option<f32>,
+    tuners: [Option<f32>; 2],
     /// The last full status read (a client's status request or the periodic read).
     read: Option<Instant>,
 }
 
 impl Cnr {
-    fn set(&mut self, system: System, cnr: Option<f32>) {
-        match system {
-            System::IsdbT => self.ter = cnr,
-            System::IsdbS => self.sat = cnr,
-        }
+    fn set(&mut self, tuner: usize, cnr: Option<f32>) {
+        self.tuners[tuner] = cnr;
     }
+}
+
+/// A unit's status reply from the C/N of its tuners: tuner #1 is the
+/// satellite one, or the second terrestrial one (`ter1=`).
+fn unit_status(cnr: [Option<f32>; 2], second_ter: bool, holders: [Option<Holder>; 2], busy: bool) -> Status {
+    let (sat, ter1) = if second_ter { (None, cnr[1]) } else { (cnr[1], None) };
+    Status { ter: cnr[0], sat, second_ter, ter1, holders, busy }
 }
 
 /// How often the status of a unit that streams is read. Some kits follow the
@@ -223,10 +231,29 @@ fn claim(slot: &Slot, busy_fail: bool, client: Option<&str>) -> Claim {
     }
 }
 
-fn slot(system: System) -> usize {
-    match system {
-        System::IsdbT => 0,
-        System::IsdbS => 1,
+/// The tuner a stream request goes to (key `tuner=`, see `dth10_tuner::proto`):
+/// a satellite channel to the satellite tuner; a terrestrial one to tuner 0,
+/// to tuner 1 when it names it on a unit whose tuner #1 is a second terrestrial
+/// tuner, or with `auto` to the tuner this client streams already, else the
+/// first free one, else tuner 0 (taken over, or `busy`, as the claim decides).
+fn pick_tuner(
+    system: System,
+    choice: Option<TunerChoice>,
+    second_ter: bool,
+    slots: [&Slot; 2],
+    client: Option<&str>,
+) -> Result<usize, String> {
+    match (system, choice) {
+        (System::IsdbS, _) => Ok(default_tuner(System::IsdbS)),
+        (System::IsdbT, None | Some(TunerChoice::Index(0))) => Ok(0),
+        (System::IsdbT, Some(TunerChoice::Index(1))) if second_ter => Ok(1),
+        (System::IsdbT, Some(TunerChoice::Index(n))) => Err(format!("no terrestrial tuner {n} on this unit")),
+        (System::IsdbT, Some(TunerChoice::Auto)) if !second_ter => Ok(0),
+        (System::IsdbT, Some(TunerChoice::Auto)) => {
+            let mine =
+                client.and_then(|c| (0..2).find(|&i| slots[i].owner != 0 && slots[i].client.as_deref() == Some(c)));
+            Ok(mine.or_else(|| (0..2).find(|&i| slots[i].owner == 0)).unwrap_or(0))
+        }
     }
 }
 
@@ -234,6 +261,15 @@ fn system_name(system: System) -> &'static str {
     match system {
         System::IsdbT => "ISDB-T",
         System::IsdbS => "ISDB-S",
+    }
+}
+
+/// The log name of a tuner's stream: its system, `ISDB-T #1` for the second
+/// terrestrial tuner.
+fn tuner_name(system: System, tuner: usize, second_ter: bool) -> &'static str {
+    match system {
+        System::IsdbT if second_ter && tuner == 1 => "ISDB-T #1",
+        s => system_name(s),
     }
 }
 
@@ -248,10 +284,11 @@ impl Unit {
             .map_err(|e| format!("unit {}: {e}", self.serial))?;
         let mut t = Tuner::open_with(transport, &self.cfg, self.queues[0].clone())
             .map_err(|e| format!("unit {}: {e}", self.serial))?;
-        t.set_queue(System::IsdbS, self.queues[1].clone());
+        t.set_queue(1, self.queues[1].clone());
         if let Some(k) = self.keys.loaded() {
             t.with_app_keys(k);
         }
+        *self.second_ter.locked() = Some(t.has_second_terrestrial());
         log::info!("unit {}: opened in {:?}", self.serial, t0.elapsed());
         *tuner = Some(t);
         Ok(())
@@ -328,27 +365,25 @@ fn serve_status(conn: &Conn, id: u64, unit: &Unit) {
         let s = unit.slots[i].locked();
         (s.owner != 0).then(|| Holder { conn: s.owner, client: s.client.clone(), channel: s.channel.clone() })
     });
+    let second_ter = unit.second_ter.locked().unwrap_or(false);
     let r = match unit.tuner.try_lock() {
         Ok(mut guard) => match guard.as_mut() {
             // Not open (nothing streamed yet, or the device went away): nothing to
             // measure. A status request never opens the device: that can take
             // seconds with a device in trouble, and a client polls this often.
-            None => Reply::Ok(Status { ter: None, sat: None, holders, busy: false }.to_info(&unit.serial)),
+            None => Reply::Ok(unit_status([None, None], second_ter, holders, false).to_info(&unit.serial)),
             Some(t) => {
-                let (ter, sat) = t.poll_status();
-                *unit.cnr.locked() = Cnr { ter, sat, read: Some(Instant::now()) };
-                Reply::Ok(Status { ter, sat, holders, busy: false }.to_info(&unit.serial))
+                let cnr = t.poll_status();
+                *unit.cnr.locked() = Cnr { tuners: cnr, read: Some(Instant::now()) };
+                Reply::Ok(unit_status(cnr, second_ter, holders, false).to_info(&unit.serial))
             }
         },
         Err(std::sync::TryLockError::WouldBlock) => {
             // A tune (or a stream's start or end, or the periodic status read)
             // is in progress: answer with the last values rather than wait.
-            let (ter, sat) = {
-                let c = unit.cnr.locked();
-                (c.ter, c.sat)
-            };
+            let cnr = unit.cnr.locked().tuners;
             let busy = unit.tuning.load(Ordering::Relaxed) > 0;
-            Reply::Ok(Status { ter, sat, holders, busy }.to_info(&unit.serial))
+            Reply::Ok(unit_status(cnr, second_ter, holders, busy).to_info(&unit.serial))
         }
         Err(std::sync::TryLockError::Poisoned(p)) => {
             drop(p.into_inner());
@@ -365,14 +400,10 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         return;
     };
     let system = req.channel.system;
-    let i = slot(system);
-    let what = format!(
-        "{} {} ({} Hz{})",
-        system_name(system),
-        req.channel.name,
-        req.channel.frequency_hz,
-        if req.raw { ", raw" } else { "" }
-    );
+    let describe = |name: &str| {
+        format!("{name} {} ({} Hz{})", req.channel.name, req.channel.frequency_hz, if req.raw { ", raw" } else { "" })
+    };
+    let what = describe(system_name(system));
 
     // Device mode and BS/CS decrypt the link, which takes the application
     // credentials; a raw terrestrial stream does not. Refused here, before the
@@ -390,27 +421,54 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         None
     };
 
+    // Which terrestrial tuner a request for tuner 1 or `auto` may use depends
+    // on the unit's tuner #1, known once the unit was opened: open it first.
+    if system == System::IsdbT
+        && !matches!(req.tuner, None | Some(TunerChoice::Index(0)))
+        && unit.second_ter.locked().is_none()
+    {
+        unit.tuning.fetch_add(1, Ordering::Relaxed);
+        let opened = unit.open(&mut unit.tuner.locked());
+        unit.tuning.fetch_sub(1, Ordering::Relaxed);
+        if let Err(e) = opened {
+            log::warn!("connection {id}: {what}: {e}");
+            let _ = reply(&conn, &Reply::Error(e));
+            return;
+        }
+    }
+    let second_ter = unit.second_ter.locked().unwrap_or(false);
+
     // Take the stream over from whoever holds it, unless asked not to; the
     // same client (by its id) replacing its own stream is never refused, so
     // that a channel change does not wait for the old connection's end to
-    // be noticed.
+    // be noticed. Both slots are held while the tuner is picked, so that two
+    // `auto` requests do not pick the same free tuner.
     let stop = Arc::new(AtomicBool::new(false));
-    {
-        let mut s = unit.slots[i].locked();
-        let how = claim(&s, req.busy_fail, req.client.as_deref());
+    let i = {
+        let mut slots = [unit.slots[0].locked(), unit.slots[1].locked()];
+        let i = match pick_tuner(system, req.tuner, second_ter, [&*slots[0], &*slots[1]], req.client.as_deref()) {
+            Ok(i) => i,
+            Err(e) => {
+                let e = format!("unit {}: {e}", unit.serial);
+                log::warn!("connection {id}: {what}: {e}");
+                let _ = reply(&conn, &Reply::Error(e));
+                return;
+            }
+        };
+        let name = tuner_name(system, i, second_ter);
+        let s = &mut slots[i];
+        let how = claim(s, req.busy_fail, req.client.as_deref());
         if how == Claim::Busy {
-            let why =
-                format!("{} stream of unit {} is held by connection {}", system_name(system), unit.serial, s.owner);
-            log::info!("connection {id}: {what}: busy ({why})");
+            let why = format!("{name} stream of unit {} is held by connection {}", unit.serial, s.owner);
+            log::info!("connection {id}: {}: busy ({why})", describe(name));
             let _ = reply(&conn, &Reply::Busy(why));
             return;
         }
         if let Some(prev) = s.stop.take() {
             prev.store(true, Ordering::Relaxed);
             log::info!(
-                "unit {}: {} stream {} connection {} by connection {id}",
+                "unit {}: {name} stream {} connection {} by connection {id}",
                 unit.serial,
-                system_name(system),
                 if how == Claim::Replace { "replaced (same client) from" } else { "taken over from" },
                 s.owner
             );
@@ -419,7 +477,9 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         s.stop = Some(stop.clone());
         s.client = req.client.clone();
         s.channel = req.channel.name.clone();
-    }
+        i
+    };
+    let what = describe(tuner_name(system, i, second_ter));
 
     let t0 = Instant::now();
     unit.tuning.fetch_add(1, Ordering::Relaxed);
@@ -449,10 +509,10 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
                 System::IsdbS => d.sat_lock_wait_ms,
             };
             t.set_lock_wait_ms(system, req.lock_wait_ms.unwrap_or(wait));
-            match t.set_channel(&req.channel) {
-                Ok(()) => Ok(t.signal_level_of(system)),
+            match t.set_channel_on(i, &req.channel) {
+                Ok(()) => Ok(t.signal_level_of(i)),
                 Err(e) => {
-                    t.release(system);
+                    t.release(i);
                     if matches!(e, dth10_core::Error::Usb(_)) {
                         log::warn!("unit {}: device lost ({e}); opened again on the next request", unit.serial);
                         *guard = None;
@@ -465,7 +525,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
     unit.tuning.fetch_sub(1, Ordering::Relaxed);
     let cnr = match tuned {
         Ok(cnr) => {
-            unit.cnr.locked().set(system, Some(cnr));
+            unit.cnr.locked().set(i, Some(cnr));
             cnr
         }
         Err(e) => {
@@ -479,7 +539,11 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         }
     };
     log::info!("unit {}: connection {id} streams {what} after {:?}, C/N {cnr:.1} dB", unit.serial, t0.elapsed());
-    let info = format!("{} {} {} Hz C/N {cnr:.1} dB", unit.serial, system_name(system), req.channel.frequency_hz);
+    let mut info = format!("{} {} {} Hz C/N {cnr:.1} dB", unit.serial, system_name(system), req.channel.frequency_hz);
+    if second_ter && system == System::IsdbT {
+        // which of the two terrestrial tuners (an `auto` request learns it here)
+        info.push_str(&format!(" tuner={i}"));
+    }
     let mut why = "client closed";
     let mut lost_device = false;
     let mut dropped = 0u64;
@@ -523,7 +587,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
                 // The reader thread gave up on the device (unplugged): end the
                 // stream so the client notices and asks again later.
                 if let Ok(guard) = unit.tuner.try_lock()
-                    && guard.as_ref().is_none_or(|t| t.stream_failed(system))
+                    && guard.as_ref().is_none_or(|t| t.stream_failed(i))
                 {
                     why = "device lost";
                     lost_device = true;
@@ -572,9 +636,9 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
             );
             *guard = None;
         } else if let Some(t) = guard.as_mut() {
-            t.release(system);
+            t.release(i);
         }
-        unit.cnr.locked().set(system, None);
+        unit.cnr.locked().set(i, None);
     }
 }
 
@@ -593,10 +657,10 @@ fn poll_status(units: &Units, quit: &AtomicBool) {
             }
             let Ok(mut guard) = u.tuner.try_lock() else { continue };
             if let Some(t) = guard.as_mut() {
-                let (ter, sat) = t.poll_status();
+                let cnr = t.poll_status();
                 // Stored under the tuner lock: a stream's end clears its value
                 // under the same lock, after this.
-                *u.cnr.locked() = Cnr { ter, sat, read: Some(Instant::now()) };
+                *u.cnr.locked() = Cnr { tuners: cnr, read: Some(Instant::now()) };
             }
         }
         std::thread::sleep(STATUS_TICK);
@@ -670,6 +734,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             recipient,
             queues: [TsQueue::new(), TsQueue::new()],
             tuner: Mutex::new(None),
+            second_ter: Mutex::new(None),
             slots: [Mutex::new(Slot::default()), Mutex::new(Slot::default())],
             cnr: Mutex::new(Cnr::default()),
             tuning: AtomicUsize::new(0),
@@ -808,6 +873,52 @@ mod tests {
         // the same client changing channel replaces its own stream even with busy=fail
         assert_eq!(claim(&held(3, Some("a")), true, Some("a")), Claim::Replace);
         assert_eq!(claim(&held(3, Some("a")), false, Some("a")), Claim::Replace);
+    }
+
+    #[test]
+    fn tuner_picks() {
+        use System::{IsdbS, IsdbT};
+        use TunerChoice::{Auto, Index};
+        let free = Slot::default();
+        let (a, b) = (held(3, Some("a")), held(4, Some("b")));
+        let pick = |system, choice, second_ter, slots: [&Slot; 2], client| {
+            pick_tuner(system, choice, second_ter, slots, client)
+        };
+        // a unit with a satellite tuner (or none): terrestrial always on tuner 0,
+        // satellite on tuner 1, whatever is held
+        for second_ter in [false, true] {
+            assert_eq!(pick(IsdbS, None, second_ter, [&a, &free], Some("b")), Ok(1));
+        }
+        assert_eq!(pick(IsdbT, None, false, [&a, &free], Some("b")), Ok(0));
+        assert_eq!(pick(IsdbT, Some(Auto), false, [&a, &free], Some("b")), Ok(0), "auto is tuner 0 there");
+        assert_eq!(pick(IsdbT, Some(Index(0)), false, [&free, &free], None), Ok(0));
+        assert!(pick(IsdbT, Some(Index(1)), false, [&free, &free], None).is_err(), "tuner 1 is not terrestrial");
+        // two terrestrial tuners: no key = tuner 0, an index is taken as named
+        assert_eq!(pick(IsdbT, None, true, [&a, &free], Some("b")), Ok(0));
+        assert_eq!(pick(IsdbT, Some(Index(1)), true, [&free, &a], Some("b")), Ok(1));
+        // auto: the first free tuner ...
+        assert_eq!(pick(IsdbT, Some(Auto), true, [&free, &free], Some("b")), Ok(0));
+        assert_eq!(pick(IsdbT, Some(Auto), true, [&a, &free], Some("b")), Ok(1));
+        assert_eq!(pick(IsdbT, Some(Auto), true, [&a, &free], None), Ok(1));
+        // ... but the one the same client streams already (a channel change)
+        assert_eq!(pick(IsdbT, Some(Auto), true, [&free, &b], Some("b")), Ok(1));
+        assert_eq!(pick(IsdbT, Some(Auto), true, [&a, &b], Some("b")), Ok(1));
+        // both held by others: tuner 0 (taken over, or busy with busy=fail)
+        assert_eq!(pick(IsdbT, Some(Auto), true, [&a, &b], Some("c")), Ok(0));
+        assert_eq!(pick(IsdbT, Some(Auto), true, [&a, &b], None), Ok(0));
+    }
+
+    #[test]
+    fn status_by_unit_kind() {
+        let h = Some(Holder { conn: 5, client: None, channel: "27".into() });
+        // tuner #1 is the satellite one: the reply as before
+        let st = unit_status([Some(30.1), Some(18.6)], false, [None, h.clone()], false);
+        assert_eq!(st.to_info("X"), "X ter=30.1 sat=18.6 sat_ch=27 sat_by=5");
+        assert_eq!(unit_status([None, None], false, [None, None], false).to_info("X"), "X ter=- sat=-");
+        // tuner #1 is a second terrestrial tuner
+        let st = unit_status([None, Some(28.0)], true, [None, h], true);
+        assert_eq!(st.to_info("X"), "X ter=- sat=- ter1=28.0 ter1_ch=27 ter1_by=5 busy");
+        assert_eq!((st.sat, st.ter1), (None, Some(28.0)));
     }
 
     #[test]
