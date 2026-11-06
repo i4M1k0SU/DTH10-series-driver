@@ -25,7 +25,7 @@ pub struct Event {
 
 /// Known event codes.
 pub mod code {
-    /// class 0x0000: LNB over-current check request (model "h70"); the driver
+    /// class 0x0000: LNB over-current check request (models "h70" / "h70b"); the driver
     /// re-reads wIndex 0x1010 and switches the LNB supply off if bit0 of byte
     /// 12 is clear.
     pub const LNB_CHECK: (u16, u16) = (0x0000, 0x1011);

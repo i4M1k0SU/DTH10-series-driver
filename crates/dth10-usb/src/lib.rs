@@ -564,8 +564,10 @@ mod tests {
         assert!(is_supported(0x0411, 0x0199));
         // The successor models are listed too, as unverified models.
         assert!(is_supported(0x0411, 0x01FF));
+        assert!(is_supported(0x0411, 0x0200));
         assert!(is_supported(0x0411, 0x0202));
-        assert!(!is_supported(0x0411, 0x0200));
+        assert!(is_supported(0x0411, 0x0218));
+        assert!(!is_supported(0x0411, 0x01D3));
         assert!(!is_supported(0x0412, 0x0199));
     }
 }

@@ -868,7 +868,7 @@ fn sat_probe(kit: &mut Lj101Kit<UsbTransport>, ch: &Channel, a: &TuneSatArgs) ->
             "LNB {}: healthy={healthy} gpio status {:02x?} readback {:?}",
             a.lnb,
             &st[8..13],
-            dth10_core::device::lnb_get(&kit.dev)
+            dth10_core::device::LnbGpio::of(&kit.desc).map(|g| dth10_core::device::lnb_get(&kit.dev, g))
         );
     }
     let applied = kit.set_booster(a.booster)?;
