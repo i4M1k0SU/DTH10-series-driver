@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | `SMT_LJ101` | 0x402 | [`Lj101Kit`] |
 //! | `SHARP_8011` | 0x402 | [`Sharp8011SatKit`] |
+//! | `TC90522_MTV600`, `TC90532_MTV600`, `TC90532_MTV808` | 0x402 | [`Tc9052xSatKit`] |
 //!
 //! Every kit offers the same operations (init, open / close, tune to a BS/CS
 //! IF, TSID selection, signal status, antenna supply, booster); the bridge
@@ -18,11 +19,13 @@ use crate::kit::SignalStatus;
 use crate::lj101::Lj101Kit;
 use crate::protocol::UsbControl;
 use crate::sharp8011::Sharp8011SatKit;
+use crate::tc9052x::{self, Tc9052xSatKit};
 use crate::tlv::TunerDesc;
 
 pub enum SatelliteKit<T: UsbControl> {
     Lj101(Lj101Kit<T>),
     Sharp8011(Sharp8011SatKit<T>),
+    Tc9052x(Tc9052xSatKit<T>),
 }
 
 /// The satellite kits by descriptor.
@@ -30,6 +33,7 @@ pub enum SatelliteKit<T: UsbControl> {
 enum Which {
     Lj101,
     Sharp8011,
+    Tc9052x,
 }
 
 impl Which {
@@ -38,6 +42,8 @@ impl Which {
             Some(Which::Lj101)
         } else if Sharp8011SatKit::<T>::supports(desc) {
             Some(Which::Sharp8011)
+        } else if Tc9052xSatKit::<T>::supports(desc) {
+            Some(Which::Tc9052x)
         } else {
             None
         }
@@ -50,6 +56,7 @@ macro_rules! each {
         match $self {
             SatelliteKit::Lj101($k) => $e,
             SatelliteKit::Sharp8011($k) => $e,
+            SatelliteKit::Tc9052x($k) => $e,
         }
     };
 }
@@ -61,18 +68,22 @@ impl<T: UsbControl> SatelliteKit<T> {
     }
 
     /// The kit for `desc` (the descriptor of the tuner it drives) on the
-    /// model with USB product ID `pid` (as [`TerrestrialKit::new`](crate::terrestrial::TerrestrialKit::new);
-    /// no satellite kit depends on the model yet).
+    /// model with USB product ID `pid` (as [`TerrestrialKit::new`](crate::terrestrial::TerrestrialKit::new):
+    /// the TC90522 / TC90532 kit follows the model's vendor driver where the
+    /// drivers differ, [`tc9052x::driver_for`]).
     pub fn new(dev: Device<T>, desc: TunerDesc, pid: u16) -> Result<Self> {
-        let _ = pid;
         Ok(match Which::of::<T>(&desc) {
             Some(Which::Lj101) => SatelliteKit::Lj101(Lj101Kit::new(dev, desc)?),
             Some(Which::Sharp8011) => SatelliteKit::Sharp8011(Sharp8011SatKit::new(dev, desc)?),
+            Some(Which::Tc9052x) => {
+                let driver = tc9052x::driver_for(&desc, pid).unwrap_or_default();
+                SatelliteKit::Tc9052x(Tc9052xSatKit::new(dev, desc, driver)?)
+            }
             None => {
                 // Other satellite kits of the series are not implemented yet (no
                 // such unit was available to check them).
                 return Err(Error::Unsupported(format!(
-                    "satellite tuner kit {} hw 0x{:x} is not implemented yet (implemented: SMT_LJ101 hw 0x402, SHARP_8011 hw 0x402)",
+                    "satellite tuner kit {} hw 0x{:x} is not implemented yet (implemented: SMT_LJ101 hw 0x402, SHARP_8011 hw 0x402, TC90522_MTV600 / TC90532_MTV600 / TC90532_MTV808 hw 0x402)",
                     desc.kit_name, desc.hw_version
                 )));
             }
@@ -84,6 +95,7 @@ impl<T: UsbControl> SatelliteKit<T> {
         match self {
             SatelliteKit::Lj101(_) => "SMT_LJ101",
             SatelliteKit::Sharp8011(_) => "SHARP_8011",
+            SatelliteKit::Tc9052x(_) => "TC9052x",
         }
     }
 
@@ -168,7 +180,12 @@ mod tests {
             ("SHARP_8011", 0x102, None),
             ("SHARP_8011", 0x401, None),
             ("SHARP_801", 0x402, None),
-            ("TC90532_MTV600", 0x402, None),
+            ("TC90532_MTV600", 0x402, Some("TC9052x")),
+            ("TC90522_MTV600", 0x402, Some("TC9052x")),
+            ("TC90532_MTV808", 0x402, Some("TC9052x")),
+            ("TC90522_MTV808", 0x402, None),
+            ("TC90532_MTV600", 0x102, None),
+            ("TC90527_FC5500", 0x402, None),
             ("", 0x402, None),
         ] {
             let d = desc(name, hw);
@@ -185,7 +202,7 @@ mod tests {
 
     #[test]
     fn no_descriptor_is_both_terrestrial_and_satellite() {
-        for name in ["SMT_LJ101", "SHARP_8011"] {
+        for name in ["SMT_LJ101", "SHARP_8011", "TC90532_MTV600", "TC90532_MTV808"] {
             for hw in [0x102, 0x402] {
                 let d = desc(name, hw);
                 assert_ne!(TerrestrialKit::<RegMock>::supports(&d), SatelliteKit::<RegMock>::supports(&d), "{name}");
