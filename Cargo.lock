@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "dth10-bondriver"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cc",
  "dth10-core",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "dth10-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap",
  "dth10-core",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "dth10-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "aes",
  "cmac",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "dth10-diag"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap",
  "dth10-core",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "dth10-tuner"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "dth10-core",
  "dth10-usb",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "dth10-usb"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "dth10-core",
  "log",
