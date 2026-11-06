@@ -850,7 +850,7 @@ mod tests {
         assert_eq!(ops[0], Op::Gpio(0x82, 0x1006, 0xC0, 0x80));
         let writes: Vec<(u8, u8)> =
             ops.iter().filter_map(|o| if let Op::W(TUNER, r, v) = o { Some((*r, v[0])) } else { None }).collect();
-        // Calibration: 15 + 100 writes of 0x1F, then the average back to 0x1B.
+        // LNA calibration: 15 + 100 requests in 0x1F, then the 0x1B average back to 0x1B.
         assert_eq!(writes.iter().take_while(|&&x| x == (0x1F, 0x1F)).count(), 115);
         let after_cal = &writes[115..];
         assert_eq!(
