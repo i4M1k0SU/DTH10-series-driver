@@ -27,9 +27,14 @@ const TS_PACKET: usize = 188;
 const QUEUE_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// How long to collect PAT/PMT in raw mode before switching to device mode.
 const PSI_LEARN_TIMEOUT: Duration = Duration::from_millis(2500);
-/// PSI learn through the link decryption (satellite): a stale handshake is
-/// renewed on the way (several seconds) before the first content key arrives.
-const PSI_LEARN_TIMEOUT_ENCRYPTED: Duration = Duration::from_secs(12);
+/// PSI learn through the link decryption: how long to collect PAT/PMT after
+/// the stream enable, and again after a restart for a renewed handshake (the
+/// renewal itself takes several seconds and is not counted). PAT and PMT come
+/// every 0.1 s and a learn normally completes within 0.4–0.8 s; on a weak
+/// channel the tables may never complete, and the wait then has to stay short
+/// enough for a channel change to finish within a player's own time limit
+/// (TVTest gives up after about 10 s).
+const PSI_LEARN_TIMEOUT_ENCRYPTED: Duration = Duration::from_secs(4);
 
 struct QueueInner {
     chunks: VecDeque<Vec<u8>>,
@@ -1170,7 +1175,7 @@ impl Tuner {
         reader.start();
         dev_for_stream.stream_enable_mode(desc, StreamMode::EncryptedPartial)?;
         let t = Instant::now();
-        let deadline = t + PSI_LEARN_TIMEOUT_ENCRYPTED;
+        let mut deadline = t + PSI_LEARN_TIMEOUT_ENCRYPTED;
         while Instant::now() < deadline && !psi.complete() {
             if let Some(data) = reader.next(Duration::from_millis(200))? {
                 let mut chunk = aligner.feed(&data);
@@ -1188,6 +1193,7 @@ impl Tuner {
                     self.store_handshake(flags, hs);
                     dev_for_stream.stream_disable()?;
                     dev_for_stream.stream_enable_mode(desc, StreamMode::EncryptedPartial)?;
+                    deadline = Instant::now() + PSI_LEARN_TIMEOUT_ENCRYPTED;
                     log::info!("cepm: stream restarted for the new session (PSI learn)");
                 }
             }
