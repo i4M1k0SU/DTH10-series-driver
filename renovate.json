@@ -15,11 +15,16 @@
       "pinDigests": true
     },
     {
-      "updateTypes": ["major"],
+      "matchUpdateTypes": [
+        "major"
+      ],
       "addLabels": ["update-major"]
     },
     {
-      "updateTypes": ["minor", "patch"],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
       "addLabels": ["update-minor"]
     }
   ]
