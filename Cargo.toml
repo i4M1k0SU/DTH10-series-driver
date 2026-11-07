@@ -20,7 +20,7 @@ dth10-core = { path = "crates/dth10-core" }
 dth10-usb = { path = "crates/dth10-usb" }
 dth10-tuner = { path = "crates/dth10-tuner" }
 nusb = "0.2.9"
-log = "0.4.34"
+log = "0.4.35"
 env_logger = "0.11.11"
 clap = { version = "4.6.7", features = ["derive"] }
 winresource = "0.1.34"
