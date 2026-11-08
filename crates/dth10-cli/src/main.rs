@@ -70,7 +70,7 @@ enum Cmd {
 
 #[derive(Args, Clone)]
 struct DeviceArgs {
-    /// Select the device by USB serial number (default: the first one found).
+    /// Select the device by USB serial number (default: the first one found; `info` shows every one).
     #[arg(long, value_name = "SERIAL")]
     serial: Option<String>,
     /// Open this usbfs node (/dev/bus/usb/BBB/DDD) instead of searching.
@@ -260,12 +260,16 @@ fn list() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn open_transport(d: &DeviceArgs) -> Result<UsbTransport, Box<dyn Error>> {
-    let mode = match d.recipient {
+fn recipient_mode(d: &DeviceArgs) -> RecipientMode {
+    match d.recipient {
         Some(RecipientArg::Device) => RecipientMode::Device,
         Some(RecipientArg::Interface) => RecipientMode::Interface,
         None => RecipientMode::platform_default(),
-    };
+    }
+}
+
+fn open_transport(d: &DeviceArgs) -> Result<UsbTransport, Box<dyn Error>> {
+    let mode = recipient_mode(d);
     #[cfg(any(target_os = "linux", target_os = "android"))]
     if let Some(p) = d.device.as_ref() {
         return Ok(UsbTransport::open_path(p, mode)?);
@@ -290,8 +294,46 @@ fn print_desc(index: u8, di: &DeviceInformation) {
     );
 }
 
+/// `info` of the device the options name, or of every supported device found
+/// (one block each, separated by a blank line). A device that cannot be opened
+/// (another program holds it) is reported and the others are still shown.
 fn info(d: &DeviceArgs) -> Result<(), Box<dyn Error>> {
-    let t = open_transport(d)?;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let named = d.serial.is_some() || d.device.is_some();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let named = d.serial.is_some();
+    if named {
+        return info_of(open_transport(d)?);
+    }
+    let found = UsbTransport::list_all()?;
+    if found.is_empty() {
+        return Err("no supported device found".into());
+    }
+    let mut failed = 0;
+    for (i, f) in found.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        let r = match f.open(recipient_mode(d)) {
+            Ok(t) => info_of(t),
+            Err(e) => {
+                println!("model: {} ({:04x})", dth10_core::product_label(f.product_id), f.product_id);
+                println!("serial: {}", f.serial.as_deref().unwrap_or("-"));
+                Err(e.into())
+            }
+        };
+        if let Err(e) = r {
+            failed += 1;
+            println!("error: {e}");
+        }
+    }
+    if failed > 0 {
+        return Err(format!("{failed} of {} devices could not be read", found.len()).into());
+    }
+    Ok(())
+}
+
+fn info_of(t: UsbTransport) -> Result<(), Box<dyn Error>> {
     println!("model: {} ({:04x})", dth10_core::product_label(t.product_id()), t.product_id());
     println!("serial: {}", t.serial().unwrap_or("-"));
     println!("endpoints: {:?}", t.pipes());
