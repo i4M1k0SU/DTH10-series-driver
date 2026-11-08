@@ -50,7 +50,7 @@ type Res<T = ()> = Result<T, Box<dyn Error>>;
     about = "Hardware diagnostics for the BUFFALO DTH10 series of USB TV tuners (developer tool; recording is `dth10 tune`)"
 )]
 struct Cli {
-    /// Select the device by USB serial number (default: the first one found).
+    /// Select the device by USB serial number (default: the first one found; `info` shows every one).
     #[arg(long, global = true, help_heading = "Global options", value_name = "SERIAL")]
     serial: Option<String>,
     /// bmRequestType recipient of the vendor requests (default: device on Windows, interface elsewhere).
@@ -387,12 +387,22 @@ struct Opener {
 impl Opener {
     fn open(&self) -> Res<UsbTransport> {
         let t = UsbTransport::open_matching(self.mode, self.serial.as_deref())?;
-        eprintln!(
+        eprintln!("{}", self.header(t.product_id(), t.serial()));
+        self.attach(t)
+    }
+
+    /// The line naming an opened device.
+    fn header(&self, product_id: u16, serial: Option<&str>) -> String {
+        format!(
             "device {} serial {} (bmRequestType recipient {:?})",
-            dth10_core::product_label(t.product_id()),
-            t.serial().unwrap_or("-"),
+            dth10_core::product_label(product_id),
+            serial.unwrap_or("-"),
             self.mode
-        );
+        )
+    }
+
+    /// Start the --drain-events thread on an opened device.
+    fn attach(&self, t: UsbTransport) -> Res<UsbTransport> {
         if self.drain_events
             && let Some(ep) = t.pipes().interrupt_in
         {
@@ -524,8 +534,36 @@ fn print_desc(index: u8, d: &TunerDesc) {
     );
 }
 
+/// `info` of the device --serial names, or of every supported device found
+/// (each block starts with its `device ... serial ...` line on stdout). A
+/// device that cannot be opened is reported and the others are still shown.
 fn info(o: &Opener, tuner: u8, raw: bool) -> Res {
-    let t = o.open()?;
+    if o.serial.is_some() {
+        return info_of(o.open()?, tuner, raw);
+    }
+    let found = UsbTransport::list_all()?;
+    if found.is_empty() {
+        return Err("no supported device found".into());
+    }
+    let mut failed = 0;
+    for (i, f) in found.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        println!("{}", o.header(f.product_id, f.serial.as_deref()));
+        let r = f.open(o.mode).map_err(Into::into).and_then(|t| o.attach(t)).and_then(|t| info_of(t, tuner, raw));
+        if let Err(e) = r {
+            failed += 1;
+            println!("error: {e}");
+        }
+    }
+    if failed > 0 {
+        return Err(format!("{failed} of {} devices could not be read", found.len()).into());
+    }
+    Ok(())
+}
+
+fn info_of(t: UsbTransport, tuner: u8, raw: bool) -> Res {
     println!("endpoints: {:?}", t.pipes());
     let dev = Device::new(t).with_tuner_index(tuner);
     let blob = dev.read_device_information_raw()?;
