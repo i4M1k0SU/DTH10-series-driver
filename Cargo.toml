@@ -24,7 +24,7 @@ log = "0.4.35"
 env_logger = "0.11.11"
 clap = { version = "4.6.7", features = ["derive"] }
 winresource = "0.1.34"
-jiff = { version = "0.2.38", default-features = false, features = ["std"] }
+jiff = { version = "0.2.39", default-features = false, features = ["std"] }
 
 # Whole-program optimisation for the shipped binaries (the daemon's TS
 # decryption and the DLL's stream copy are the hot paths); the build takes
