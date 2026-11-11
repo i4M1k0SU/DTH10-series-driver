@@ -127,9 +127,7 @@ pub mod mock {
         pub fn writes(&self) -> Vec<Op> {
             self.ops()
                 .into_iter()
-                .filter(|o| {
-                    matches!(o, Op::CsrWrite(..) | Op::LocalCfgWrite(..) | Op::CfgWrite(..) | Op::MemWrite(..))
-                })
+                .filter(|o| matches!(o, Op::CsrWrite(..) | Op::LocalCfgWrite(..) | Op::CfgWrite(..) | Op::MemWrite(..)))
                 .collect()
         }
 
