@@ -72,6 +72,9 @@ pub struct CmdRing {
     /// Number of slots.
     pub slots: u32,
     next: u32,
+    /// Slots held by open streams (bit i = slot i), skipped by
+    /// [`CmdRing::next_slot`].
+    reserved: u64,
 }
 
 impl CmdRing {
@@ -82,7 +85,7 @@ impl CmdRing {
         if n < 2 {
             return Err(Error::Protocol("command list too small"));
         }
-        Ok(Self { fb_base, slots: n.min(MAX_SLOTS), next: 0 })
+        Ok(Self { fb_base, slots: n.min(MAX_SLOTS), next: 0, reserved: 0 })
     }
 
     /// FB address of slot `i`.
@@ -90,11 +93,46 @@ impl CmdRing {
         self.fb_base + SLOT_SIZE as u32 * i
     }
 
-    /// The next slot, round robin.
+    /// The next slot that is not reserved, round robin.
     pub fn next_slot(&mut self) -> u32 {
-        let i = self.next;
-        self.next = (i + 1) % self.slots;
-        i
+        // `reserve` always leaves one slot free, so this ends.
+        loop {
+            let i = self.next;
+            self.next = (i + 1) % self.slots;
+            if !self.is_reserved(i) {
+                return i;
+            }
+        }
+    }
+
+    /// Hold slot `i` until [`CmdRing::release`]. A stream keeps its OPEN
+    /// slot because the CLOSE is sent in the same slot (docs/26
+    /// 6-stream-payloads.md §2.5, §6.4); whether the firmware still reads
+    /// the slot while the stream is open is not known, so other commands
+    /// stay out of it. At least one slot always stays free.
+    pub fn reserve(&mut self, i: u32) -> Result<()> {
+        if i >= self.slots {
+            return Err(Error::Protocol("command slot out of range"));
+        }
+        if self.is_reserved(i) {
+            return Ok(());
+        }
+        if self.reserved.count_ones() + 2 > self.slots {
+            return Err(Error::Protocol("no free command slot left"));
+        }
+        self.reserved |= 1 << i;
+        Ok(())
+    }
+
+    /// Give a reserved slot back.
+    pub fn release(&mut self, i: u32) {
+        if i < self.slots {
+            self.reserved &= !(1 << i);
+        }
+    }
+
+    pub fn is_reserved(&self, i: u32) -> bool {
+        i < self.slots && self.reserved & (1 << i) != 0
     }
 }
 
@@ -435,6 +473,24 @@ mod tests {
         assert_eq!((0..42).map(|_| r.next_slot()).last(), Some(0));
         assert_eq!(CmdRing::new(0, 0x23C0 * 5).unwrap().slots, 5);
         assert!(CmdRing::new(0, 0x23C0).is_err());
+    }
+
+    #[test]
+    fn reserved_slots_are_skipped() {
+        let mut r = CmdRing::new(0, 0x23C0 * 4).unwrap();
+        r.reserve(1).unwrap();
+        r.reserve(2).unwrap();
+        assert!(r.is_reserved(1) && !r.is_reserved(0));
+        assert_eq!((0..4).map(|_| r.next_slot()).collect::<Vec<_>>(), [0, 3, 0, 3]);
+        // One slot always stays free.
+        r.reserve(3).unwrap();
+        r.reserve(3).unwrap();
+        assert!(r.reserve(0).is_err());
+        assert!(r.reserve(4).is_err());
+        assert_eq!((0..2).map(|_| r.next_slot()).collect::<Vec<_>>(), [0, 0]);
+        r.release(1);
+        r.release(3);
+        assert_eq!((0..3).map(|_| r.next_slot()).collect::<Vec<_>>(), [1, 3, 0]);
     }
 
     fn script_completion(m: &MockPci, func: u32, slot_fb: u32, status: u32) {

@@ -12,8 +12,8 @@
 //! 3. the OTP signature (command 27) and the LED state "not in use".
 //!
 //! Afterwards [`Vixs::send_cmd`] talks to the firmware ([`cmd`]) and
-//! [`Vixs::i2c`] gives the host-driven I2C bus to the front end. Stream
-//! payloads are not part of this module.
+//! [`Vixs::i2c`] gives the host-driven I2C bus to the front end. The stream
+//! commands (TS input set-up, open / flush / close) are in [`stream`].
 //!
 //! None of this is verified on hardware.
 
@@ -25,6 +25,7 @@ pub mod i2c;
 pub mod meminit;
 pub mod mips;
 pub mod mmr;
+pub mod stream;
 
 use core::time::Duration;
 
@@ -33,6 +34,7 @@ pub use firmware::Firmware;
 pub use meminit::MemInit;
 pub use mips::MipsInfo;
 pub use mmr::Chip;
+pub use stream::{CasMode, StreamHandle, StreamKind};
 
 use crate::bus::RemotePci;
 use crate::net2280::{self, IrqState, Layout};
@@ -82,6 +84,8 @@ pub struct Vixs<B: RemotePci> {
     pub(crate) pending: Option<cmd::Pending>,
     pub(crate) m2h_handler: Option<M2hHandler<B>>,
     otp: Option<[u32; cmd::OTP_WORDS]>,
+    /// The next stream cookie ([`stream`]).
+    pub(crate) next_cookie: u32,
 }
 
 impl<B: RemotePci> Vixs<B> {
@@ -112,6 +116,7 @@ impl<B: RemotePci> Vixs<B> {
             pending: None,
             m2h_handler: None,
             otp: None,
+            next_cookie: 1,
         }
     }
 

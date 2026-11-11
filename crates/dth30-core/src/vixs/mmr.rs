@@ -13,7 +13,7 @@
 //! The sequences in this module tree use the same kind at the same place as
 //! the vendor, so their bus traffic matches it read for read.
 //!
-//! The FB window is 1 MB of SDRAM selected by RBM_SWAP (0x43C) bits [14:8].
+//! The FB window is 1 MB of SDRAM selected by RBM_SWAP (0x43C) bits 14:8.
 //!
 //! Not verified on hardware.
 
@@ -25,7 +25,7 @@ use crate::{Error, Result};
 
 /// Board / chip ID ("XC_RBM_BOARD_ID").
 pub const BOARD_ID: u32 = 0x478;
-/// SDRAM window select and more ("RBM_SWAP"); bits [14:8] = 1 MB window.
+/// SDRAM window select and more ("RBM_SWAP"); bits 14:8 = 1 MB window.
 pub const RBM_SWAP: u32 = 0x43C;
 /// Mask applied to the board-ID register before comparing.
 pub const BOARD_ID_CHECK_MASK: u32 = 0xF3FF_FFFF;
