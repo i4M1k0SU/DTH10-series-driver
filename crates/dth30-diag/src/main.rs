@@ -9,16 +9,20 @@
 //! On Windows the device must be bound to WinUSB.
 
 use std::error::Error;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand};
 use dth30_core::bus::RemotePci;
+use dth30_core::device::{Config, Dth30, StreamInfo};
+use dth30_core::frontend::StdSleep;
 use dth30_core::frontend::regs::{read_regs, write_regs};
-use dth30_core::frontend::{Frontend, StdSleep};
 use dth30_core::model;
+use dth30_core::psi::ProgramScanner;
+use dth30_core::vixs::stream::{CasMode, parse_generic_block};
 use dth30_core::vixs::{Firmware, Options, Vixs};
-use dth30_usb::{LocalSpace, Net2280Usb};
+use dth30_usb::{LocalSpace, Net2280Usb, StreamReader};
 
 type Res<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -100,17 +104,50 @@ enum Cmd {
     },
     /// After bring-up, initialise the board's front end, tune and print the signal status
     /// every 250 ms until it locks or --lock-wait passes.
-    Tune {
+    Tune(TuneArgs),
+    /// After tune and lock, open the CAS object and the Raw stream, find the service in its
+    /// PAT/PMT, open the Program stream and write it to a file (with --raw, the Raw stream).
+    /// Reports how many packets are still scrambled.
+    Record {
         #[command(flatten)]
-        fw: FwArgs,
-        /// UHF channel (13-62), VHF 1-12, CATV "C13".."C63", or a frequency in Hz.
-        channel: String,
-        #[arg(long, default_value_t = 3000, value_name = "MS")]
-        lock_wait: u32,
-        /// Subsystem IDs for board 0xB2 (MJ102 when EEEE:EEEE), as "VVVV:DDDD" in hex.
-        #[arg(long, value_name = "VVVV:DDDD", value_parser = parse_subsystem)]
-        subsystem: Option<(u16, u16)>,
+        tune: TuneArgs,
+        /// Output file.
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Seconds to record.
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        /// Service ID (default: the first service in the PAT).
+        #[arg(long)]
+        sid: Option<u16>,
+        /// Record the Raw stream (EP 0x83, the full TS as the chip passes it) instead.
+        #[arg(long)]
+        raw: bool,
+        /// CAS set-up: "drm" (B-CAS DRM, the vendor's) or "plain" (non-DRM fallback).
+        #[arg(long, default_value = "drm", value_parser = parse_cas_mode)]
+        cas: CasMode,
     },
+}
+
+#[derive(Args, Clone)]
+struct TuneArgs {
+    #[command(flatten)]
+    fw: FwArgs,
+    /// UHF channel (13-62), VHF 1-12, CATV "C13".."C63", or a frequency in Hz.
+    channel: String,
+    #[arg(long, default_value_t = 3000, value_name = "MS")]
+    lock_wait: u32,
+    /// Subsystem IDs for board 0xB2 (MJ102 when EEEE:EEEE), as "VVVV:DDDD" in hex.
+    #[arg(long, value_name = "VVVV:DDDD", value_parser = parse_subsystem)]
+    subsystem: Option<(u16, u16)>,
+}
+
+fn parse_cas_mode(s: &str) -> Result<CasMode, String> {
+    match s {
+        "drm" => Ok(CasMode::BcasDrm),
+        "plain" => Ok(CasMode::Bcas),
+        _ => Err("expected drm or plain".into()),
+    }
 }
 
 #[derive(Clone)]
@@ -194,7 +231,11 @@ fn run(cli: Cli) -> Res {
             println!("wrote i2c 0x{addr:02x} reg 0x{reg:02x}: {}", hex(&data.0));
             Ok(())
         }
-        Cmd::Tune { fw, channel, lock_wait, subsystem } => tune(serial, &fw, &channel, lock_wait, subsystem),
+        Cmd::Tune(a) => {
+            tune(serial, &a, CasMode::default())?;
+            Ok(())
+        }
+        Cmd::Record { tune: a, output, seconds, sid, raw, cas } => record(serial, &a, cas, &output, seconds, sid, raw),
     }
 }
 
@@ -325,32 +366,189 @@ fn report_bring_up(v: &Vixs<Net2280Usb>) {
     }
 }
 
-fn tune(serial: Option<&str>, a: &FwArgs, channel: &str, lock_wait: u32, subsystem: Option<(u16, u16)>) -> Res {
-    let hz = match channel.parse::<u32>() {
-        Ok(n) if n > 1_000_000 => n,
-        _ => dth30_core::frontend::parse_channel(channel)
-            .and_then(|(band, ch)| dth30_core::frontend::channel_hz(band, ch))
-            .ok_or_else(|| format!("unknown channel {channel}"))?,
-    };
-    let mut v = bring_up(serial, a)?;
-    let board = v.board();
-    let mut fe = Frontend::for_board(StdSleep(v.i2c(0, 400)), board, subsystem.unwrap_or((0, 0)))?;
-    println!("front end {} on board 0x{board:02x}, tuning {hz} Hz", fe.kind().name());
-    fe.init()?;
-    fe.tune(hz)?;
-    let deadline = std::time::Instant::now() + Duration::from_millis(lock_wait as u64);
+fn channel_hz(channel: &str) -> Res<u32> {
+    if let Ok(n) = channel.parse::<u32>()
+        && n > 1_000_000
+    {
+        return Ok(n);
+    }
+    dth30_core::frontend::parse_channel(channel)
+        .and_then(|(band, ch)| dth30_core::frontend::channel_hz(band, ch))
+        .ok_or_else(|| format!("unknown channel {channel}").into())
+}
+
+/// Bring the device up, start the front end, tune and wait for lock.
+fn tune(serial: Option<&str>, a: &TuneArgs, cas: CasMode) -> Res<Dth30<Net2280Usb>> {
+    let hz = channel_hz(&a.channel)?;
+    let f = Firmware::load(firmware_path(a.fw.firmware.clone())?)?;
+    let t = open(serial)?;
+    let pid = t.product_id();
+    let p = pipes(&t);
+    let cfg = Config { subsystem: a.subsystem, cas_mode: cas, ..Config::default() };
+    let mut d = Dth30::open(t, pid, &p, Options::default(), cfg)?;
+    d.bring_up(&f)?;
+    println!("front end {} on board 0x{:02x}, tuning {hz} Hz", d.kit().name(), d.board());
+    d.tune(hz)?;
+    let deadline = Instant::now() + Duration::from_millis(a.lock_wait as u64);
     loop {
-        let st = fe.status()?;
+        let st = d.status()?;
         println!(
             "locked {} C/N {:.2} dB (raw 0x{:x}) level {} BER {:?}",
             st.locked, st.cnr_db, st.cnr_raw, st.level, st.ber
         );
         if st.locked {
-            return Ok(());
+            return Ok(d);
         }
-        if std::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return Err("no lock".into());
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+/// A started reader on a stream's endpoint.
+fn reader(d: &mut Dth30<Net2280Usb>, s: &StreamInfo) -> Res<StreamReader> {
+    let mut r = d.vixs_mut().bus().stream_reader(s.endpoint, s.transfer_len, StreamReader::DEFAULT_DEPTH)?;
+    r.start();
+    Ok(r)
+}
+
+/// Drain the CAS channel without waiting, logging each block's kind.
+fn drain_cas(r: &mut StreamReader) -> Res {
+    while let Some(b) = r.next(Duration::from_millis(1))? {
+        match parse_generic_block(&b) {
+            Some((h, body)) => {
+                log::info!("CAS block kind 0x{:x} card 0x{:x} body {} bytes", h.kind, h.card, body.len())
+            }
+            None => log::info!("CAS block of {} bytes", b.len()),
+        }
+    }
+    Ok(())
+}
+
+/// Counts TS packets and those whose transport_scrambling_control is set.
+#[derive(Default)]
+struct TsCount {
+    packets: u64,
+    scrambled: u64,
+    carry: Vec<u8>,
+}
+
+impl TsCount {
+    fn push(&mut self, data: &[u8]) {
+        self.carry.extend_from_slice(data);
+        let mut i = 0;
+        while self.carry.len() - i >= 188 {
+            if self.carry[i] != 0x47 {
+                i += 1;
+                continue;
+            }
+            self.packets += 1;
+            if self.carry[i + 3] & 0xC0 != 0 {
+                self.scrambled += 1;
+            }
+            i += 188;
+        }
+        self.carry.drain(..i);
+    }
+}
+
+fn record(
+    serial: Option<&str>,
+    a: &TuneArgs,
+    cas: CasMode,
+    output: &Path,
+    seconds: u64,
+    sid: Option<u16>,
+    raw: bool,
+) -> Res {
+    let mut d = tune(serial, a, cas)?;
+    let cas_info = d.open_cas()?;
+    let mut cas_rd = reader(&mut d, &cas_info)?;
+    let raw_info = d.open_raw()?;
+    let mut raw_rd = reader(&mut d, &raw_info)?;
+    let mut out = std::fs::File::create(output)?;
+    let mut count = TsCount::default();
+    let result = record_loop(&mut d, &mut cas_rd, &mut raw_rd, &mut out, &mut count, seconds, sid, raw);
+    // Close in the vendor's order whatever happened: Program (inside the
+    // loop), Raw, CAS; each reader is cancelled after its close, then its
+    // FIFO is emptied.
+    let _ = d.close_raw();
+    raw_rd.stop();
+    let _ = d.flush_endpoint_fifo(raw_info.endpoint);
+    let _ = d.close_cas();
+    cas_rd.stop();
+    let _ = d.flush_endpoint_fifo(cas_info.endpoint);
+    result?;
+    println!("wrote {}: {} packets, {} scrambled", output.display(), count.packets, count.scrambled);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_loop(
+    d: &mut Dth30<Net2280Usb>,
+    cas_rd: &mut StreamReader,
+    raw_rd: &mut StreamReader,
+    out: &mut std::fs::File,
+    count: &mut TsCount,
+    seconds: u64,
+    sid: Option<u16>,
+    raw: bool,
+) -> Res {
+    let mut prog_rd = None;
+    if raw {
+        println!("recording the Raw stream (EP 0x{:02x}) for {seconds} s", raw_rd.endpoint_address());
+    } else {
+        let mut scan = ProgramScanner::new(sid);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let spec = loop {
+            drain_cas(cas_rd)?;
+            if let Some(b) = raw_rd.next(Duration::from_millis(200))?
+                && let Some(spec) = scan.push(&b)
+            {
+                break spec;
+            }
+            if Instant::now() >= deadline {
+                return Err("no PAT/PMT in the Raw stream within 5 s".into());
+            }
+        };
+        println!(
+            "service {} (PMT 0x{:x}, PCR 0x{:x}, ECM {:?}), {} streams, packets of {:?} bytes",
+            spec.sid,
+            spec.pmt_pid,
+            spec.pcr_pid,
+            spec.ecm_pid,
+            spec.es.len(),
+            scan.packet_size()
+        );
+        let info = d.open_program(&spec)?;
+        prog_rd = Some(reader(d, &info)?);
+        println!("recording the Program stream (EP 0x{:02x}) for {seconds} s", info.endpoint);
+    }
+    let end = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < end {
+        drain_cas(cas_rd)?;
+        match prog_rd.as_mut() {
+            Some(p) => {
+                if let Some(b) = p.next(Duration::from_millis(200))? {
+                    count.push(&b);
+                    out.write_all(&b)?;
+                }
+                // The Raw stream feeds the Program stream: keep it drained.
+                while raw_rd.next(Duration::from_millis(1))?.is_some() {}
+            }
+            None => {
+                if let Some(b) = raw_rd.next(Duration::from_millis(200))? {
+                    count.push(&b);
+                    out.write_all(&b)?;
+                }
+            }
+        }
+    }
+    if let Some(mut p) = prog_rd {
+        d.close_program()?;
+        p.stop();
+        d.flush_endpoint_fifo(p.endpoint_address())?;
+    }
+    Ok(())
 }
