@@ -35,7 +35,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            packages: -p dth10-core -p dth10-usb -p dth10-tuner -p dth10-cli -p dth10-diag
+            packages: -p dth10-core -p dth10-usb -p dth10-tuner -p dth10-cli -p dth10-diag -p dth30-core -p dth30-usb -p dth30-diag
           - os: windows-latest
             packages: --workspace
     runs-on: ${{ matrix.os }}
