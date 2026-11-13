@@ -345,7 +345,7 @@ mod tests {
         k.init().unwrap();
         let w = k.dev.transport().take_writes();
         // the configuration (4 batches + 0x75)
-        assert!(matches!(&w[0], Write::Batch(b) if b.len() == 23 && b[9] == (0x10, 0x0F, vec![0x10])), "{:?}", w[0]);
+        std::assert_matches!(&w[0], Write::Batch(b) if b.len() == 23 && b[9] == (0x10, 0x0F, vec![0x10]), "{:?}", w[0]);
         assert_eq!(w[4], Write::Reg(0x10, 0x75, vec![0x02]));
         // the tuner's init table follows through the repeater
         assert_eq!(
@@ -399,7 +399,7 @@ mod tests {
             let mut k = Tc9052xKit::new(Device::new(RegMock::default()), desc(name, 0x102, 0), 0x0218).unwrap();
             k.init().unwrap();
             let w = k.dev.transport().take_writes();
-            assert!(matches!(&w[0], Write::Batch(b) if b.len() == 16 && b[4] == (0x10, 0x0F, vec![0x17])), "{name}");
+            std::assert_matches!(&w[0], Write::Batch(b) if b.len() == 16 && b[4] == (0x10, 0x0F, vec![0x17]), "{name}");
             let n = w.len();
             assert_eq!(w[n - 1], demod_standby(0x10), "{name}");
             assert_eq!(&w[n - 4..n - 1], &ts_pins(0x10, 1)[..], "{name}");
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(k.dev.transport().take_writes(), vec![], "Init only powers down");
         k.open().unwrap();
         let w = k.dev.transport().take_writes();
-        assert!(matches!(&w[0], Write::Batch(b) if b.len() == 16), "{:?}", w[0]);
+        std::assert_matches!(&w[0], Write::Batch(b) if b.len() == 16, "{:?}", w[0]);
         assert_eq!(w[4], Write::Reg(0x10, 0x75, vec![0x02]));
         assert!(k.is_open());
         k.close().unwrap();
@@ -443,7 +443,7 @@ mod tests {
         assert!(k.open().is_err());
         assert!(!k.is_open());
         let ops = k.dev.transport().take();
-        assert!(matches!(ops.last(), Some(Op::Other)), "{ops:?}");
+        std::assert_matches!(ops.last(), Some(Op::Other), "{ops:?}");
     }
 
     #[test]

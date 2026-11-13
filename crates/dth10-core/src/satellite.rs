@@ -194,7 +194,7 @@ mod tests {
             assert_eq!(SatelliteKit::<RegMock>::supports(&d), kind.is_some(), "{name} hw 0x{hw:x}");
             if kind.is_none() {
                 let e = kit.err().unwrap();
-                assert!(matches!(e, Error::Unsupported(_)), "{e}");
+                std::assert_matches!(e, Error::Unsupported(_), "{e}");
                 assert!(e.to_string().contains(&format!("satellite tuner kit {name} hw 0x{hw:x}")), "{e}");
             }
         }

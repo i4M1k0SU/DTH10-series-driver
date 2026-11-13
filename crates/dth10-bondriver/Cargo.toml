@@ -3,7 +3,9 @@ name = "dth10-bondriver"
 description = "BonDriver (IBonDriver2) DLL for the BUFFALO DTH10 series of USB TV tuners (verified on a DT-H70/U2), built on dth10-core / dth10-usb"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "BonDriver_DTH10"

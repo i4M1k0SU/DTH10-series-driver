@@ -192,7 +192,7 @@ impl Channel {
             let (tp, slot) = split_tp_slot(rest)?;
             return if bs { Channel::bs(tp, slot) } else { Channel::cs(tp, slot) };
         }
-        let digits = upper.strip_suffix("CH").unwrap_or(&upper);
+        let digits = upper.trim_suffix("CH");
         let uhf: u32 = digits.parse().ok()?;
         Channel::terrestrial(uhf)
     }
@@ -201,7 +201,7 @@ impl Channel {
 /// `"15"`, `"15_1"`, `"15/TS1"` → (15, 1).
 fn split_tp_slot(s: &str) -> Option<(u8, u8)> {
     let (tp, slot) = match s.split_once(['_', '/']) {
-        Some((tp, rest)) => (tp, rest.strip_prefix("TS").unwrap_or(rest)),
+        Some((tp, rest)) => (tp, rest.trim_prefix("TS")),
         None => (s, "0"),
     };
     Some((tp.parse().ok()?, slot.parse().ok()?))
@@ -247,7 +247,7 @@ mod tests {
         for (&(nd, f), &(nd2, tsid)) in CS_IF_HZ.iter().zip(CS_TSID) {
             assert_eq!(nd, nd2);
             assert_eq!((tsid >> 4) & 0xFF, nd as u16);
-            assert!(matches!(tsid >> 12, 6 | 7));
+            std::assert_matches!(tsid >> 12, 6 | 7);
             assert_eq!(Channel::cs(nd, 0).map(|c| (c.frequency_hz, c.tsid)), Some((f, tsid)));
         }
         assert_eq!(arib_tsid(true, 15, 1), 0x40F1);

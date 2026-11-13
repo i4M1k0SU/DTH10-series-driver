@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(server_target(&dir), Target::Unix(dir.join(SERVER_SOCKET)));
         // a folder path too long for a socket address falls back to TCP
         let long = dir.join("x".repeat(120));
-        assert!(matches!(server_target(&long), Target::Tcp(_)));
+        std::assert_matches!(server_target(&long), Target::Tcp(_));
         // the fallback port is fixed per folder and within the range
         let p = fallback_port(&dir);
         assert_eq!(p, fallback_port(&dir));
@@ -654,18 +654,18 @@ mod tests {
         assert_eq!(l.exe, dir.join(SERVER_EXE));
         let args: Vec<String> = l.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(&args[..2], &["serve", "-v"]);
-        assert!(args.windows(2).any(|w| w[0] == "--socket" && w[1] == dir.join(SERVER_SOCKET).to_string_lossy()));
+        assert!(args.array_windows().any(|[k, v]| k == "--socket" && *v == dir.join(SERVER_SOCKET).to_string_lossy()));
         // per-request settings are not on the server's command line
         assert!(!args.iter().any(|a| a == "--lnb" || a.ends_with("-lock-wait")), "{args:?}");
         // one server for every unit: the DLL's Serial goes into its requests, not
         // the server's command line; the read depth is the server's own default
         assert!(!args.iter().any(|a| a == "--serial" || a == "--read-depth"), "{args:?}");
         assert!(
-            args.windows(2).any(|w| w[0] == "--state-dir" && w[1] == dir.to_string_lossy()),
+            args.array_windows().any(|[k, v]| k == "--state-dir" && *v == dir.to_string_lossy()),
             "the handshake cache lives next to the DLL"
         );
         let l = launch_spec(&cfg, &dir, &Target::Tcp("127.0.0.1:40790".into()));
-        assert!(args_of(&l).windows(2).any(|w| w[0] == "--listen" && w[1] == "127.0.0.1:40790"));
+        assert!(args_of(&l).array_windows().any(|[k, v]| k == "--listen" && v == "127.0.0.1:40790"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

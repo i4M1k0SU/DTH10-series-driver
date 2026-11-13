@@ -337,7 +337,7 @@ mod tests {
         let mut section = String::new();
         let mut found: Vec<(String, String)> = Vec::new();
         for line in include_str!("../BonDriver_DTH10.ini").lines().map(str::trim) {
-            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            if let Some(name) = line.strip_circumfix('[', ']') {
                 section = name.to_owned();
             } else if !line.starts_with(';')
                 && let Some((key, _)) = line.split_once('=')

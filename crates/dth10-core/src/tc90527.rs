@@ -303,7 +303,7 @@ mod tests {
         let mut k = Tc90527Kit::new(Device::new(RegMock::default()), desc("TC90527_FC5500", 0), 0x0202).unwrap();
         k.init().unwrap();
         let w = k.dev.transport().take_writes();
-        assert!(matches!(&w[0], Write::Batch(b) if b.len() == 9 && b[4] == (0x10, 0x11, vec![0x2D])), "{:?}", w[0]);
+        std::assert_matches!(&w[0], Write::Batch(b) if b.len() == 9 && b[4] == (0x10, 0x11, vec![0x2D]), "{:?}", w[0]);
         // the FC5500 init (register 0x01 read, then the table) through the repeater
         assert_eq!(&w[1..3], &[Write::Raw(0x10, vec![0xFE, 0xC2, 0x01]), Write::Raw(0x10, vec![0xFE, 0xC3])]);
         assert_eq!(w[3], Write::Raw(0x10, vec![0xFE, 0xC2, 0x00, 0x00]));
@@ -403,7 +403,7 @@ mod tests {
         k.dev.transport().take_writes();
         k.open().unwrap();
         let w = k.dev.transport().take_writes();
-        assert!(matches!(&w[0], Write::Batch(b) if b.len() == 9), "{:?}", w[0]);
+        std::assert_matches!(&w[0], Write::Batch(b) if b.len() == 9, "{:?}", w[0]);
         k.close().unwrap();
         assert_eq!(k.dev.transport().take_writes(), vec![], "Close only powers down");
     }
@@ -416,7 +416,7 @@ mod tests {
             let d = TunerDesc { demod_xtal_hz: xtal, if_freq_hz: if_hz, ..desc("TC90527_FC5500", 0) };
             let mut k = Tc90527Kit::new(Device::new(RegMock::default()), d, 0x0202).unwrap();
             let e = k.init().unwrap_err();
-            assert!(matches!(e, Error::Unsupported(_)) && e.to_string().contains(what), "{e}");
+            std::assert_matches!(e, Error::Unsupported(_) if e.to_string().contains(what), "{e}");
             assert!(!k.configured);
         }
     }
