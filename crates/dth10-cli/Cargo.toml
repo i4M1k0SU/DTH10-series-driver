@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 # The package is dth10-cli (named like the other crates of the workspace);
 # the command it builds is `dth10` (`dth10.exe` next to the BonDriver DLL).
