@@ -897,7 +897,7 @@ mod tests {
     #[test]
     fn tune_needs_the_crystal() {
         let (t, mut dev) = tuner(VendorDriver::Dth30, &[]);
-        assert!(matches!(t.tune(&mut dev, 557_142_857, 6_000_000), Err(Error::Unsupported(_))));
+        std::assert_matches!(t.tune(&mut dev, 557_142_857, 6_000_000), Err(Error::Unsupported(_)));
         assert_eq!(ops(&dev), vec![]);
     }
 

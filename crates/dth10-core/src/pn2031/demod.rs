@@ -720,9 +720,9 @@ mod tests {
             prev = v;
         }
         // Each step equals the gap to the next higher threshold.
-        for w in CN_TABLE.windows(2) {
-            assert_eq!(w[0].0 - w[1].0, w[1].2);
-            assert_eq!(w[1].1 - w[0].1, 10);
+        for [a, b] in CN_TABLE.array_windows() {
+            assert_eq!(a.0 - b.0, b.2);
+            assert_eq!(b.1 - a.1, 10);
         }
         assert_eq!(CN_RAW_LIMIT - CN_TABLE[0].0, CN_TABLE[0].2);
     }

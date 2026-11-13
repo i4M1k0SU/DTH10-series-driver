@@ -461,7 +461,7 @@ fn run(cli: Cli) -> Res {
         }
         Cmd::Raw { value, index, out, r#in, flags } => {
             let t = o.open()?;
-            let out = out.map(|h| h.0).unwrap_or_default();
+            let out = out.map_or_default(|h| h.0);
             let mut inbuf = vec![0u8; r#in];
             let flags = if tuner == 0 { flags } else { flags | 0x80 };
             let n = dth10_core::protocol::send(

@@ -398,7 +398,7 @@ mod linux {
         let idx = device.device_descriptor().serial_number_string_index()?;
         let timeout = std::time::Duration::from_millis(500);
         let langs: Vec<u16> =
-            device.get_string_descriptor_supported_languages(timeout).wait().map(|it| it.collect()).unwrap_or_default();
+            device.get_string_descriptor_supported_languages(timeout).wait().map_or_default(|it| it.collect());
         let lang = if langs.contains(&0x0409) { 0x0409 } else { langs.first().copied().unwrap_or(0x0409) };
         device.get_string_descriptor(idx, lang, timeout).wait().ok()
     }

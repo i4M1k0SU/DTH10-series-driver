@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(t.setup, Setup::Init);
         for khz in [900_000, 2_200_000] {
             let (mut t, mut dev) = tuner(VendorDriver::Series, Setup::Init);
-            assert!(matches!(t.tune(&mut dev, khz), Err(Error::Unsupported(_))));
+            std::assert_matches!(t.tune(&mut dev, khz), Err(Error::Unsupported(_)));
             assert_eq!(dev.transport().take(), []);
         }
     }

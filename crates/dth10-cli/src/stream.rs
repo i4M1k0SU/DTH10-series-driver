@@ -170,7 +170,7 @@ pub fn status(a: &StatusArgs) -> Result<(), Box<dyn Error>> {
                     "streaming {} for connection {}{}",
                     h.channel,
                     h.conn,
-                    h.client.as_ref().map(|c| format!(" (client {c})")).unwrap_or_default()
+                    h.client.as_ref().map_or_default(|c| format!(" (client {c})"))
                 ),
                 None => "free".to_owned(),
             };

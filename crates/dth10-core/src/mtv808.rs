@@ -1477,7 +1477,7 @@ mod tests {
         for (driver, expect) in [(VendorDriver::Series, RANGE_SERIES), (VendorDriver::Dth30, RANGE_DTH30)] {
             let (mut t, mut dev) = after_init(driver);
             let e = t.tune(&mut dev, 930_000_000).unwrap_err();
-            assert!(matches!(e, Error::Unsupported(_)), "{e}");
+            std::assert_matches!(e, Error::Unsupported(_), "{e}");
             assert_eq!(dev.transport().take(), expect, "{driver:?}");
         }
     }

@@ -836,7 +836,7 @@ impl Tuner {
                 Err(e) => log::warn!("event endpoint: {e}"),
             }
         }
-        let saved = cfg.cepm_state.as_ref().map(|p| cepm::load_set(p)).unwrap_or_default();
+        let saved = cfg.cepm_state.as_ref().map_or_default(|p| cepm::load_set(p));
         for (f, hs) in &saved {
             log::info!("cepm: loaded saved handshake for path flags 0x{f:02x} (session id {:02x?})", hs.session_id);
         }
@@ -1369,7 +1369,7 @@ impl Tuner {
                         restart = Some(StreamRestart { dev, desc: desc.clone(), mode, pids });
                     }
                     let decrypt = device_mode && self.ensure_cepm(t);
-                    let lists = restart.as_ref().map(|r| r.pids.clone()).unwrap_or_default();
+                    let lists = restart.as_ref().map_or_default(|r| r.pids.clone());
                     // KS pin order (docs/21): bulk reads start before the stream-enable command.
                     self.start_stream(ep, t, System::IsdbT, decrypt, restart)?;
                     let dev = match self.second.as_ref() {

@@ -212,12 +212,12 @@ mod tests {
     fn other_crystal_or_if_is_refused() {
         let mut dev = Device::new(RegMock::default());
         let e = configure(&mut dev, 0x10, &desc(20_000_000, 4_000_000, 0), VendorDriver::Series).unwrap_err();
-        assert!(matches!(e, Error::Unsupported(_)) && e.to_string().contains("crystal 20000000 Hz"), "{e}");
+        std::assert_matches!(e, Error::Unsupported(_) if e.to_string().contains("crystal 20000000 Hz"), "{e}");
         assert_eq!(dev.transport().take_writes(), vec![]);
         assert_eq!(dev.i2c_batch_len(), 4 * 6, "left queued");
         let mut dev = Device::new(RegMock::default());
         let e = configure(&mut dev, 0x10, &desc(16_000_000, 44_000_000, 0), VendorDriver::Dth30).unwrap_err();
-        assert!(matches!(e, Error::Unsupported(_)) && e.to_string().contains("IF 44000000 Hz"), "{e}");
+        std::assert_matches!(e, Error::Unsupported(_) if e.to_string().contains("IF 44000000 Hz"), "{e}");
         assert_eq!(dev.i2c_batch_len(), 6 * 6);
     }
 

@@ -203,6 +203,6 @@ mod tests {
         // Another model's error and other errors stay as they are.
         let e = unverified_kit_error(0x0199, 0, Error::Unsupported("kit".into())).to_string();
         assert_eq!(e, "unsupported: kit");
-        assert!(matches!(unverified_kit_error(0x0202, 0, Error::Timeout), Error::Timeout));
+        std::assert_matches!(unverified_kit_error(0x0202, 0, Error::Timeout), Error::Timeout);
     }
 }
