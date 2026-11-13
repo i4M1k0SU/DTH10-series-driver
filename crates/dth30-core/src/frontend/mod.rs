@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(Frontend::for_board(Rig::new(), 0xB4, (0, 0)).unwrap().kind(), KitKind::Toshiba);
         assert_eq!(Frontend::for_board(Rig::new(), 0xB2, (0xEEEE, 0xEEEE)).unwrap().kind(), KitKind::Mj102);
         assert_eq!(Frontend::for_board(Rig::new(), 0xB2, (0, 0)).unwrap().kind(), KitKind::Mj110);
-        assert!(matches!(Frontend::for_board(Rig::new(), 0x12, (0, 0)), Err(Error::Unsupported(_))));
+        std::assert_matches!(Frontend::for_board(Rig::new(), 0x12, (0, 0)).err(), Some(Error::Unsupported(_)));
     }
 
     #[test]
@@ -548,7 +548,7 @@ mod tests {
         let mut fe = Frontend::new(Rig::new(), KitKind::Toshiba);
         assert_eq!(fe.att_tick(&mut ctl).unwrap(), None);
         assert!(fe.bus().ev.is_empty());
-        assert!(matches!(fe.set_attenuator(true), Err(Error::Unsupported(_))));
+        std::assert_matches!(fe.set_attenuator(true), Err(Error::Unsupported(_)));
         assert_eq!(fe.attenuator(), None);
     }
 }

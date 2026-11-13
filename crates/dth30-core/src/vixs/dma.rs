@@ -115,6 +115,6 @@ mod tests {
     fn stuck_status_times_out() {
         let mut c = chip(0x0300_00B2);
         // The index written back reads with bit 7 clear forever.
-        assert!(matches!(init(&mut c), Err(Error::Timeout)));
+        std::assert_matches!(init(&mut c), Err(Error::Timeout));
     }
 }

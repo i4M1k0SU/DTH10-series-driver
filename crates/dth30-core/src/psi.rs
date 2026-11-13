@@ -464,7 +464,7 @@ pub(crate) mod tests {
         b.extend_from_slice(&(0xF000 | info.len() as u16).to_be_bytes());
         b.extend(info);
         for &(st, pid, e) in es {
-            let d = e.map(ca).unwrap_or_default();
+            let d = e.map_or_default(ca);
             b.push(st);
             b.extend_from_slice(&(0xE000 | pid).to_be_bytes());
             b.extend_from_slice(&(0xF000 | d.len() as u16).to_be_bytes());

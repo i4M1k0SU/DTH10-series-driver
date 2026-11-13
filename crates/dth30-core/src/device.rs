@@ -242,8 +242,8 @@ impl<B: RemotePci> Dth30<B> {
         if self.program.is_some() {
             return Err(Error::Protocol("the Program stream is already open"));
         }
-        let cas = self.cas.as_ref().map_or(0, StreamHandle::phys);
-        let raw = self.raw.as_ref().map_or(0, StreamHandle::phys);
+        let cas = self.cas.as_ref().map_or_default(StreamHandle::phys);
+        let raw = self.raw.as_ref().map_or_default(StreamHandle::phys);
         if self.cas.is_none() || self.raw.is_none() {
             log::warn!("Program open without the CAS object or the Raw stream open");
         }
@@ -437,7 +437,7 @@ mod tests {
         assert_eq!((d.kit(), d.board(), d.board_id()), (KitKind::Mj102, 0xB2, 0x0300_00B2));
         assert_eq!(d.config().i2c_khz, 400);
         let v = Vixs::with_chip(chip(0x0300_0012), layout(), opts(Completion::Poll));
-        assert!(matches!(Dth30::new(v, Config::default()), Err(Error::Unsupported(_))));
+        std::assert_matches!(Dth30::new(v, Config::default()).err(), Some(Error::Unsupported(_)));
     }
 
     #[test]

@@ -333,7 +333,7 @@ pub(crate) mod tests {
             pos(Acc::W(0x108C, 0x3_0005)),
             pos(Acc::W(0x3020, 27)),
         ];
-        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+        assert!(order.array_windows().all(|[a, b]| a < b), "{order:?}");
         // The LED of board 0xB4 ends in "not in use".
         assert_eq!(*writes(&v.bus().ops()).last().unwrap(), Acc::W(0x1088, 0x2_0005));
         // The first two accesses re-read the board ID.
@@ -359,6 +359,6 @@ pub(crate) mod tests {
     #[test]
     fn not_a_camino() {
         let mut v = Vixs::open(device(0x0100_00B2), 0x0128, &PIPES, opts(Completion::Poll)).unwrap();
-        assert!(matches!(v.bring_up(&super::mips::tests::fw(0x200)), Err(Error::Unsupported(_))));
+        std::assert_matches!(v.bring_up(&super::mips::tests::fw(0x200)), Err(Error::Unsupported(_)));
     }
 }

@@ -1082,7 +1082,7 @@ pub(crate) mod tests {
     fn refused_open_releases_the_slot() {
         let mut v = running(Completion::Poll);
         script_cmds(&v, &[(8, 0, 2), (24, 1, 30)]);
-        assert!(matches!(v.open_psi(0), Err(Error::Protocol(_))));
+        std::assert_matches!(v.open_psi(0), Err(Error::Protocol(_)));
         assert!(!v.ring().unwrap().is_reserved(0));
         // The TS input set-up refused (status 30: a stream is open).
         v.bus().clear();

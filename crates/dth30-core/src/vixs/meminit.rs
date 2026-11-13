@@ -404,7 +404,7 @@ mod tests {
     fn low_power_on_other_boards_needs_another_firmware() {
         let c = chip(0x0300_00B2);
         ready(&c);
-        assert!(matches!(mem_init(&c, 0x0300_00B2, 10), Err(Error::Unsupported(_))));
+        std::assert_matches!(mem_init(&c, 0x0300_00B2, 10), Err(Error::Unsupported(_)));
     }
 
     #[test]
@@ -412,8 +412,8 @@ mod tests {
         let c = chip(0x0300_00B2);
         c.bus().set(Space::Mem, MMR + 0x828, 1);
         c.bus().queue(Space::Mem, MMR + 0x874, &[0x1234_5678, 0]);
-        assert!(matches!(mem_init(&c, 0x0300_00B2, 6), Err(Error::Protocol(_))));
-        assert!(matches!(mem_init(&c, 0x0300_00A2, 6), Err(Error::Unsupported(_))));
+        std::assert_matches!(mem_init(&c, 0x0300_00B2, 6), Err(Error::Protocol(_)));
+        std::assert_matches!(mem_init(&c, 0x0300_00A2, 6), Err(Error::Unsupported(_)));
     }
 
     #[test]

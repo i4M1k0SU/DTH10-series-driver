@@ -772,7 +772,7 @@ mod linux {
         let idx = device.device_descriptor().serial_number_string_index()?;
         let timeout = std::time::Duration::from_millis(500);
         let langs: Vec<u16> =
-            device.get_string_descriptor_supported_languages(timeout).wait().map(|it| it.collect()).unwrap_or_default();
+            device.get_string_descriptor_supported_languages(timeout).wait().map_or_default(|it| it.collect());
         let lang = if langs.contains(&0x0409) { 0x0409 } else { langs.first().copied().unwrap_or(0x0409) };
         device.get_string_descriptor(idx, lang, timeout).wait().ok()
     }
@@ -849,8 +849,8 @@ mod tests {
 
     #[test]
     fn errors() {
-        assert!(matches!(map_err(TransferError::Cancelled), Error::Timeout));
-        assert!(matches!(map_err(TransferError::Stall), Error::Usb(_)));
+        std::assert_matches!(map_err(TransferError::Cancelled), Error::Timeout);
+        std::assert_matches!(map_err(TransferError::Stall), Error::Usb(_));
     }
 
     #[test]

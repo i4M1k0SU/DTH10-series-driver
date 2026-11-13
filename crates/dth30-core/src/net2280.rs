@@ -482,10 +482,10 @@ mod tests {
             ]
         );
         assert_eq!(m.bulk()[0].1, data);
-        assert!(matches!(
+        std::assert_matches!(
             dma_write(&m, &layout(0), 0, &vec![0; DMA_MAX + 1]),
             Err(Error::TooLarge { limit: DMA_MAX, .. })
-        ));
+        );
     }
 
     #[test]

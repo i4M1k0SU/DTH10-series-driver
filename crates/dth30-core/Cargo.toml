@@ -3,7 +3,9 @@ name = "dth30-core"
 description = "Chip drivers for the BUFFALO DT-H30/U2 family of USB TV tuners (ViXS XCode2 behind a PLX NET2280), I/O-agnostic"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 # Error type and the chip helpers shared with the DTH10 series (TC90517 BER, MxL13xRF tune word).

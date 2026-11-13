@@ -292,7 +292,7 @@ impl<B: RemotePci> Vixs<B> {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                log::error!("ViXS command {} timed out", self.pending.map_or(0, |p| p.func));
+                log::error!("ViXS command {} timed out", self.pending.map_or_default(|p| p.func));
                 return Err(Error::Timeout);
             }
             if self.opts.completion == Completion::Poll {
@@ -591,7 +591,7 @@ mod tests {
         // Completion for another function: not taken, bit stays.
         script_completion(v.bus(), 99, 0, 1);
         v.bus().set(Space::Mem, MMR + 0x30E0, 2);
-        assert!(matches!(v.send_cmd(10, &[]), Err(Error::Timeout)));
+        std::assert_matches!(v.send_cmd(10, &[]), Err(Error::Timeout));
         assert!(!writes(&v.bus().ops()).contains(&Acc::W(0x30E0, 2)));
         assert!(v.pending.is_none());
     }

@@ -408,7 +408,7 @@ mod tests {
         c.bus().queue(Space::Mem, MMR + 0x100C, &[CMD_ERROR]);
         let mut rd = [0u8; 1];
         let e = I2cMaster::new(&mut c, 0, 100).write_read(0xC0, &[0x09], &mut rd).unwrap_err();
-        assert!(matches!(e, Error::I2c { addr: 0xC0, reg: Some(0x09), msg: "no acknowledge" }), "{e:?}");
+        std::assert_matches!(e, Error::I2c { addr: 0xC0, reg: Some(0x09), msg: "no acknowledge" }, "{e:?}");
         // The write part fails; the read part is never sent.
         let w = writes(&c.bus().ops());
         use Acc::W;
@@ -434,7 +434,7 @@ mod tests {
         c.bus().queue(Space::Mem, MMR + 0x100C, &[CMD_ERROR]);
         let mut rd = [0u8; 5];
         let e = transaction(&mut c, 0, 0, 0x20, false, true, true, &mut rd).unwrap_err();
-        assert!(matches!(e, Error::I2c { msg: "no acknowledge", .. }));
+        std::assert_matches!(e, Error::I2c { msg: "no acknowledge", .. });
         let acc = accesses(&c.bus().ops());
         assert!(!acc.contains(&Acc::W(0x100C, STOP_ONLY)));
         assert!(acc.ends_with(&[Acc::W(0x1008, 0), Acc::R(0x1008), Acc::R(0x1008)]));
@@ -445,10 +445,10 @@ mod tests {
         let mut c = chip(0x0300_00B2);
         c.bus().set(Space::Mem, MMR + STATUS, 0x0010_0000);
         let e = I2cMaster::new(&mut c, 0, 100).write(0x20, &[1, 2]).unwrap_err();
-        assert!(matches!(e, Error::I2c { msg: "bus error", .. }));
+        std::assert_matches!(e, Error::I2c { msg: "bus error", .. });
         let mut c = chip(0x0300_00B2);
         let e = I2cMaster::new(&mut c, 1, 100).write(0x20, &[1]).unwrap_err();
-        assert!(matches!(e, Error::I2c { msg: "completion timeout", .. }));
+        std::assert_matches!(e, Error::I2c { msg: "completion timeout", .. });
         let polls = accesses(&c.bus().ops()).iter().filter(|a| **a == Acc::R(0x1094)).count();
         assert_eq!(polls, POLL_LIMIT as usize);
     }

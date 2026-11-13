@@ -468,7 +468,7 @@ pub(crate) mod tests {
         c.bus().queue(Space::Mem, FB + 0x20, &[1; 8]);
         c.bus().queue(Space::Mem, MMR + 0x3028, &[5, 5, 5, 7, 7, 7, 7]);
         let e = start(&mut c, &layout(), &fw(0x200), &MEM).unwrap_err();
-        assert!(matches!(e, Error::Protocol(m) if m.contains("INIT_FAILED")));
+        std::assert_matches!(e, Error::Protocol(m) if m.contains("INIT_FAILED"));
         // The message was still acknowledged, and interrupts stay off.
         let w = writes(&c.bus().ops());
         assert!(w.contains(&Acc::W(0x3024, 7)));
@@ -479,7 +479,7 @@ pub(crate) mod tests {
     fn mips_mmr_timeout_after_100_ticks() {
         let mut c = chip(0x0300_00B2);
         c.bus().set(Space::Mem, FB + 0x110, 0);
-        assert!(matches!(start(&mut c, &layout(), &fw(0x200), &MEM), Err(Error::Timeout)));
+        std::assert_matches!(start(&mut c, &layout(), &fw(0x200), &MEM), Err(Error::Timeout));
         let reads = accesses(&c.bus().ops()).iter().filter(|a| **a == Acc::FbR(0x20)).count();
         assert_eq!(reads, 500);
     }
@@ -489,7 +489,7 @@ pub(crate) mod tests {
         let mut c = chip(0x0300_00B2);
         c.bus().queue(Space::Mem, FB + 0x44, &[0]);
         let e = start(&mut c, &layout(), &fw(0x200), &MEM).unwrap_err();
-        assert!(matches!(e, Error::Protocol(m) if m.contains("not writable")));
+        std::assert_matches!(e, Error::Protocol(m) if m.contains("not writable"));
     }
 
     #[test]

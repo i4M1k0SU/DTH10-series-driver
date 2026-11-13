@@ -260,8 +260,8 @@ mod tests {
     fn reply_decoding() {
         assert_eq!(decode_reply(&[0x45, 0x17, 0x00, 0x00]).unwrap(), 0x1745);
         assert_eq!(decode_reply(&[1, 2, 3, 4, 5]).unwrap(), 0x0403_0201);
-        assert!(matches!(decode_reply(&[1, 2, 3]), Err(Error::ShortTransfer { expected: 4, actual: 3 })));
-        assert!(matches!(decode_reply(&[]), Err(Error::ShortTransfer { expected: 4, actual: 0 })));
+        std::assert_matches!(decode_reply(&[1, 2, 3]), Err(Error::ShortTransfer { expected: 4, actual: 3 }));
+        std::assert_matches!(decode_reply(&[]), Err(Error::ShortTransfer { expected: 4, actual: 0 }));
     }
 
     #[test]

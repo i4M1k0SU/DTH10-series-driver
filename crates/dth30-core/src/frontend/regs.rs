@@ -227,7 +227,7 @@ mod tests {
 
         let mut rig = Rig::new();
         rig.fail_always(0x20);
-        assert!(matches!(read_reg(&mut rig, 0x20, 0x80), Err(Error::I2c { .. })));
+        std::assert_matches!(read_reg(&mut rig, 0x20, 0x80), Err(Error::I2c { .. }));
         assert_eq!(rig.ev.iter().filter(|e| matches!(e, Ev::R(..))).count(), 10);
         assert_eq!(rig.ev.iter().filter(|e| **e == Ev::D(5)).count(), 9);
     }
@@ -236,7 +236,7 @@ mod tests {
     fn transport_errors_are_not_retried() {
         let mut rig = Rig::new();
         rig.fail_with_usb(0x20);
-        assert!(matches!(write_reg(&mut rig, 0x20, 0x01, 0x40), Err(Error::Usb(_))));
+        std::assert_matches!(write_reg(&mut rig, 0x20, 0x01, 0x40), Err(Error::Usb(_)));
         assert_eq!(rig.ev, vec![Ev::W(0x20, vec![0x01, 0x40])]);
     }
 

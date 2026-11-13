@@ -247,7 +247,7 @@ mod tests {
     fn eeprom_is_read_up_to_three_times() {
         let mut fe = Frontend::new(Rig::new(), KitKind::Toshiba);
         fe.bus().fail_always(EEPROM_ADDR);
-        assert!(matches!(fe.tune(473_142_857), Err(Error::I2c { .. })));
+        std::assert_matches!(fe.tune(473_142_857), Err(Error::I2c { .. }));
         let ev = &fe.bus().ev;
         assert_eq!(ev.iter().filter(|e| matches!(e, Ev::R(EEPROM_ADDR, ..))).count(), 3 * 10);
         assert!(!ev.iter().any(|e| matches!(e, Ev::W(TA, _))));
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn modes() {
         let mut fe = Frontend::new(Rig::new(), KitKind::Toshiba);
-        assert!(matches!(fe.set_mode(1), Err(Error::Unsupported(_))));
+        std::assert_matches!(fe.set_mode(1), Err(Error::Unsupported(_)));
         assert_eq!(fe.mode(), 0);
         fe.set_mode(2).unwrap();
         fe.set_mode(0).unwrap();

@@ -343,7 +343,7 @@ mod tests {
         let img = test_image();
         let sys = synthetic_pe(&img);
         let e = Firmware::from_driver(&sys).unwrap_err();
-        assert!(matches!(e, Error::Unsupported(ref m) if m.contains(&hex(&sha256(&img)))), "{e:?}");
+        std::assert_matches!(e, Error::Unsupported(ref m) if m.contains(&hex(&sha256(&img))), "{e:?}");
         assert!(Firmware::from_image(&img).is_err());
         assert!(Firmware::from_bytes(&img).is_err());
     }
