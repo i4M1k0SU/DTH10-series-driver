@@ -253,6 +253,6 @@ mod tests {
         assert!(k.has_attenuator());
         let desc = TunerDesc { kit_name: "SHARP_8011".into(), hw_version: 0x402, ..Default::default() };
         let e = TerrestrialKit::new(Device::new(RegMock::default()), desc, 0x0199).err().unwrap();
-        assert!(matches!(e, Error::Unsupported(_)), "{e}");
+        std::assert_matches!(e, Error::Unsupported(_), "{e}");
     }
 }

@@ -135,7 +135,7 @@ pub fn send<T: UsbControl + ?Sized>(
     out: &[u8],
     inbuf: Option<&mut [u8]>,
 ) -> Result<usize> {
-    let want_in = inbuf.as_ref().map_or(0, |b| b.len());
+    let want_in = inbuf.as_ref().map_or_default(|b| b.len());
     if want_in > MAX_IN_LEN {
         return Err(Error::TooLarge { limit: MAX_IN_LEN, actual: want_in });
     }

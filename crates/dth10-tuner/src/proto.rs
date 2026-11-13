@@ -325,7 +325,7 @@ impl Reply {
         if let Some(why) = line.strip_prefix("busy ") {
             return Reply::Busy(why.to_owned());
         }
-        Reply::Error(line.strip_prefix("error ").unwrap_or(line).to_owned())
+        Reply::Error(line.trim_prefix("error ").to_owned())
     }
 }
 

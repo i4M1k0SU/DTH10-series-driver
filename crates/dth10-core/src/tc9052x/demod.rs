@@ -358,7 +358,7 @@ mod tests {
     fn dth30_configuration_refuses_another_if_after_the_first_batch() {
         let mut dev = Device::new(RegMock::default());
         let e = configure(&mut dev, 0x10, &desc("TC90522_FC5500", 44_000_000, 0), VendorDriver::Dth30).unwrap_err();
-        assert!(matches!(e, Error::Unsupported(_)) && e.to_string().contains("44000000"), "{e}");
+        std::assert_matches!(e, Error::Unsupported(_) if e.to_string().contains("44000000"), "{e}");
         assert_eq!(dev.transport().take_writes(), vec![batch(&BLOCK_1_DTH30, 0x10)]);
         // the start of the second batch is still queued, as in the vendor driver
         assert_eq!(dev.i2c_batch_len(), 4 * 6);

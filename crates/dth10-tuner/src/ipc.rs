@@ -92,7 +92,7 @@ impl Listener {
         match target {
             Target::Unix(path) => {
                 if let Some(dir) = path.parent()
-                    && !dir.as_os_str().is_empty()
+                    && !dir.is_empty()
                 {
                     std::fs::create_dir_all(dir)?;
                 }

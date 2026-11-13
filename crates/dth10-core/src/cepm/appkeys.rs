@@ -112,9 +112,9 @@ impl AppKeys {
                 if a < image_base || a.saturating_add(s.len as u64) > image_end {
                     continue;
                 }
-                for k in 0..s.len {
-                    first.entry(a + k as u64).or_insert(s.bytes[k]);
-                    last.insert(a + k as u64, s.bytes[k]);
+                for (k, &v) in s.bytes[..s.len].iter().enumerate() {
+                    first.entry(a + k as u64).or_insert(v);
+                    last.insert(a + k as u64, v);
                 }
             }
         }
@@ -173,9 +173,8 @@ impl AppKeys {
         };
         let found = self.iv_candidates.iter().find(|c| test(c)).copied().or_else(|| {
             log::debug!("appkeys: content IV not among the stack buffers, scanning the data sections");
-            self.data.windows(16).find_map(|w| {
-                let mut iv = [0u8; 16];
-                iv.copy_from_slice(w);
+            self.data.array_windows::<16>().find_map(|&w| {
+                let mut iv = w;
                 if test(&iv) {
                     return Some(iv);
                 }
@@ -565,11 +564,9 @@ fn find_private_key(
             if start.abs_diff(cert_addr) > 0x10000 || bytes.len() < PRIV_LEN {
                 continue;
             }
-            for w in bytes.windows(PRIV_LEN) {
+            for w in bytes.array_windows::<PRIV_LEN>() {
                 if key_matches(curve, w, q) {
-                    let mut k = [0u8; PRIV_LEN];
-                    k.copy_from_slice(w);
-                    return Some(k);
+                    return Some(*w);
                 }
             }
         }
@@ -593,8 +590,8 @@ fn stack_buffers(stores: &[Store]) -> Vec<[u8; 16]> {
                 break;
             }
             if let Target::Stack(base, d) = s.target {
-                for k in 0..s.len {
-                    map.entry((base, d + k as i32)).or_insert(s.bytes[k]);
+                for (k, &v) in s.bytes[..s.len].iter().enumerate() {
+                    map.entry((base, d + k as i32)).or_insert(v);
                 }
             }
         }
