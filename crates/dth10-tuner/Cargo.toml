@@ -3,6 +3,7 @@ name = "dth10-tuner"
 description = "Tuner session logic shared by the BonDriver and the dth10 command: channel tables, device-mode PID learning, CEPM decryption, TS reader thread"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

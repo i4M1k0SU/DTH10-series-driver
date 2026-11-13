@@ -3,6 +3,7 @@ name = "dth10-usb"
 description = "nusb (WinUSB / usbfs / IOKit) transport for dth10-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

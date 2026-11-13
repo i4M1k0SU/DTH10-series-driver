@@ -12,8 +12,9 @@ members = [
 [workspace.package]
 version = "1.1.0"
 edition = "2024"
+# The toolchain is `stable` (rust-toolchain.toml); this is the oldest it may be.
+rust-version = "1.100"
 license = "MIT"
-repository = ""
 
 [workspace.dependencies]
 dth10-core = { path = "crates/dth10-core" }
