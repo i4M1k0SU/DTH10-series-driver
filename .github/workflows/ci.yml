@@ -49,6 +49,16 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy ${{ matrix.packages }} --all-targets --locked -- -D warnings
       - run: cargo test ${{ matrix.packages }} --locked
+      # The DTH30 series firmware is not a workspace member (it builds for the chip's MIPS
+      # core only), so the steps above do not look at its sources.
+      - name: Firmware format
+        working-directory: crates/dth30-fw
+        run: cargo fmt --check
+      - name: Firmware lints
+        working-directory: crates/dth30-fw
+        env:
+          RUSTC_BOOTSTRAP: 1
+        run: cargo clippy --release -- -D warnings
       - if: runner.os == 'Windows'
         run: cargo test -p dth-bondriver --features rtti-check --locked
 
