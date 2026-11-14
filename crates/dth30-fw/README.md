@@ -21,11 +21,17 @@ DTH30 シリーズ（DT-H30/U2、DT-H50/U2）のチップ ViXS XCode2 で動く�
 ## ビルド
 
 CPU は MIPS 4Km（MIPS32 リリース 1、リトルエンディアン、FPU なし）。Rust にこの CPU 向けの出来合いのターゲットは無いので、
-`core` をソースからビルドする。`rust-src` コンポーネントが要る。
+`core` をソースからビルドする。`rust-src` コンポーネントが要る（`rust-toolchain.toml` に入れてある）。
+
+**ふだんは自分でビルドしなくてよい。** `dth30-core` のビルドスクリプトがこのクレートをビルドし、できたイメージをプログラムに組み込む
+（`Firmware::own`）。`dth` / `dth30-diag` は、`--firmware` を付けなければこの組み込みのファームウェアを使う。
+`rust-src` の無い環境では、環境変数 `DTH30_NO_OWN_FIRMWARE=1` を付けてビルドすれば、ファームウェア抜きでビルドできる。
+
+単体でビルドするには:
 
 ```sh
 rustup component add rust-src
-cd firmware/dth30-fw
+cd crates/dth30-fw
 RUSTC_BOOTSTRAP=1 cargo build --release
 ```
 
@@ -41,7 +47,8 @@ PowerShell では `$env:RUSTC_BOOTSTRAP = '1'` としてから `cargo build --re
 
 ## 使い方
 
-`--firmware` に `BufFsUSB.sys` の代わりに渡す。イメージの +0x100 に印（`DTH3`）があり、`dth30-core` はそれを見てハッシュの照合なしで読み込む。
+何も指定しなければ組み込みのものが使われる。単体でビルドしたイメージは、`--firmware` に `BufFsUSB.sys` の代わりに渡す。
+イメージの +0x100 に印（`DTH3`）があり、`dth30-core` はそれを見てハッシュの照合なしで読み込む。
 
 ```sh
 dth30-diag fw dth30-fw.bin

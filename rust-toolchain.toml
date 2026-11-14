@@ -1,5 +1,8 @@
 [toolchain]
 channel = "stable"
+# dth30-core builds the DTH30 series firmware (crates/dth30-fw) for the chip's MIPS
+# core, for which `core` has to be built from source.
+components = ["rust-src"]
 targets = [
     "x86_64-pc-windows-msvc",
     "i686-pc-windows-msvc",

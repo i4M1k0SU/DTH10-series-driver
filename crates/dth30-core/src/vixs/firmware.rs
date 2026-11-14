@@ -95,7 +95,7 @@ pub const VECTOR_TABLE_OFFSET: u32 = 0x120;
 
 /// Offset in an image of the word that marks this project's own firmware.
 pub const OWN_MAGIC_OFFSET: u32 = 0x100;
-/// "DTH3": the image is this project's own firmware (`firmware/dth30-fw`),
+/// "DTH3": the image is this project's own firmware (`crates/dth30-fw`),
 /// not the vendor's.
 pub const OWN_MAGIC: u32 = 0x3348_5444;
 
@@ -163,6 +163,13 @@ impl Firmware {
             return Ok(own);
         }
         verify(own.image, KNOWN_IMAGES).map(|image| Self { image })
+    }
+
+    /// This project's own firmware, built together with this crate. `None`
+    /// when the crate was built without it (`DTH30_NO_OWN_FIRMWARE`).
+    pub fn own() -> Option<Self> {
+        static IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dth30-fw.bin"));
+        if IMAGE.is_empty() { None } else { Self::from_image(IMAGE).ok() }
     }
 
     /// Whether this is the project's own firmware rather than the vendor's.
@@ -387,6 +394,16 @@ mod tests {
         assert!(Firmware::from_bytes(&img).is_err());
         // The vendor's image has no such mark.
         assert!(!Firmware::unverified(test_image()).is_own());
+    }
+
+    /// The image the build script made: marked, with the reset vector first.
+    #[test]
+    fn built_in_firmware() {
+        let Some(f) = Firmware::own() else { return };
+        assert!(f.is_own());
+        let v = f.vectors().unwrap();
+        assert_eq!(v[0].dst, 0);
+        assert!(v.len() >= 5 && f.len() % 16 == 0);
     }
 
     #[test]

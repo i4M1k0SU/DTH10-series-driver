@@ -4,7 +4,7 @@
 //!
 //! One core, no interrupts: after the start-up handshake the firmware
 //! polls the host's requests, the DMA engine and the stream's ring in a
-//! loop. See `../README.md` for the memory map and what is implemented.
+//! loop. See `README.md` for the memory map and what is implemented.
 #![no_std]
 #![no_main]
 #![feature(asm_experimental_arch)]

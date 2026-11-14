@@ -20,8 +20,8 @@
 //! BS/CS), or two TVTest windows can watch GR and BS at once.
 //!
 //! `list`, `info`, `tune` and `serve` also drive the DTH30 series
-//! (`dth30_backend`): one terrestrial tuner, firmware from the vendor's
-//! `BufFsUSB.sys` (`--firmware`), device mode descrambled by the unit's own
+//! (`dth30_backend`): one terrestrial tuner, this project's own firmware
+//! (or one given with `--firmware`), device mode descrambled by the unit's own
 //! B-CAS card (no application keys). Such a unit is named by its unit name
 //! (`DTH30-<product ID>` when it has no USB serial number).
 
@@ -87,8 +87,8 @@ struct DeviceArgs {
     /// bmRequestType recipient of the vendor requests (default: device on Windows, interface elsewhere).
     #[arg(long, value_enum)]
     recipient: Option<RecipientArg>,
-    /// DTH30 series: the vendor driver BufFsUSB.sys the firmware is taken from. Default:
-    /// $DTH30_FIRMWARE, else BufFsUSB.sys in the state directory, else next to this executable.
+    /// DTH30 series: use the firmware in this file (the vendor driver BufFsUSB.sys, or a
+    /// firmware image) instead of this project's own firmware built into the program.
     #[arg(long, value_name = "FILE")]
     firmware: Option<PathBuf>,
 }
@@ -270,7 +270,7 @@ fn backends_with(
     template.recipient = recipient_mode(d);
     vec![
         Arc::new(Dth10Backend::new(template, cepm_dir, keys)),
-        Arc::new(Dth30Backend::new(d.firmware.clone(), state_dir, read_depth)),
+        Arc::new(Dth30Backend::new(d.firmware.clone(), read_depth)),
     ]
 }
 

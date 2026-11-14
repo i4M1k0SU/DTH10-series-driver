@@ -36,8 +36,6 @@ use dth30_core::vixs::{Firmware, Options};
 pub use dth30_usb::Found;
 use dth30_usb::{Net2280Usb, StreamReader};
 
-/// File name of the vendor driver the firmware is taken from.
-pub const FIRMWARE_FILE: &str = "BufFsUSB.sys";
 /// Prefix of the name of a unit without a USB serial number.
 pub const UNIT_PREFIX: &str = "DTH30-";
 
@@ -116,45 +114,35 @@ pub fn probe(found: &Found) -> Result<UnitInfo> {
     Ok(UnitInfo { endpoints, board_id: dev.board_id(), kit: dev.kit().name() })
 }
 
-/// The firmware source: `explicit`, else `$DTH30_FIRMWARE`, else
-/// [`FIRMWARE_FILE`] in `state_dir`, else next to this executable.
-pub fn firmware_path(explicit: Option<&Path>, state_dir: &Path) -> Option<std::path::PathBuf> {
-    if let Some(p) = explicit {
-        return Some(p.to_path_buf());
+/// The firmware for a unit: the one in `file` when given (the vendor
+/// driver `BufFsUSB.sys` or a firmware image), else this project's own one
+/// built into the program.
+pub fn firmware(file: Option<&Path>) -> std::result::Result<Firmware, String> {
+    match file {
+        Some(p) => Firmware::load(p).map_err(|e| format!("firmware {}: {e}", p.display())),
+        None => Firmware::own().ok_or_else(|| {
+            "this build has no firmware of its own: give the vendor driver BufFsUSB.sys with --firmware".to_string()
+        }),
     }
-    if let Some(p) = std::env::var_os("DTH30_FIRMWARE") {
-        return Some(p.into());
-    }
-    let candidates = [
-        Some(state_dir.join(FIRMWARE_FILE)),
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(FIRMWARE_FILE))),
-    ];
-    candidates.into_iter().flatten().find(|p| p.is_file())
 }
 
-/// The family as a [`Backend`]: units by [`list`], the firmware looked
-/// for on each open ([`firmware_path`]).
+/// The family as a [`Backend`]: units by [`list`], the firmware taken on
+/// each open ([`firmware`]).
 pub struct Dth30Backend {
     firmware: Option<PathBuf>,
-    state_dir: PathBuf,
     read_depth: usize,
 }
 
 impl Dth30Backend {
-    /// `firmware`: the vendor driver given on the command line, if any;
-    /// `state_dir`: where else it is looked for; `read_depth`: bulk reads in
+    /// `firmware`: the firmware file given on the command line, if any
+    /// (else the built-in firmware is used); `read_depth`: bulk reads in
     /// flight per stream.
-    pub fn new(firmware: Option<PathBuf>, state_dir: PathBuf, read_depth: usize) -> Self {
-        Self { firmware, state_dir, read_depth }
+    pub fn new(firmware: Option<PathBuf>, read_depth: usize) -> Self {
+        Self { firmware, read_depth }
     }
 
-    fn firmware(&self) -> std::result::Result<PathBuf, String> {
-        firmware_path(self.firmware.as_deref(), &self.state_dir).ok_or_else(|| {
-            format!(
-                "the DTH30 series needs the vendor driver {FIRMWARE_FILE} for its firmware: put it in {} or give --firmware",
-                self.state_dir.display()
-            )
-        })
+    fn firmware(&self) -> std::result::Result<Firmware, String> {
+        firmware(self.firmware.as_deref())
     }
 }
 
@@ -176,7 +164,7 @@ impl Backend for Dth30Backend {
             .collect())
     }
 
-    /// One terrestrial tuner, and the firmware file.
+    /// One terrestrial tuner, and a firmware.
     fn check(&self, _name: &str, req: Request) -> std::result::Result<(), String> {
         if req.system == System::IsdbS {
             return Err("this unit has no satellite tuner".into());
@@ -188,8 +176,7 @@ impl Backend for Dth30Backend {
     }
 
     fn open(&self, name: &str, queue: TsQueue) -> Result<Box<dyn Session>> {
-        let path = self.firmware().map_err(Error::Unsupported)?;
-        let fw = Firmware::load(&path).map_err(|e| Error::Unsupported(format!("firmware {}: {e}", path.display())))?;
+        let fw = self.firmware().map_err(Error::Unsupported)?;
         Ok(Box::new(Dth30Tuner::open(name, &fw, self.read_depth, queue)?))
     }
 
@@ -199,16 +186,15 @@ impl Backend for Dth30Backend {
         let mut s = String::new();
         let _ = writeln!(s, "model: {} ({:04x})", f.product_label(), f.product_id);
         let _ = writeln!(s, "unit: {name} (serial {})", f.serial.as_deref().filter(|v| !v.is_empty()).unwrap_or("-"));
-        match self.firmware() {
-            Ok(p) => match Firmware::load(&p) {
-                Ok(fw) => {
-                    let _ = writeln!(s, "firmware: {} (image {} bytes, verified)", p.display(), fw.len());
-                }
-                Err(e) => {
-                    let _ = writeln!(s, "firmware: {}: {e}", p.display());
-                }
-            },
-            Err(e) => {
+        match (self.firmware(), &self.firmware) {
+            (Ok(fw), Some(p)) => {
+                let kind = if fw.is_own() { "this project's own" } else { "the vendor's, verified" };
+                let _ = writeln!(s, "firmware: {} ({kind}, {} bytes)", p.display(), fw.len());
+            }
+            (Ok(fw), None) => {
+                let _ = writeln!(s, "firmware: built in (this project's own, {} bytes)", fw.len());
+            }
+            (Err(e), _) => {
                 let _ = writeln!(s, "firmware: {e}");
             }
         }

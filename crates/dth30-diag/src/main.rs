@@ -26,9 +26,6 @@ use dth30_usb::{LocalSpace, Net2280Usb, StreamReader};
 
 type Res<T = ()> = Result<T, Box<dyn Error>>;
 
-/// Environment variable naming the vendor driver file (or an extracted image).
-const FW_ENV: &str = "DTH30_FIRMWARE";
-
 #[derive(Parser)]
 #[command(
     name = "dth30-diag",
@@ -48,8 +45,9 @@ struct Cli {
 
 #[derive(Args, Clone)]
 struct FwArgs {
-    /// The vendor driver BufFsUSB.sys (or an image extracted with `fw --out`).
-    /// Default: $DTH30_FIRMWARE.
+    /// Use the firmware in this file (the vendor driver BufFsUSB.sys, or a firmware image
+    /// such as one written by `fw --out`) instead of this project's own firmware built into
+    /// the program.
     #[arg(long, value_name = "PATH")]
     firmware: Option<PathBuf>,
 }
@@ -64,9 +62,9 @@ enum Cmd {
     /// and board ID (no firmware; the state is gone after a power cycle).
     Probe,
     /// Check a firmware source offline: extract the MIPS image from BufFsUSB.sys (or load an
-    /// extracted image), verify its hash and show its vector table.
+    /// image), verify it and show its vector table.
     Fw {
-        /// BufFsUSB.sys or an extracted image (default: $DTH30_FIRMWARE).
+        /// BufFsUSB.sys or an image (default: the built-in firmware).
         path: Option<PathBuf>,
         /// Write the extracted image to this file (for later use with --firmware).
         #[arg(long, value_name = "FILE")]
@@ -324,14 +322,18 @@ fn report_board(reg: u32) {
     }
 }
 
-fn firmware_path(arg: Option<PathBuf>) -> Res<PathBuf> {
-    arg.or_else(|| std::env::var_os(FW_ENV).map(PathBuf::from))
-        .ok_or_else(|| format!("give the vendor driver file BufFsUSB.sys with --firmware or ${FW_ENV}").into())
+/// The firmware: the file given, else the one built into the program.
+fn firmware(arg: Option<PathBuf>) -> Res<Firmware> {
+    match arg {
+        Some(path) => Ok(Firmware::load(path)?),
+        None => Firmware::own().ok_or_else(|| {
+            "this build has no firmware of its own: give the vendor driver file BufFsUSB.sys with --firmware".into()
+        }),
+    }
 }
 
 fn fw(path: Option<PathBuf>, out: Option<&Path>) -> Res {
-    let path = firmware_path(path)?;
-    let f = Firmware::load(&path)?;
+    let f = firmware(path)?;
     let sha: String = f.sha256().iter().map(|b| format!("{b:02x}")).collect();
     let kind = if f.is_own() { "this project's own firmware" } else { "known" };
     println!("firmware image: {} bytes, sha256 {sha} ({kind})", f.len());
@@ -346,7 +348,7 @@ fn fw(path: Option<PathBuf>, out: Option<&Path>) -> Res {
 }
 
 fn bring_up(serial: Option<&str>, a: &FwArgs) -> Res<Vixs<Net2280Usb>> {
-    let f = Firmware::load(firmware_path(a.firmware.clone())?)?;
+    let f = firmware(a.firmware.clone())?;
     let t = open(serial)?;
     let pid = t.product_id();
     let p = pipes(&t);
@@ -385,7 +387,7 @@ fn channel_hz(channel: &str) -> Res<u32> {
 /// Bring the device up, start the front end, tune and wait for lock.
 fn tune(serial: Option<&str>, a: &TuneArgs, cas: CasMode) -> Res<Dth30<Net2280Usb>> {
     let hz = channel_hz(&a.channel)?;
-    let f = Firmware::load(firmware_path(a.fw.firmware.clone())?)?;
+    let f = firmware(a.fw.firmware.clone())?;
     let t = open(serial)?;
     let pid = t.product_id();
     let p = pipes(&t);

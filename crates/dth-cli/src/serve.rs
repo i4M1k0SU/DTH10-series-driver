@@ -31,8 +31,8 @@
 //! Units of the DTH30 series (`dth30_backend`) are served the same
 //! way: one terrestrial tuner, `raw` = the scrambled TS as received,
 //! `device` = one service descrambled by the unit's own B-CAS card. They
-//! need no application key file but the firmware from the vendor's
-//! `BufFsUSB.sys` (`--firmware`). A unit without a USB serial number is
+//! need no application key file, and run this project's own firmware
+//! unless one is given with `--firmware`. A unit without a USB serial number is
 //! named `DTH30-<product ID>`.
 
 use std::error::Error;
@@ -78,8 +78,8 @@ pub struct ServeArgs {
     /// the state directory, else next to this executable.
     #[arg(long, value_name = "FILE")]
     app_keys: Option<PathBuf>,
-    /// DTH30 series: the vendor driver BufFsUSB.sys the firmware is taken from. Default:
-    /// $DTH30_FIRMWARE, else BufFsUSB.sys in the state directory, else next to this executable.
+    /// DTH30 series: use the firmware in this file (the vendor driver BufFsUSB.sys, or a
+    /// firmware image) instead of this project's own firmware built into the program.
     #[arg(long, value_name = "FILE")]
     firmware: Option<PathBuf>,
     /// Antenna (LNB) supply for BS/CS: 0 (off), 110 (11 V) or 150 (15 V). The DT-H70/U2
@@ -385,7 +385,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
     let what = describe(system_name(system));
 
     // What the unit's family needs for this request (the DTH10 series' key
-    // file for the link decryption, the DTH30 series' firmware file and
+    // file for the link decryption, the DTH30 series' firmware and
     // its one terrestrial tuner): refused here, before the stream is claimed,
     // with a reason the client can act on.
     let asked = match req.tuner {
@@ -713,7 +713,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     };
     let backends: Vec<Arc<dyn Backend>> = vec![
         Arc::new(Dth10Backend::new(template, Some(state_dir.clone()), keys)),
-        Arc::new(Dth30Backend::new(a.firmware.clone(), state_dir.clone(), read_depth)),
+        Arc::new(Dth30Backend::new(a.firmware.clone(), read_depth)),
     ];
     let defaults = Arc::new(Defaults {
         lnb_voltage,
