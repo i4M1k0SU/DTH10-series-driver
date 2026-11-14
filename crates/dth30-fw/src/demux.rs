@@ -198,6 +198,16 @@ impl Ring {
         }
     }
 
+    /// The address `n` bytes on from `rp`.
+    pub fn ahead(&self, n: u32) -> u32 {
+        self.base + (self.rp - self.base + n) % self.len
+    }
+
+    /// The address `n` bytes back from `rp` (`n` at most the ring's length).
+    pub fn behind(&self, n: u32) -> u32 {
+        self.base + (self.rp - self.base + self.len - n) % self.len
+    }
+
     /// The bytes ready at `rp` without wrapping.
     pub fn ready(&self) -> u32 {
         self.fill.min(self.base + self.len - self.rp)

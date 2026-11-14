@@ -49,6 +49,10 @@ pub struct Ts {
     raw: Option<Raw>,
     /// The Program stream reads the channel too.
     shared: bool,
+    /// Follows the channel while it runs, to know how much of the ring it
+    /// has written since its start (`written`, at most the ring's length).
+    meter: Option<Ring>,
+    written: u32,
 }
 
 impl Ts {
@@ -61,7 +65,7 @@ impl Ts {
         for i in 0..32 {
             demux::set_filter(i, 0, 0);
         }
-        Self { raw: None, shared: false }
+        Self { raw: None, shared: false, meter: None, written: 0 }
     }
 
     /// Start the "every PID" channel on `port` unless it runs already.
@@ -76,6 +80,8 @@ impl Ts {
         demux::descrambler(RAW_CHANNEL, |v| v & 0x80);
         demux::unlock();
         demux::start_channel(RAW_CHANNEL, RAW_RING, RAW_LEN);
+        self.meter = Some(Ring::new(RAW_CHANNEL, RAW_RING, RAW_LEN, demux::PACKET, 0));
+        self.written = 0;
         false
     }
 
@@ -85,17 +91,29 @@ impl Ts {
             return;
         }
         demux::stop_channel(RAW_CHANNEL);
+        self.meter = None;
+        self.written = 0;
         demux::lock();
         demux::set_filter(RAW_FILTER, 0, 0);
         demux::unlock();
     }
 
     /// A reader of the "every PID" ring for the Program stream, starting
-    /// `skip` bytes after the next packet.
-    pub fn share(&mut self, port: u32, skip: u32) -> Ring {
+    /// at the next packet, and how many bytes before that point the channel
+    /// has written since it was started (what the reader may look back at).
+    pub fn share(&mut self, port: u32) -> (Ring, u32) {
         self.start(port);
         self.shared = true;
-        Ring::attach(RAW_CHANNEL, RAW_RING, RAW_LEN, demux::PACKET, skip)
+        self.measure();
+        (Ring::attach(RAW_CHANNEL, RAW_RING, RAW_LEN, demux::PACKET, 0), self.written)
+    }
+
+    fn measure(&mut self) {
+        if let Some(m) = self.meter.as_mut() {
+            m.follow();
+            self.written = (self.written + m.fill).min(RAW_LEN - CHUNK);
+            m.consume(m.fill);
+        }
     }
 
     pub fn unshare(&mut self) {
@@ -243,6 +261,7 @@ impl Ts {
     /// Send the next chunk of the Raw ring when one is complete and the
     /// DMA engine is free.
     pub fn poll(&mut self, dma: &mut Dma) {
+        self.measure();
         let Some(r) = self.raw.as_mut() else { return };
         r.ring.follow();
         if r.ring.ready() >= CHUNK && dma.idle() {

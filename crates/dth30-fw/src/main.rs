@@ -19,6 +19,7 @@ mod hw;
 mod keyram;
 mod otp;
 mod program;
+mod stats;
 mod ts;
 
 use core::panic::PanicInfo;
@@ -65,7 +66,7 @@ impl Firmware {
             // Open a stream.
             8 => match fb_r(p + 0x58) {
                 ts::KIND_RAW => self.ts.open_raw(p),
-                ts::KIND_PROGRAM => self.program.open(p, self.clock.ticks(5), &mut self.ts),
+                ts::KIND_PROGRAM => self.program.open(p, self.clock.ticks(5), &mut self.ts, &mut self.card),
                 _ => FAILED,
             },
             // Close a stream.
@@ -112,9 +113,13 @@ pub extern "C" fn fw_main() -> ! {
     let mut fw =
         Firmware { clock, host, dma: Dma::new(), ts: Ts::new(), card, cas: Cas::new(), program: Program::new() };
     let mut raw_first = false;
+    let mut turns = stats::Turns::new(fw.clock.ticks(1));
     fw.host.ready();
     loop {
-        fw.host.poll_tick();
+        turns.turn();
+        if fw.host.poll_tick() {
+            turns.publish();
+        }
         if let Some(c) = fw.host.poll() {
             let result = fw.command(&c);
             fw.host.complete(&c, result);

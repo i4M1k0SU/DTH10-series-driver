@@ -139,11 +139,14 @@ impl Host {
     }
 
     /// The 5 ms heartbeat in FB 0x10.
-    pub fn poll_tick(&mut self) {
-        if count().wrapping_sub(self.next_tick) < 0x8000_0000 {
+    /// True when a tick has passed.
+    pub fn poll_tick(&mut self) -> bool {
+        let due = count().wrapping_sub(self.next_tick) < 0x8000_0000;
+        if due {
             self.next_tick = self.next_tick.wrapping_add(self.tick);
             self.beat();
         }
+        due
     }
 
     fn beat(&mut self) {

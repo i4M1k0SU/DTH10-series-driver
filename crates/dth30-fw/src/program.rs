@@ -22,11 +22,12 @@ use crate::dma::{Dma, SRC_LOCAL};
 use crate::host::{FAILED, OK};
 use crate::hw::{count, fb_r, fb_w, mmr_rmw};
 use crate::keyram;
+use crate::stats::{self, Since};
 use crate::ts::{CHUNK, Ts};
 
 const ES_CHANNEL: u32 = 0;
 /// Filter entries 0..=25 are the elementary streams and PCR.
-const ES_FILTERS: u32 = 26;
+const ES_FILTERS: usize = 26;
 /// The elementary streams' ring: 10240 packets.
 const ES_RING: u32 = 0x00C0_0000;
 const ES_LEN: u32 = 0x001D_6000;
@@ -43,6 +44,11 @@ const PIECE: u32 = 174 * PACKET;
 const ENOUGH: u32 = 12 * PACKET;
 /// Packets dropped after the start (what a channel holds back).
 const SKIP: u32 = 64 * PACKET;
+/// How far back in the "every PID" ring the open looks for the service's
+/// latest ECM (ECMs come about every 100 ms; this is 200 ms or more).
+const LOOK_BACK: u32 = 4096 * PACKET;
+/// The first word of a null packet (PID 0x1FFF, payload only).
+const NULL_HEAD: u32 = u32::from_le_bytes([0x47, 0x1F, 0xFF, 0x10]);
 
 struct Source {
     ring: Ring,
@@ -54,11 +60,18 @@ struct Open {
     dest: u32,
     /// Count ticks in 5 ms.
     patience: u32,
-    /// The elementary streams, then everything else.
-    sources: [Source; 2],
-    turn: usize,
-    /// A reader of the "every PID" ring that looks for the ECM.
-    scan: Ring,
+    /// The elementary streams.
+    es: Source,
+    /// Everything else: a reader of the "every PID" ring.
+    rest: Source,
+    /// How much of what `rest` has ready has been looked at (bytes).
+    looked: u32,
+    rest_overruns: u32,
+    /// Whether `rest` goes first when both have data.
+    rest_first: bool,
+    /// The PIDs that go to the elementary streams' channel.
+    pids: [u16; ES_FILTERS],
+    npids: usize,
     ecm_pid: Option<u32>,
     /// The ECM body given to the card last.
     last: [u8; ECM_MAX],
@@ -66,6 +79,7 @@ struct Open {
     odd: Option<[u8; 8]>,
     even: Option<[u8; 8]>,
     card_active: bool,
+    since: Since,
 }
 
 pub struct Program {
@@ -74,6 +88,20 @@ pub struct Program {
 
 fn be32(b: &[u8]) -> u32 {
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// The PID of the packet at physical address `at`, from its first word.
+fn pid_at(at: u32) -> Option<u32> {
+    let head = fb_r(at).to_le_bytes();
+    (head[0] == 0x47).then(|| u32::from(head[1] & 0x1F) << 8 | u32::from(head[2]))
+}
+
+fn packet_at(at: u32) -> [u8; 188] {
+    let mut p = [0u8; 188];
+    for (i, w) in p.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        *w = fb_r(at + 4 * i as u32).to_le_bytes();
+    }
+    p
 }
 
 /// The body of an ECM section that fits in this one packet.
@@ -96,6 +124,18 @@ fn ecm_body(p: &[u8; 188]) -> Option<&[u8]> {
     }
     let body = p.get(section + 8..section + 3 + length - 4)?;
     (body.len() <= ECM_MAX).then_some(body)
+}
+
+impl Open {
+    /// Give an ECM to the card unless it is the one given last.
+    fn ecm(&mut self, p: &[u8; 188], card: &mut Card) {
+        let Some(body) = ecm_body(p) else { return };
+        if body != &self.last[..self.last_len] && card.submit_ecm(body) {
+            self.last[..body.len()].copy_from_slice(body);
+            self.last_len = body.len();
+            self.since.mark(stats::ECM_SENT);
+        }
+    }
 }
 
 impl Program {
@@ -121,35 +161,39 @@ impl Program {
     /// of elementary streams, +0x106C.. their PIDs, +0x10CC.. their ECM
     /// PIDs (0x1FFF = not scrambled). One ECM PID is followed: the first
     /// one given.
-    pub fn open(&mut self, p: u32, clock_5ms: u32, ts: &mut Ts) -> u32 {
+    pub fn open(&mut self, p: u32, clock_5ms: u32, ts: &mut Ts, card: &mut Card) -> u32 {
         let (port, flags, mode) = (fb_r(p + 0x08), fb_r(p + 0x60), fb_r(p + 0xF2C));
         let (chunk, dest, n) = (fb_r(p + 0x318), fb_r(p + 0x31C), fb_r(p + 0x1068));
         if self.open.is_some() || flags & 0x10_0000 == 0 || mode & 0x18 != 8 || chunk != CHUNK || port > 3 || n > 24 {
             return FAILED;
         }
+        let since = Since::now(clock_5ms / 5);
         // Null packets are dropped at the input from now on, for every
         // stream, until the TS input is set up again.
         mmr_rmw(0x600C, |v| v | 0x300);
 
         let is_pid = |v: u32| v != 0 && v < 0x1FFF;
         let pcr = fb_r(p + 0xC08);
-        let (mut ecm_pid, mut entries, mut pcr_listed) = (None, 0, false);
-        demux::stop_channel(ES_CHANNEL);
-        demux::lock();
+        let (mut ecm_pid, mut pids, mut npids) = (None, [0u16; ES_FILTERS], 0);
         for i in 0..n {
             let (pid, ecm) = (fb_r(p + 0x106C + 4 * i), fb_r(p + 0x10CC + 4 * i));
-            if !is_pid(pid) {
-                continue;
-            }
             if ecm_pid.is_none() && is_pid(ecm) {
                 ecm_pid = Some(ecm);
             }
-            pcr_listed |= pid == pcr;
-            demux::set_filter(entries, FILTER_VALID | port << 13 | pid, ES_CHANNEL);
-            entries += 1;
+            if is_pid(pid) && !pids[..npids].contains(&(pid as u16)) {
+                pids[npids] = pid as u16;
+                npids += 1;
+            }
         }
-        if is_pid(pcr) && !pcr_listed {
-            demux::set_filter(entries, FILTER_VALID | port << 13 | pcr, ES_CHANNEL);
+        if is_pid(pcr) && !pids[..npids].contains(&(pcr as u16)) {
+            pids[npids] = pcr as u16;
+            npids += 1;
+        }
+
+        demux::stop_channel(ES_CHANNEL);
+        demux::lock();
+        for (i, pid) in pids[..npids].iter().enumerate() {
+            demux::set_filter(i as u32, FILTER_VALID | port << 13 | u32::from(*pid), ES_CHANNEL);
         }
         // The keys' slots are set for the channel, but it passes the
         // packets as they are until the first control words have come.
@@ -160,24 +204,45 @@ impl Program {
         demux::start_channel(ES_CHANNEL, ES_RING, ES_LEN);
 
         let now = count();
-        self.open = Some(Open {
+        let (rest, history) = ts.share(port);
+        let mut o = Open {
             dest,
             patience: clock_5ms,
-            sources: [
-                Source { ring: Ring::new(ES_CHANNEL, ES_RING, ES_LEN, PACKET, SKIP), last_sent: now },
-                // Packets on their way into the "every PID" ring when the
-                // filter entries above took effect still come out there.
-                Source { ring: ts.share(port, SKIP), last_sent: now },
-            ],
-            turn: 0,
-            scan: ts.share(port, 0),
+            es: Source { ring: Ring::new(ES_CHANNEL, ES_RING, ES_LEN, PACKET, SKIP), last_sent: now },
+            rest: Source { ring: rest, last_sent: now },
+            looked: 0,
+            rest_overruns: 0,
+            rest_first: true,
+            pids,
+            npids,
             ecm_pid,
             last: [0; ECM_MAX],
             last_len: 0,
             odd: None,
             even: None,
             card_active: false,
-        });
+            since,
+        };
+        // The service's latest ECM is usually in the ring already: with it
+        // the card can work on the control words at once, instead of from
+        // the next ECM that comes by.
+        if let Some(pid) = ecm_pid {
+            let back = history.min(LOOK_BACK) / PACKET * PACKET;
+            let mut latest = None;
+            for k in (0..back).step_by(PACKET as usize) {
+                let at = o.rest.ring.behind(back - k);
+                if pid_at(at) == Some(pid) {
+                    let p = packet_at(at);
+                    if ecm_body(&p).is_some() {
+                        latest = Some(p);
+                    }
+                }
+            }
+            if let Some(p) = latest {
+                o.ecm(&p, card);
+            }
+        }
+        self.open = Some(o);
         fb_w(p + 0x18, HANDLE);
         fb_w(p + 0x1C, 0);
         OK
@@ -188,7 +253,7 @@ impl Program {
         demux::stop_channel(ES_CHANNEL);
         demux::lock();
         for i in 0..ES_FILTERS {
-            demux::set_filter(i, 0, 0);
+            demux::set_filter(i as u32, 0, 0);
         }
         demux::descrambler(ES_CHANNEL, |v| v & 0x80);
         demux::unlock();
@@ -213,6 +278,7 @@ impl Program {
                     o.even = Some(even);
                 }
                 demux::descrambler(ES_CHANNEL, |v| v | 7);
+                o.since.mark(stats::KEYS);
             }
             Output::EcmRefused => demux::descrambler(ES_CHANNEL, |v| v & !7),
             // Give the same ECM to the card again when it next comes by.
@@ -235,43 +301,43 @@ impl Program {
         o.card_active = active;
 
         // Look at the header of every packet that has come into the
-        // "every PID" ring; read the ECM's packets in full.
-        o.scan.follow();
-        while o.scan.fill >= PACKET {
-            let at = o.scan.rp;
-            o.scan.consume(PACKET);
-            let head = fb_r(at).to_le_bytes();
-            let pid = u32::from(head[1] & 0x1F) << 8 | u32::from(head[2]);
-            if head[0] != 0x47 || Some(pid) != o.ecm_pid {
-                continue;
-            }
-            let mut p = [0u8; 188];
-            for (i, w) in p.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                *w = fb_r(at + 4 * i as u32).to_le_bytes();
-            }
-            let Some(body) = ecm_body(&p) else { continue };
-            if body != &o.last[..o.last_len] && card.submit_ecm(body) {
-                o.last[..body.len()].copy_from_slice(body);
-                o.last_len = body.len();
+        // "every PID" ring, before it is sent.
+        o.rest.ring.follow();
+        if o.rest.ring.overruns != o.rest_overruns {
+            o.rest_overruns = o.rest.ring.overruns;
+            o.looked = 0;
+        }
+        while o.looked + PACKET <= o.rest.ring.fill {
+            let at = o.rest.ring.ahead(o.looked);
+            o.looked += PACKET;
+            let Some(pid) = pid_at(at) else { continue };
+            if Some(pid) == o.ecm_pid {
+                o.ecm(&packet_at(at), card);
+            } else if o.pids[..o.npids].contains(&(pid as u16)) {
+                // A packet of the service that was on its way into this
+                // ring when the filter entries took effect. It is older
+                // than what the service's own channel delivers: blank it.
+                fb_w(at, NULL_HEAD);
             }
         }
 
-        for s in &mut o.sources {
-            s.ring.follow();
-        }
+        o.es.ring.follow();
         if !dma.idle() {
             return;
         }
         let now = count();
-        for k in 0..2 {
-            let i = (o.turn + k) % 2;
-            let s = &mut o.sources[i];
-            let n = s.ring.ready().min(PIECE) / PACKET * PACKET;
+        for rest in [o.rest_first, !o.rest_first] {
+            let (s, limit) = if rest { (&mut o.rest, o.looked) } else { (&mut o.es, PIECE) };
+            let n = s.ring.ready().min(PIECE).min(limit) / PACKET * PACKET;
             if n >= ENOUGH || (n > 0 && now.wrapping_sub(s.last_sent) >= o.patience) {
                 dma.start(s.ring.rp, o.dest, n, SRC_LOCAL);
                 s.ring.consume(n);
                 s.last_sent = now;
-                o.turn = (i + 1) % 2;
+                if rest {
+                    o.looked -= n;
+                }
+                o.since.mark(if rest { stats::FIRST_REST } else { stats::FIRST_ES });
+                o.rest_first = !rest;
                 return;
             }
         }
