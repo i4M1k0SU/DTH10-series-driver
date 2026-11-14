@@ -57,6 +57,14 @@ pub mod func {
 pub const OTP_FB: u32 = 0x5_DC40;
 /// Size of the OTP signature in words.
 pub const OTP_WORDS: usize = 28;
+/// Message IDs the host answers itself.
+pub mod m2h {
+    /// `txc_mips_data_ready`: output (and generic-channel) data is ready.
+    pub const DATA_READY: u32 = 0x0C;
+    /// `txc_mips_strm_stat`: stream state; 6 = ready to close.
+    pub const STREAM_STATUS: u32 = 0x0E;
+}
+
 /// Message IDs at or above this are refused with status 5.
 pub const M2H_ID_LIMIT: u32 = 0x1C;
 /// Words of a firmware message.
@@ -185,7 +193,9 @@ pub struct M2hMessage {
 
 /// Handler for firmware messages: returns whether it handled the message.
 /// Unhandled messages are refused the way the vendor refuses messages
-/// without a registered handler. The handler must not acknowledge.
+/// without a registered handler. The handler must not acknowledge. It does
+/// not see [`m2h::DATA_READY`] and [`m2h::STREAM_STATUS`], which the host
+/// answers itself.
 pub type M2hHandler<B> = Box<dyn FnMut(&mut Chip<B>, &M2hMessage) -> Result<bool> + Send>;
 
 /// How command completion is waited for.
@@ -377,19 +387,53 @@ impl<B: RemotePci> Vixs<B> {
             *w = self.chip.fb_read(addr + 4 * i as u32)?;
         }
         let msg = M2hMessage { id, addr, words };
-        if id < M2H_ID_LIMIT {
-            let handled = match self.m2h_handler.as_mut() {
-                Some(h) if words[3] == id => h(&mut self.chip, &msg)?,
-                _ => false,
-            };
-            if handled {
+        if id >= M2H_ID_LIMIT {
+            self.chip.fb_write(addr + RESULT_OFFSET, 5)?;
+            return mips::ack_m2h(&mut self.chip);
+        }
+        if words[3] == id {
+            if let Some(result) = self.stream_message(&msg)? {
+                self.chip.fb_write(addr + RESULT_OFFSET, result)?;
                 return mips::ack_m2h(&mut self.chip);
             }
-            log::debug!("ViXS message {id:#x} not handled");
-            self.chip.fb_write(addr + 0x10, 2)?;
+            if let Some(h) = self.m2h_handler.as_mut()
+                && h(&mut self.chip, &msg)?
+            {
+                return mips::ack_m2h(&mut self.chip);
+            }
         }
-        self.chip.fb_write(addr + 0x10, 5)?;
+        log::debug!("ViXS message {id:#x} not handled");
+        self.chip.fb_write(addr + RESULT_OFFSET, 2)?;
         mips::ack_m2h(&mut self.chip)
+    }
+
+    /// The vendor's handling of the two stream messages (2-vixs-bringup.md
+    /// §5.3): word 5 is the FB address of a descriptor whose first word is
+    /// the stream handle the host gave in the OPEN; the host must replace it
+    /// with the firmware's handle, which the firmware then follows as a
+    /// pointer (left alone, the firmware dereferences the host's value and
+    /// takes an address error). A stream status of 6 is the vendor's "ready
+    /// to close"; the vendor waits for it before a close, but only warns when
+    /// it does not come, and over USB it has not been seen. Returns the
+    /// result word, or `None` for other messages.
+    fn stream_message(&mut self, msg: &M2hMessage) -> Result<Option<u32>> {
+        if msg.id != m2h::DATA_READY && msg.id != m2h::STREAM_STATUS {
+            return Ok(None);
+        }
+        let desc = msg.words[5];
+        let host = self.chip.fb_read(desc)?;
+        let Some(s) = self.streams.iter().find(|s| s.cookie == host) else {
+            log::warn!("ViXS message {:#x} for unknown stream {host:#x}", msg.id);
+            return Ok(Some(2));
+        };
+        self.chip.fb_write(desc, s.phys)?;
+        if msg.id == m2h::DATA_READY {
+            log::trace!("ViXS data ready for stream {host:#x}");
+            return Ok(Some(RESULT_OK));
+        }
+        let state = self.chip.fb_read(desc + 8)?;
+        log::debug!("ViXS stream {host:#x} status {state}");
+        Ok(Some(if state == 6 { RESULT_OK } else { 2 }))
     }
 
     /// Install the handler for firmware messages.
@@ -633,21 +677,52 @@ mod tests {
     #[test]
     fn unhandled_message_is_refused_like_the_vendor() {
         let mut v = running(Completion::Poll);
-        script_message(v.bus(), 0x0C, 0x0C);
+        script_message(v.bus(), 0x11, 0x11);
         v.bus().clear();
         v.mips_isr().unwrap();
         use Acc::*;
         let mut want = vec![R(0x30E0), R(0x30E4), W(0x30E0, 1), R(0x3028), R(0x3040)];
         want.extend((0..9).map(|i| FbR(0x20_0000 + 4 * i)));
-        want.extend([
-            FbW(0x20_0010, 2),
-            FbW(0x20_0010, 5),
-            R(0x3040),
-            R(0x3028),
-            W(0x3038, 0x20_0000),
-            W(0x3024, 0x0C),
-        ]);
+        want.extend([FbW(0x20_0010, 2), R(0x3040), R(0x3028), W(0x3038, 0x20_0000), W(0x3024, 0x11)]);
         assert_eq!(accesses(&v.bus().ops()), want);
+    }
+
+    #[test]
+    fn stream_messages_get_the_firmware_handle() {
+        let mut v = running(Completion::Poll);
+        v.streams.push(crate::vixs::stream::OpenStream { cookie: 3, phys: 0xA02E_0060 });
+        let called = Arc::new(Mutex::new(0));
+        let c2 = called.clone();
+        v.set_m2h_handler(Box::new(move |_, _| {
+            *c2.lock().unwrap() += 1;
+            Ok(true)
+        }));
+        // Data ready: the descriptor's first word becomes the firmware handle.
+        script_message(v.bus(), m2h::DATA_READY, m2h::DATA_READY);
+        v.bus().set(Space::Mem, FB + 0x20_0014, 0x30_0000);
+        v.bus().set(Space::Mem, FB + 0x30_0000, 3);
+        v.bus().clear();
+        v.mips_isr().unwrap();
+        let w = writes(&v.bus().ops());
+        assert_eq!(&w[1..3], &[Acc::FbW(0x30_0000, 0xA02E_0060), Acc::FbW(0x20_0010, 1)]);
+        // Stream status 6 (ready to close): result 1; another state: 2.
+        for (state, result) in [(6, 1), (1, 2)] {
+            script_message(v.bus(), m2h::STREAM_STATUS, m2h::STREAM_STATUS);
+            v.bus().set(Space::Mem, FB + 0x30_0000, 3);
+            v.bus().set(Space::Mem, FB + 0x30_0008, state);
+            v.bus().clear();
+            v.mips_isr().unwrap();
+            let w = writes(&v.bus().ops());
+            assert_eq!(&w[1..3], &[Acc::FbW(0x30_0000, 0xA02E_0060), Acc::FbW(0x20_0010, result)]);
+        }
+        // An unknown stream: refused, the descriptor left alone.
+        script_message(v.bus(), m2h::DATA_READY, m2h::DATA_READY);
+        v.bus().set(Space::Mem, FB + 0x30_0000, 9);
+        v.bus().clear();
+        v.mips_isr().unwrap();
+        assert_eq!(&writes(&v.bus().ops())[1..2], &[Acc::FbW(0x20_0010, 2)]);
+        // The installed handler never saw them.
+        assert_eq!(*called.lock().unwrap(), 0);
     }
 
     #[test]
@@ -660,7 +735,7 @@ mod tests {
             chip.fb_write(msg.words[5], 0x1234)?;
             Ok(true)
         }));
-        script_message(v.bus(), 0x0E, 0x0E);
+        script_message(v.bus(), 0x17, 0x17);
         v.bus().set(Space::Mem, FB + 0x20_0014, 0x30_0000);
         v.bus().clear();
         v.mips_isr().unwrap();
@@ -668,11 +743,11 @@ mod tests {
         let w = writes(&v.bus().ops());
         assert_eq!(
             w,
-            vec![Acc::W(0x30E0, 1), Acc::FbW(0x30_0000, 0x1234), Acc::W(0x3038, 0x20_0000), Acc::W(0x3024, 0x0E)]
+            vec![Acc::W(0x30E0, 1), Acc::FbW(0x30_0000, 0x1234), Acc::W(0x3038, 0x20_0000), Acc::W(0x3024, 0x17)]
         );
 
         // ID mismatch in word 3: refused without calling the handler.
-        script_message(v.bus(), 0x0E, 0x0F);
+        script_message(v.bus(), 0x17, 0x18);
         v.mips_isr().unwrap();
         assert_eq!(seen.lock().unwrap().len(), 1);
 

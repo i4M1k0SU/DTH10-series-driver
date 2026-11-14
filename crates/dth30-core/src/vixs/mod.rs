@@ -86,6 +86,8 @@ pub struct Vixs<B: RemotePci> {
     otp: Option<[u32; cmd::OTP_WORDS]>,
     /// The next stream cookie ([`stream`]).
     pub(crate) next_cookie: u32,
+    /// Open streams, for the firmware's stream messages.
+    pub(crate) streams: Vec<stream::OpenStream>,
 }
 
 impl<B: RemotePci> Vixs<B> {
@@ -117,6 +119,7 @@ impl<B: RemotePci> Vixs<B> {
             m2h_handler: None,
             otp: None,
             next_cookie: 1,
+            streams: Vec::new(),
         }
     }
 

@@ -486,7 +486,8 @@ pub fn is_cdxm_packet(p: &[u8]) -> bool {
 /// EP_STAT bits (NET2280): FIFO flush (write 1) and FIFO empty.
 pub const EP_STAT_FIFO_FLUSH: u32 = 1 << 9;
 pub const EP_STAT_FIFO_EMPTY: u32 = 1 << 10;
-/// EP_AVAIL, the byte count in the FIFO, after EP_STAT in an endpoint block.
+/// EP_AVAIL after EP_STAT in an endpoint block. For an IN endpoint (all the
+/// stream endpoints) it is the free space in the FIFO, not the byte count.
 pub const EP_AVAIL: u16 = 0x10;
 
 /// The register block of the programmable endpoint serving `ep`.
@@ -497,26 +498,30 @@ fn ep_block(layout: &Layout, ep: u8) -> Result<u16> {
 
 /// Empty the NET2280 FIFO of endpoint `ep` after its IN transfer was
 /// cancelled, as the vendor does after a close (§6.4, 2-vixs-bringup.md
-/// §6.4: EP_STAT / EP_AVAIL, 0x34C / 0x350 for FIFO B, 0x38C / 0x390 for
-/// FIFO D): read both, and when the FIFO is not empty write FIFO_FLUSH and
-/// read EP_AVAIL again. Returns whether a flush was written. The exact
-/// emptiness test of the vendor is inferred.
+/// §6.4): when EP_STAT does not report the FIFO empty, write FIFO_FLUSH and
+/// check again. Returns whether a flush was written.
 pub fn flush_endpoint_fifo<B: RemotePci + ?Sized>(bus: &B, layout: &Layout, ep: u8) -> Result<bool> {
     let blk = ep_block(layout, ep)?;
-    let stat = bus.csr_read(blk + reg::EP_STAT)?;
-    let avail = bus.csr_read(blk + EP_AVAIL)?;
-    if avail == 0 && stat & EP_STAT_FIFO_EMPTY != 0 {
+    if bus.csr_read(blk + reg::EP_STAT)? & EP_STAT_FIFO_EMPTY != 0 {
         return Ok(false);
     }
     bus.csr_write(blk + reg::EP_STAT, EP_STAT_FIFO_FLUSH)?;
-    let left = bus.csr_read(blk + EP_AVAIL)?;
-    if left != 0 {
-        log::warn!("NET2280 FIFO of endpoint {ep:#04x} still holds {left} bytes after the flush");
+    if bus.csr_read(blk + reg::EP_STAT)? & EP_STAT_FIFO_EMPTY == 0 {
+        let free = bus.csr_read(blk + EP_AVAIL)?;
+        log::warn!("NET2280 FIFO of endpoint {ep:#04x} not empty after the flush ({free} bytes free)");
     }
     Ok(true)
 }
 
 // ---- commands ----
+
+/// What the firmware's stream messages need about an open stream: the
+/// handle the host gave in the OPEN and the firmware's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OpenStream {
+    pub cookie: u32,
+    pub phys: u32,
+}
 
 /// An open stream: what its close needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,6 +611,7 @@ impl<B: RemotePci> Vixs<B> {
         };
         let phys = self.chip.fb_read(r.payload_fb() + kind.handle_offset())?;
         log::debug!("{} open: slot {slot}, cookie {cookie:#x}, firmware handle {phys:#x}", kind.name());
+        self.streams.push(OpenStream { cookie, phys });
         Ok(StreamHandle { kind, cookie, phys, slot, open_payload: payload })
     }
 
@@ -669,6 +675,7 @@ impl<B: RemotePci> Vixs<B> {
             return Err(Error::Protocol("ViXS stream close failed"));
         }
         self.ring_mut()?.release(h.slot);
+        self.streams.retain(|s| s.cookie != h.cookie);
         Ok(())
     }
 
@@ -983,19 +990,20 @@ pub(crate) mod tests {
     fn fifo_flush() {
         let m = MockPci::new();
         let l = super::super::tests::layout();
-        // FIFO D not empty: flush and read back.
-        m.set(Space::Csr, 0x38C, 0);
-        m.queue(Space::Csr, 0x390, &[0x200, 0]);
+        // FIFO D not empty: flush and check.
+        m.queue(Space::Csr, 0x38C, &[0, EP_STAT_FIFO_EMPTY]);
         assert!(flush_endpoint_fifo(&m, &l, 0x84).unwrap());
-        assert_eq!(
-            m.ops(),
-            vec![Op::CsrRead(0x38C), Op::CsrRead(0x390), Op::CsrWrite(0x38C, 0x200), Op::CsrRead(0x390)]
-        );
+        assert_eq!(m.ops(), vec![Op::CsrRead(0x38C), Op::CsrWrite(0x38C, 0x200), Op::CsrRead(0x38C)]);
+        // Still not empty: EP_AVAIL is read for the warning.
+        m.clear();
+        m.set(Space::Csr, 0x38C, 0);
+        assert!(flush_endpoint_fifo(&m, &l, 0x84).unwrap());
+        assert_eq!(m.ops().last(), Some(&Op::CsrRead(0x390)));
         // FIFO B empty: nothing written.
         m.clear();
         m.set(Space::Csr, 0x34C, EP_STAT_FIFO_EMPTY);
         assert!(!flush_endpoint_fifo(&m, &l, 0x82).unwrap());
-        assert_eq!(m.ops(), vec![Op::CsrRead(0x34C), Op::CsrRead(0x350)]);
+        assert_eq!(m.ops(), vec![Op::CsrRead(0x34C)]);
         assert!(flush_endpoint_fifo(&m, &l, 0x81).is_err());
     }
 
