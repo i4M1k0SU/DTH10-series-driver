@@ -43,6 +43,13 @@ pub const UNIT_PREFIX: &str = "DTH30-";
 /// How long the card may take to report itself activated after the CAS
 /// open (it takes about a second).
 const CARD_WAIT: Duration = Duration::from_secs(5);
+/// How long after a reset request no card event at all means no card.
+const NO_CARD_WAIT: Duration = Duration::from_secs(2);
+/// While the card is not activated: how long after a reset request it is
+/// sent again once a card is reported inserted, and when no insertion is
+/// reported at all (the firmware never resets a card by itself).
+const RESET_AFTER_INSERT: Duration = Duration::from_secs(3);
+const RESET_BLIND: Duration = Duration::from_secs(10);
 /// How long the Raw stream is read for the service's PAT and PMT.
 const PSI_WAIT: Duration = Duration::from_secs(5);
 /// How much longer the lock wait goes on while there is a signal.
@@ -102,6 +109,8 @@ pub struct Dth30Tuner {
     read_depth: usize,
     current: Option<Channel>,
     cas: Option<CasWatch>,
+    /// When the card was last asked to reset.
+    last_reset: Instant,
     pump: Option<Pump>,
 }
 
@@ -134,6 +143,7 @@ impl Dth30Tuner {
             read_depth: read_depth.max(1),
             current: None,
             cas: None,
+            last_reset: Instant::now(),
             pump: None,
         })
     }
@@ -169,20 +179,33 @@ impl Dth30Tuner {
     }
 
     /// Open the CAS object (resetting the card) unless it is open, and wait
-    /// for the card to report itself activated.
+    /// for the card to report itself activated, up to [`CARD_WAIT`] after
+    /// the last reset request.
     fn ensure_cas(&mut self) -> Result<()> {
         if self.cas.is_none() {
             let info = self.dev.open_cas()?;
             let r = self.reader(&info)?;
             self.cas = Some(CasWatch::start(info, r));
+            self.last_reset = Instant::now();
         }
         let Some(cas) = self.cas.as_ref() else { return Ok(()) };
         let (card, activated) = (cas.card.clone(), cas.activated.clone());
-        let deadline = Instant::now() + CARD_WAIT;
+        // Only a recent reset is waited for: without a card a tune does not
+        // wait each time ([`Dth30Tuner::check_card`] keeps asking).
+        let deadline = self.last_reset + CARD_WAIT;
+        if activated.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            return Ok(());
+        }
         while !activated.load(Ordering::Relaxed) {
+            // A card answers within about half a second; no event at all
+            // means no card, which is not waited for.
+            if card.load(Ordering::Relaxed) == 0 && self.last_reset.elapsed() >= NO_CARD_WAIT {
+                log::warn!("unit {}: no B-CAS card reported; the TS stays scrambled until one is put in", self.name);
+                return Ok(());
+            }
             if Instant::now() >= deadline {
                 log::warn!(
-                    "unit {}: the B-CAS card did not activate (state 0x{:x}); the TS stays scrambled",
+                    "unit {}: the B-CAS card did not activate (last event 0x{:x}); the TS stays scrambled until it does",
                     self.name,
                     card.load(Ordering::Relaxed)
                 );
@@ -263,13 +286,27 @@ impl Dth30Tuner {
         }
     }
 
-    /// Reset the card again when it was put back after a removal (called
-    /// from the periodic status read and before a tune).
+    /// Ask for a card reset again while the card is not activated: the
+    /// firmware resets a card only when asked, so a card put in (or back)
+    /// while the CAS object is open would stay unused. Sooner once a card
+    /// is reported inserted, else now and then. Called from the periodic
+    /// status read (about once a second while streaming) and before a tune.
     fn check_card(&mut self) {
-        if !self.cas.as_ref().is_some_and(|c| c.reinserted.swap(false, Ordering::Relaxed)) {
+        let Some(cas) = self.cas.as_ref() else { return };
+        if cas.activated.load(Ordering::Relaxed) {
             return;
         }
-        log::info!("unit {}: B-CAS card put back; resetting it", self.name);
+        let inserted = cas.inserted.load(Ordering::Relaxed);
+        let since = self.last_reset.elapsed();
+        if since < if inserted { RESET_AFTER_INSERT } else { RESET_BLIND } {
+            return;
+        }
+        if inserted {
+            log::info!("unit {}: B-CAS card inserted but not activated; resetting it", self.name);
+        } else {
+            log::debug!("unit {}: B-CAS card not activated; asking for a reset again", self.name);
+        }
+        self.last_reset = Instant::now();
         if let Err(e) = self.dev.reset_card() {
             log::warn!("unit {}: card reset: {e}", self.name);
         }
@@ -413,14 +450,14 @@ impl Drop for Dth30Tuner {
 /// The CAS endpoint read in the background for as long as the CAS object
 /// is open (an unread FIFO may stall the firmware). A block's card state
 /// names the event it reports (inserted, activated, an EMM...), so
-/// `activated` is kept from the activation until the card is removed.
-/// A card put back after a removal is only reported inserted: the firmware
-/// does not reset it by itself, so `reinserted` asks the control side to
-/// (see [`Dth30Tuner::check_card`]).
+/// `activated` is kept from the activation until the card is removed, and
+/// `inserted` from an insertion (or activation) until the removal. A card
+/// put in while the object is open is only reported inserted; the control
+/// side then asks for a reset ([`Dth30Tuner::check_card`]).
 struct CasWatch {
     card: Arc<AtomicU32>,
     activated: Arc<AtomicBool>,
-    reinserted: Arc<AtomicBool>,
+    inserted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: JoinHandle<(StreamInfo, StreamReader)>,
 }
@@ -429,24 +466,22 @@ impl CasWatch {
     fn start(info: StreamInfo, mut r: StreamReader) -> Self {
         let card = Arc::new(AtomicU32::new(0));
         let activated = Arc::new(AtomicBool::new(false));
-        let reinserted = Arc::new(AtomicBool::new(false));
+        let inserted = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
-        let (c, a, ri, s) = (card.clone(), activated.clone(), reinserted.clone(), stop.clone());
+        let (c, a, ins, s) = (card.clone(), activated.clone(), inserted.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
-            let mut removed = false;
             while !s.load(Ordering::Relaxed) {
                 match r.next(Duration::from_millis(100)) {
                     Ok(Some(b)) => {
                         let Some((h, _)) = parse_generic_block(&b) else { continue };
                         if h.card & card_state::REMOVED != 0 {
                             a.store(false, Ordering::Relaxed);
-                            removed = true;
+                            ins.store(false, Ordering::Relaxed);
                         } else if h.card & card_state::ACTIVATED != 0 {
                             a.store(true, Ordering::Relaxed);
-                            removed = false;
-                        } else if h.card & card_state::INSERTED != 0 && removed {
-                            ri.store(true, Ordering::Relaxed);
-                            removed = false;
+                            ins.store(true, Ordering::Relaxed);
+                        } else if h.card & card_state::INSERTED != 0 {
+                            ins.store(true, Ordering::Relaxed);
                         }
                         if c.swap(h.card, Ordering::Relaxed) != h.card {
                             log::info!("B-CAS card event 0x{:x}", h.card);
@@ -461,7 +496,7 @@ impl CasWatch {
             }
             (info, r)
         });
-        Self { card, activated, reinserted, stop, thread }
+        Self { card, activated, inserted, stop, thread }
     }
 
     fn stop(self) -> (StreamInfo, StreamReader) {
