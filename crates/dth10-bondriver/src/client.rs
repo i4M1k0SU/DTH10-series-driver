@@ -41,10 +41,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dth10_core::LockExt;
-use dth10_tuner::ipc::{self, Conn, Target};
-use dth10_tuner::proto::{MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice, reply_tuner};
-use dth10_tuner::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue};
+use dth_common::LockExt;
+use dth_common::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue};
+use dth_proto::ipc::{self, Conn, Target};
+use dth_proto::proto::{MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice, reply_tuner};
 
 use crate::config::Config;
 
@@ -597,7 +597,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dth10_tuner::ipc::Listener;
+    use dth_proto::ipc::Listener;
     use std::sync::atomic::AtomicUsize;
 
     /// A folder standing in for the DLL's, emptied afterwards.

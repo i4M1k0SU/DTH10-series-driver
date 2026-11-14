@@ -1,0 +1,14 @@
+[package]
+name = "dth30-backend"
+description = "The BUFFALO DT-H30/U2 family behind dth-common's Session and Backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dth-common.workspace = true
+dth30-core.workspace = true
+dth30-usb.workspace = true
+log.workspace = true

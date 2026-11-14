@@ -11,7 +11,7 @@ repository.workspace = true
 dth10-core.workspace = true
 dth10-usb.workspace = true
 # Channel-name parsing (`Channel::parse`) and number parsing shared with `dth10`.
-dth10-tuner.workspace = true
+dth-common.workspace = true
 log.workspace = true
 env_logger.workspace = true
 clap.workspace = true

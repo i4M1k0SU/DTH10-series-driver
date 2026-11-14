@@ -30,15 +30,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use dth_common::channels::uhf_center_hz;
+use dth_common::stream::parse_num;
+use dth_common::{Channel, System};
 use dth10_core::cepm;
 use dth10_core::kit::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
 use dth10_core::satellite::SatelliteKit;
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::ts_slot::{self, SlotLayout};
 use dth10_core::{Device, StreamMode, TunerDesc, unverified_kit_error};
-use dth10_tuner::channels::uhf_center_hz;
-use dth10_tuner::config::parse_num;
-use dth10_tuner::{Channel, System};
 use dth10_usb::{EventReader, RecipientMode, StreamReader, UsbTransport};
 
 type Res<T = ()> = Result<T, Box<dyn Error>>;

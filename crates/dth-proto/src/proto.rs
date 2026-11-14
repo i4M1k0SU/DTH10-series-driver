@@ -49,8 +49,8 @@
 //! The connection ends after the reply. The text form does not depend on the
 //! platform, so its tests run everywhere.
 
-use crate::config::parse_num;
-use crate::{Channel, System};
+use dth_common::stream::parse_num;
+use dth_common::{Channel, System};
 
 /// The longest line either side reads.
 pub const MAX_LINE: usize = 512;

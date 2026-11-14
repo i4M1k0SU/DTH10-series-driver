@@ -1,0 +1,12 @@
+[package]
+name = "dth-proto"
+description = "The request/reply lines between the tuner daemon and its clients (the stream command, the BonDriver) and the socket they travel on"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dth-common.workspace = true
+socket2 = "0.6.5"

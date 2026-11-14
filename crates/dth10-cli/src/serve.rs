@@ -1,5 +1,5 @@
 //! `dth10 serve`: hold the tuner(s) open for good and stream to clients over
-//! a socket (`dth10_tuner::ipc`: a Unix domain socket on Linux and Windows
+//! a socket (`dth_proto::ipc`: a Unix domain socket on Linux and Windows
 //! alike, or TCP on the loopback interface; on Windows the BonDriver starts
 //! this as its server).
 //!
@@ -28,7 +28,7 @@
 //! needs it; without it the daemon still serves raw terrestrial streams and
 //! refuses device-mode and BS/CS requests with the reason.
 //!
-//! Units of the DT-H30/U2 family (`dth10_tuner::dth30`) are served the same
+//! Units of the DT-H30/U2 family (`dth30_backend`) are served the same
 //! way: one terrestrial tuner, `raw` = the scrambled TS as received,
 //! `device` = one service descrambled by the unit's own B-CAS card. They
 //! need no application key file but the firmware from the vendor's
@@ -43,15 +43,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Args;
-use dth10_core::LockExt;
-use dth10_core::cepm::AppKeys;
-use dth10_tuner::dth30::{self, Dth30Tuner};
-use dth10_tuner::{DeviceProgram, Session, StreamModeCfg, System, TsQueue, Tuner, TunerConfig, default_tuner};
-use dth10_usb::{RecipientMode, UsbTransport};
+use dth_common::{
+    Backend, DeviceProgram, LockExt, Request as UnitRequest, Session, StreamModeCfg, System, TsQueue, default_tuner,
+};
+use dth_proto::ipc::{Conn, Listener, Target};
+use dth_proto::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice};
+use dth10_backend::{Dth10Backend, KeyStore, TunerConfig};
+use dth10_usb::RecipientMode;
+use dth30_backend::{Dth30Backend, UNIT_PREFIX};
 
-use crate::{RecipientArg, app_keys_path, default_state_dir, lnb_of, state_file_for, stop};
-use dth10_tuner::ipc::{Conn, Listener, Target};
-use dth10_tuner::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice};
+use crate::{RecipientArg, default_state_dir, lnb_of, stop};
 
 #[derive(Args)]
 pub struct ServeArgs {
@@ -107,87 +108,22 @@ pub struct ServeArgs {
     idle_exit: u64,
 }
 
-/// The application credentials (the vendor application's `CoBDACom.dll`):
-/// needed for device mode and BS/CS (the link decryption), not for raw
-/// terrestrial streams. Read at start when the file is there, else on the
-/// first request that needs it (the file may be put in place later), so a
-/// daemon that only serves raw streams runs without it.
-struct Keys {
-    explicit: Option<PathBuf>,
-    state_dir: PathBuf,
-    loaded: Mutex<Option<Arc<AppKeys>>>,
-}
-
-impl Keys {
-    /// Where the file is (or would be looked for) now.
-    fn resolve(&self) -> Option<PathBuf> {
-        app_keys_path(self.explicit.as_deref(), &self.state_dir)
-    }
-
-    fn loaded(&self) -> Option<Arc<AppKeys>> {
-        self.loaded.locked().clone()
-    }
-
-    /// The credentials, read on first use.
-    fn get(&self) -> Result<Arc<AppKeys>, String> {
-        let mut l = self.loaded.locked();
-        if let Some(k) = l.as_ref() {
-            return Ok(k.clone());
-        }
-        let Some(p) = self.resolve() else {
-            return Err(format!(
-                "the application key file (the vendor application's CoBDACom.dll) is needed for device mode and BS/CS: put it in {} or give --app-keys",
-                self.state_dir.display()
-            ));
-        };
-        let t = Instant::now();
-        let k = Arc::new(AppKeys::load(&p).map_err(|e| format!("application key file {}: {e}", p.display()))?);
-        log::info!("application credentials read from {} in {:?}", p.display(), t.elapsed());
-        *l = Some(k.clone());
-        Ok(k)
-    }
-}
-
-/// The family of a unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Family {
-    /// The DTH10 series (`dth10_tuner::Tuner`).
-    Dth10,
-    /// The DT-H30/U2 family (`dth10_tuner::dth30`).
-    Dth30,
-}
-
-impl Family {
-    /// Whether a request needs the application credentials (before the
-    /// unit is open; [`Session::needs_app_keys`] says the same once it is).
-    fn needs_app_keys(self, raw: bool, system: System) -> bool {
-        match self {
-            Family::Dth10 => !raw || system == System::IsdbS,
-            Family::Dth30 => false,
-        }
-    }
-
-    /// The family of a unit named on the command line: a DT-H30/U2-family
-    /// name, or a serial number found among that family's devices now; else
-    /// the DTH10 series.
-    fn of_name(name: &str) -> Family {
-        if name.starts_with(dth30::UNIT_PREFIX) || dth30::list().is_ok_and(|l| l.iter().any(|(n, _)| n == name)) {
-            Family::Dth30
-        } else {
-            Family::Dth10
-        }
-    }
+/// What a request that does not say gets: the daemon's options.
+struct Defaults {
+    lnb_voltage: u32,
+    lnb_power: bool,
+    attenuator: bool,
+    booster: bool,
+    ter_lock_wait_ms: u64,
+    sat_lock_wait_ms: u64,
 }
 
 /// One served unit.
 struct Unit {
     serial: String,
-    family: Family,
-    /// DT-H30/U2 family: where the firmware is looked for.
-    firmware: Firmware,
-    cfg: TunerConfig,
-    keys: Arc<Keys>,
-    recipient: RecipientMode,
+    /// The family it belongs to.
+    backend: Arc<dyn Backend>,
+    defaults: Arc<Defaults>,
     /// The TS of each tuner: 0 = terrestrial, 1 = satellite (or the second terrestrial tuner).
     queues: [TsQueue; 2],
     /// `None` while the unit is not open (lost; opened again on the next request).
@@ -277,7 +213,7 @@ fn claim(slot: &Slot, busy_fail: bool, client: Option<&str>) -> Claim {
     }
 }
 
-/// The tuner a stream request goes to (key `tuner=`, see `dth10_tuner::proto`):
+/// The tuner a stream request goes to (key `tuner=`, see `dth_proto::proto`):
 /// a satellite channel to the satellite tuner; a terrestrial one to tuner 0,
 /// to tuner 1 when it names it on a unit whose tuner #1 is a second terrestrial
 /// tuner, or with `auto` to the tuner this client streams already, else the
@@ -326,21 +262,11 @@ impl Unit {
             return Ok(());
         }
         let t0 = Instant::now();
-        let err = |e: dth10_core::Error| format!("unit {}: {e}", self.serial);
-        let mut t: Box<dyn Session> = match self.family {
-            Family::Dth10 => {
-                let transport = UsbTransport::open_matching(self.recipient, Some(&self.serial)).map_err(err)?;
-                Box::new(Tuner::open_with(transport, &self.cfg, self.queues[0].clone()).map_err(err)?)
-            }
-            Family::Dth30 => {
-                let fw = self.firmware.load()?;
-                Box::new(Dth30Tuner::open(&self.serial, &fw, self.cfg.read_depth, self.queues[0].clone()).map_err(err)?)
-            }
-        };
+        let mut t = self
+            .backend
+            .open(&self.serial, self.queues[0].clone())
+            .map_err(|e| format!("unit {}: {e}", self.serial))?;
         t.set_queue(1, self.queues[1].clone());
-        if let Some(k) = self.keys.loaded() {
-            t.with_app_keys(k);
-        }
         *self.second_ter.locked() = Some(t.has_second_terrestrial());
         log::info!("unit {}: opened in {:?}", self.serial, t0.elapsed());
         *tuner = Some(t);
@@ -458,21 +384,19 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
     };
     let what = describe(system_name(system));
 
-    // Device mode and BS/CS decrypt the link, which takes the application
-    // credentials; a raw terrestrial stream does not. Refused here, before the
-    // stream is claimed, with a reason the client can act on.
-    let keys = if unit.family.needs_app_keys(req.raw, system) {
-        match unit.keys.get() {
-            Ok(k) => Some(k),
-            Err(e) => {
-                log::warn!("connection {id}: {what}: {e}");
-                let _ = reply(&conn, &Reply::Error(e));
-                return;
-            }
-        }
-    } else {
-        None
+    // What the unit's family needs for this request (the DTH10 series' key
+    // file for the link decryption, the DT-H30/U2 family's firmware file and
+    // its one terrestrial tuner): refused here, before the stream is claimed,
+    // with a reason the client can act on.
+    let asked = match req.tuner {
+        Some(TunerChoice::Index(n)) => usize::from(n),
+        _ => default_tuner(system),
     };
+    if let Err(e) = unit.backend.check(&unit.serial, UnitRequest { system, tuner: asked, raw: req.raw }) {
+        log::warn!("connection {id}: {what}: {e}");
+        let _ = reply(&conn, &Reply::Error(e));
+        return;
+    }
 
     // Which terrestrial tuner a request for tuner 1 or `auto` may use depends
     // on the unit's tuner #1, known once the unit was opened: open it first.
@@ -540,16 +464,13 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         let mut guard = unit.tuner.locked();
         unit.open(&mut guard).and_then(|()| {
             let t = guard.as_mut().expect("opened");
-            if let Some(k) = keys.as_ref() {
-                t.with_app_keys(k.clone());
-            }
             t.set_stream_mode(if req.raw { StreamModeCfg::Raw } else { StreamModeCfg::Device });
             t.set_device_program(program);
             // The LNB supply, the attenuator / booster and the lock wait of this
             // request (each client asks with its own, e.g. two BonDriver DLLs of
             // two units), else the daemon's: set on every tune, so one client's
             // values do not stay behind for the next.
-            let d = &unit.cfg;
+            let d = &unit.defaults;
             t.set_lnb(match req.lnb {
                 Some(v) => lnb_of(v).0,
                 None if d.lnb_power => d.lnb_voltage,
@@ -566,7 +487,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
                 Ok(()) => Ok(t.signal_level_of(i)),
                 Err(e) => {
                     t.release(i);
-                    if matches!(e, dth10_core::Error::Usb(_)) {
+                    if matches!(e, dth_common::Error::Usb(_)) {
                         log::warn!("unit {}: device lost ({e}); opened again on the next request", unit.serial);
                         *guard = None;
                     }
@@ -728,53 +649,39 @@ const SCAN_WITHOUT_UNIT: Duration = Duration::from_secs(2);
 const SCAN_WITH_UNITS: Duration = Duration::from_secs(10);
 
 /// Add a unit for every supported device that is not served yet.
-fn discover(units: &Units, make_unit: &dyn Fn(&str, Family) -> Arc<Unit>) {
-    let mut found: Vec<(String, Family, String, String)> = Vec::new();
-    match UsbTransport::list_all() {
-        Ok(v) => found.extend(v.into_iter().filter_map(|d| {
-            let serial = d.serial?;
-            Some((serial, Family::Dth10, dth10_core::product_label(d.product_id), d.location))
-        })),
-        Err(e) => log::debug!("device list: {e}"),
-    }
-    match dth30::list() {
-        Ok(v) => found.extend(v.into_iter().map(|(n, d)| (n, Family::Dth30, d.product_label(), d.location))),
-        Err(e) => log::debug!("DT-H30/U2-family device list: {e}"),
+/// Builds a served unit from its name and family.
+type MakeUnit<'a> = &'a dyn Fn(&str, Arc<dyn Backend>) -> Arc<Unit>;
+
+fn discover(units: &Units, backends: &[Arc<dyn Backend>], make_unit: MakeUnit<'_>) {
+    let mut found = Vec::new();
+    for b in backends {
+        match b.units() {
+            Ok(v) => found.extend(v.into_iter().map(|u| (u, b.clone()))),
+            Err(e) => log::debug!("{} device list: {e}", b.family()),
+        }
     }
     let mut u = units.locked();
-    for (serial, family, label, location) in found {
-        if u.iter().any(|x| x.serial == serial) {
+    for (unit, backend) in found {
+        if u.iter().any(|x| x.serial == unit.name) {
             continue;
         }
-        log::info!("dth10 serve: unit {serial} ({label}) at {location}");
-        u.push(make_unit(&serial, family));
+        log::info!("dth10 serve: unit {} ({}) at {}", unit.name, unit.label, unit.location);
+        u.push(make_unit(&unit.name, backend));
     }
 }
 
-/// Where a DT-H30/U2-family unit's firmware comes from: looked for on each
-/// open, so the file may be put in place while the daemon runs.
-#[derive(Clone)]
-struct Firmware {
-    explicit: Option<PathBuf>,
-    state_dir: PathBuf,
-}
-
-impl Firmware {
-    fn load(&self) -> Result<dth30_core::vixs::Firmware, String> {
-        let Some(p) = dth30::firmware_path(self.explicit.as_deref(), &self.state_dir) else {
-            return Err(format!(
-                "the DT-H30/U2 family needs the vendor driver {} for its firmware: put it in {} or give --firmware",
-                dth30::FIRMWARE_FILE,
-                self.state_dir.display()
-            ));
-        };
-        dth30_core::vixs::Firmware::load(&p).map_err(|e| format!("firmware {}: {e}", p.display()))
+/// The backend of a unit named on the command line: the family that has a
+/// unit of that name now, a DT-H30/U2-family name, else the DTH10 series.
+fn backend_of(name: &str, backends: &[Arc<dyn Backend>]) -> Arc<dyn Backend> {
+    if let Some(b) = backends.iter().find(|b| b.units().is_ok_and(|v| v.iter().any(|u| u.name == name))) {
+        return b.clone();
     }
+    backends[usize::from(name.starts_with(UNIT_PREFIX))].clone()
 }
 
 pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     let state_dir = a.state_dir.clone().unwrap_or_else(default_state_dir);
-    let keys = Arc::new(Keys { explicit: a.app_keys.clone(), state_dir: state_dir.clone(), loaded: Mutex::new(None) });
+    let keys = Arc::new(KeyStore::new(a.app_keys.clone(), state_dir.clone()));
     if let Err(e) = keys.get() {
         log::warn!(
             "{e}; until then DTH10-series units serve only raw terrestrial streams (DT-H30/U2-family units need no key file)"
@@ -786,35 +693,41 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
         None => RecipientMode::platform_default(),
     };
     let (lnb_voltage, lnb_power) = lnb_of(a.lnb);
-    let firmware = Firmware { explicit: a.firmware.clone(), state_dir: state_dir.clone() };
-    let make_unit = |serial: &str, family: Family| -> Arc<Unit> {
-        let cfg = TunerConfig {
-            recipient,
-            serial: serial.to_owned(),
-            stream_mode: StreamModeCfg::Device,
-            device_program: DeviceProgram::First,
-            device_decrypt: true,
-            cepm_state: state_file_for(&state_dir, Some(serial)),
-            app_keys: keys.resolve(),
-            drop_filler: true,
-            read_depth: a.read_depth.unwrap_or_else(dth10_tuner::config::default_read_depth).clamp(1, 64),
-            exclusive: false,
-            log_events: true,
-            ter_lock_wait_ms: a.ter_lock_wait,
-            sat_lock_wait_ms: a.sat_lock_wait,
-            lnb_voltage,
-            lnb_power,
-            attenuator: a.attenuator,
-            booster: a.booster,
-            ..TunerConfig::default()
-        };
+    let read_depth = a.read_depth.unwrap_or_else(dth_common::stream::default_read_depth).clamp(1, 64);
+    let template = TunerConfig {
+        recipient,
+        stream_mode: StreamModeCfg::Device,
+        device_program: DeviceProgram::First,
+        device_decrypt: true,
+        drop_filler: true,
+        read_depth,
+        exclusive: false,
+        log_events: true,
+        ter_lock_wait_ms: a.ter_lock_wait,
+        sat_lock_wait_ms: a.sat_lock_wait,
+        lnb_voltage,
+        lnb_power,
+        attenuator: a.attenuator,
+        booster: a.booster,
+        ..TunerConfig::default()
+    };
+    let backends: Vec<Arc<dyn Backend>> = vec![
+        Arc::new(Dth10Backend::new(template, Some(state_dir.clone()), keys)),
+        Arc::new(Dth30Backend::new(a.firmware.clone(), state_dir.clone(), read_depth)),
+    ];
+    let defaults = Arc::new(Defaults {
+        lnb_voltage,
+        lnb_power,
+        attenuator: a.attenuator,
+        booster: a.booster,
+        ter_lock_wait_ms: a.ter_lock_wait,
+        sat_lock_wait_ms: a.sat_lock_wait,
+    });
+    let make_unit = |serial: &str, backend: Arc<dyn Backend>| -> Arc<Unit> {
         Arc::new(Unit {
             serial: serial.to_owned(),
-            family,
-            firmware: firmware.clone(),
-            cfg,
-            keys: keys.clone(),
-            recipient,
+            backend,
+            defaults: defaults.clone(),
             queues: [TsQueue::new(), TsQueue::new()],
             tuner: Mutex::new(None),
             second_ter: Mutex::new(None),
@@ -826,11 +739,11 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     let units: Units = Arc::new(Mutex::new(Vec::new()));
     let auto = a.serial.is_empty();
     if auto {
-        discover(&units, &make_unit);
+        discover(&units, &backends, &make_unit);
     } else {
         let mut u = units.locked();
         for s in &a.serial {
-            u.push(make_unit(s, Family::of_name(s)));
+            u.push(make_unit(s, backend_of(s, &backends)));
         }
     }
     // Listen first: a second daemon for the same target ends here, before it
@@ -885,7 +798,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             let interval = if units.locked().is_empty() { SCAN_WITHOUT_UNIT } else { SCAN_WITH_UNITS };
             if last_scan.elapsed() >= interval {
                 last_scan = Instant::now();
-                discover(&units, &make_unit);
+                discover(&units, &backends, &make_unit);
             }
         }
         if a.idle_exit > 0
@@ -922,22 +835,6 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn keys_are_optional_until_needed() {
-        let dir = std::env::temp_dir().join(format!("dth10-keys-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        // no file anywhere: a clear message naming the state directory
-        let none = Keys { explicit: None, state_dir: dir.clone(), loaded: Mutex::new(None) };
-        let e = none.get().unwrap_err();
-        assert!(e.contains("CoBDACom.dll") && e.contains("--app-keys"), "{e}");
-        assert!(none.loaded().is_none());
-        // a named file that is not there: its path in the message
-        let missing = dir.join("nothing.dll");
-        let named = Keys { explicit: Some(missing.clone()), state_dir: dir.clone(), loaded: Mutex::new(None) };
-        assert!(named.get().unwrap_err().contains("nothing.dll"));
-        let _ = std::fs::remove_dir(&dir);
-    }
 
     fn held(owner: u64, client: Option<&str>) -> Slot {
         Slot { owner, stop: None, client: client.map(str::to_owned), channel: "27".into() }

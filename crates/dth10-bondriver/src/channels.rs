@@ -2,12 +2,12 @@
 //!
 //! Space 0: ISDB-T (UHF 13–62ch). Space 1: BS, Space 2: CS110 (ISDB-S), four
 //! relative TS numbers per transponder. The frequency tables live in
-//! `dth10_tuner::channels`.
+//! `dth_common::channels`.
 
 use std::collections::HashMap;
 
-pub use dth10_tuner::channels::Channel;
-use dth10_tuner::channels::{BS_IF_HZ, CS_IF_HZ};
+pub use dth_common::channels::Channel;
+use dth_common::channels::{BS_IF_HZ, CS_IF_HZ};
 
 pub fn space_name(space: u32) -> Option<&'static str> {
     match space {
@@ -54,7 +54,7 @@ impl StringCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dth10_tuner::channels::System;
+    use dth_common::channels::System;
 
     #[test]
     fn spaces_map_to_channels() {

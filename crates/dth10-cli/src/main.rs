@@ -20,7 +20,7 @@
 //! BS/CS), or two TVTest windows can watch GR and BS at once.
 //!
 //! `list`, `info`, `tune` and `serve` also drive the DT-H30/U2 family
-//! (`dth10_tuner::dth30`): one terrestrial tuner, firmware from the vendor's
+//! (`dth30_backend`): one terrestrial tuner, firmware from the vendor's
 //! `BufFsUSB.sys` (`--firmware`), device mode descrambled by the unit's own
 //! B-CAS card (no application keys). Such a unit is named by its unit name
 //! (`DTH30-<product ID>` when it has no USB serial number).
@@ -37,14 +37,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use dth10_core::Device;
-use dth10_core::cepm::AppKeys;
-use dth10_core::satellite::SatelliteKit;
-use dth10_core::terrestrial::TerrestrialKit;
-use dth10_core::tlv::DeviceInformation;
-use dth10_tuner::dth30::{self, Dth30Tuner};
-use dth10_tuner::{Channel, DeviceProgram, Session, StreamModeCfg, System, TsQueue, Tuner, TunerConfig, default_tuner};
+use dth_common::{
+    Backend, Channel, DeviceProgram, Request, Session, StreamModeCfg, System, TsQueue, Unit, default_tuner,
+};
+use dth10_backend::{Dth10Backend, KeyStore, TunerConfig};
 use dth10_usb::{RecipientMode, UsbTransport};
+use dth30_backend::Dth30Backend;
 
 #[derive(Parser)]
 #[command(name = "dth10", version, about = "User-mode tuner command for the BUFFALO DTH10 series of USB TV tuners")]
@@ -76,7 +74,7 @@ enum Cmd {
     Status(stream::StatusArgs),
 }
 
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Default)]
 struct DeviceArgs {
     /// Select the device by USB serial number, or a DT-H30/U2-family unit by the unit name `list`
     /// shows (default: the first one found, the DTH10 series first; `info` shows every one).
@@ -255,27 +253,51 @@ fn init_logging(cli: &Cli) {
     let _ = b.try_init();
 }
 
+/// The backends of the families, DTH10 series first (the order the command
+/// tries them in when no unit is named), with the options of `d`. `tune`
+/// passes its own DTH10-series settings in `template`, the handshake cache
+/// directory (none with `--no-state`) and the key file.
+fn backends_with(
+    d: &DeviceArgs,
+    template: TunerConfig,
+    state_dir: PathBuf,
+    cepm_dir: Option<PathBuf>,
+    keys: Option<PathBuf>,
+) -> Vec<Arc<dyn Backend>> {
+    let read_depth = template.read_depth;
+    let keys = Arc::new(KeyStore::new(keys, state_dir.clone()));
+    let mut template = template;
+    template.recipient = recipient_mode(d);
+    vec![
+        Arc::new(Dth10Backend::new(template, cepm_dir, keys)),
+        Arc::new(Dth30Backend::new(d.firmware.clone(), state_dir, read_depth)),
+    ]
+}
+
+/// [`backends_with`] with the handshake cache in the state directory.
+fn backends(d: &DeviceArgs, template: TunerConfig, state_dir: PathBuf, keys: Option<PathBuf>) -> Vec<Arc<dyn Backend>> {
+    backends_with(d, template, state_dir.clone(), Some(state_dir), keys)
+}
+
+/// The units of every family, by family.
+fn all_units(backends: &[Arc<dyn Backend>]) -> Vec<(Arc<dyn Backend>, Unit)> {
+    let mut out = Vec::new();
+    for b in backends {
+        match b.units() {
+            Ok(v) => out.extend(v.into_iter().map(|u| (b.clone(), u))),
+            Err(e) => log::debug!("{} device list: {e}", b.family()),
+        }
+    }
+    out
+}
+
 fn list() -> Result<(), Box<dyn Error>> {
-    let found = UsbTransport::list_all()?;
-    let dth30 = dth10_tuner::dth30::list().unwrap_or_else(|e| {
-        log::debug!("DT-H30/U2-family device list: {e}");
-        Vec::new()
-    });
-    if found.is_empty() && dth30.is_empty() {
+    let units = all_units(&backends(&DeviceArgs::default(), TunerConfig::default(), default_state_dir(), None));
+    if units.is_empty() {
         println!("no supported device found (VID 0411)");
     }
-    for d in found {
-        println!(
-            "{:04x}:{:04x} {} serial {} ({})",
-            d.vendor_id,
-            d.product_id,
-            dth10_core::product_label(d.product_id),
-            d.serial.as_deref().unwrap_or("-"),
-            d.location
-        );
-    }
-    for (unit, d) in dth30 {
-        println!("{:04x}:{:04x} {} unit {unit} ({})", d.vendor_id, d.product_id, d.product_label(), d.location);
+    for (_, u) in units {
+        println!("{:04x}:{:04x} {} unit {} ({})", u.vendor_id, u.product_id, u.label, u.name, u.location);
     }
     Ok(())
 }
@@ -288,161 +310,75 @@ fn recipient_mode(d: &DeviceArgs) -> RecipientMode {
     }
 }
 
-/// Which family the device the options select belongs to.
-enum Target {
-    Dth10,
-    /// A DT-H30/U2-family unit, by its unit name.
-    Dth30(String, Box<dth30::Found>),
+/// The unit the options name (`--serial`), or the first one found (the
+/// DTH10 series first), with its family.
+fn pick(backends: &[Arc<dyn Backend>], serial: Option<&str>) -> Result<(Arc<dyn Backend>, String), Box<dyn Error>> {
+    all_units(backends)
+        .into_iter()
+        .find(|(_, u)| serial.is_none_or(|s| s == u.name))
+        .map(|(b, u)| (b, u.name))
+        .ok_or_else(|| match serial {
+            Some(s) => format!("no supported device with serial or unit name {s}").into(),
+            None => "no supported device found".into(),
+        })
 }
 
-/// The family of the device the options select: a serial number among the
-/// DTH10 series' devices, else a DT-H30/U2-family unit name; without one, a
-/// DTH10-series device when there is one, else the first DT-H30/U2-family
-/// unit. A name found nowhere goes to the DTH10 series' open, which reports it.
-fn target_of(d: &DeviceArgs) -> Result<Target, Box<dyn Error>> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    if d.device.is_some() {
-        return Ok(Target::Dth10);
-    }
-    let dth10_has = |name: Option<&str>| {
-        UsbTransport::list_all().is_ok_and(|v| v.iter().any(|f| name.is_none_or(|n| f.serial.as_deref() == Some(n))))
-    };
-    let serial = d.serial.as_deref();
-    if dth10_has(serial) {
-        return Ok(Target::Dth10);
-    }
-    Ok(match dth30::find(serial)? {
-        Some((name, found)) => Target::Dth30(name, Box::new(found)),
-        None => Target::Dth10,
-    })
+/// A device node given on the command line (Linux): always the DTH10 series.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn device_node(d: &DeviceArgs) -> Option<&Path> {
+    d.device.as_deref()
 }
 
-fn open_transport(d: &DeviceArgs) -> Result<UsbTransport, Box<dyn Error>> {
-    let mode = recipient_mode(d);
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    if let Some(p) = d.device.as_ref() {
-        return Ok(UsbTransport::open_path(p, mode)?);
-    }
-    Ok(UsbTransport::open_matching(mode, d.serial.as_deref())?)
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn device_node(_d: &DeviceArgs) -> Option<&Path> {
+    None
 }
 
-fn print_desc(index: u8, di: &DeviceInformation) {
-    let d = &di.desc;
-    // what this crate makes of the kit: tuner #1 is a satellite tuner, or a
-    // second terrestrial one on the two-tuner models
-    let role = if TerrestrialKit::<UsbTransport>::supports(d) {
-        if index == 0 { "ISDB-T" } else { "ISDB-T (second terrestrial tuner)" }
-    } else if index == 1 && SatelliteKit::<UsbTransport>::supports(d) {
-        "ISDB-S"
-    } else {
-        "not supported"
-    };
-    println!(
-        "tuner #{index}: kit {:?} model {:?} hw 0x{:x} flags 0x{:x} demod 0x{:02x} tuner 0x{:02x} IF {} Hz: {role}",
-        d.kit_name, d.model, d.hw_version, d.flags, d.demod_i2c_addr, d.tuner_i2c_addr, d.if_freq_hz
-    );
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn open_node(p: &Path, d: &DeviceArgs) -> Result<UsbTransport, Box<dyn Error>> {
+    Ok(UsbTransport::open_path(p, recipient_mode(d))?)
 }
 
-/// `info` of the device the options name, or of every supported device found
-/// (one block each, separated by a blank line). A device that cannot be opened
-/// (another program holds it) is reported and the others are still shown.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn open_node(_p: &Path, _d: &DeviceArgs) -> Result<UsbTransport, Box<dyn Error>> {
+    Err("device nodes are a Linux option".into())
+}
+
+/// `info` of the unit the options name, or of every unit found (one block
+/// each, separated by a blank line). A unit that cannot be read (another
+/// program holds it) is reported and the others are still shown.
 fn info(d: &DeviceArgs) -> Result<(), Box<dyn Error>> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    let named = d.serial.is_some() || d.device.is_some();
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let named = d.serial.is_some();
-    if named {
-        return match target_of(d)? {
-            Target::Dth10 => info_of(open_transport(d)?),
-            Target::Dth30(name, found) => info_dth30(&name, &found, d.firmware.as_deref()),
-        };
+    if let Some(p) = device_node(d) {
+        print!("{}", Dth10Backend::describe(open_node(p, d)?)?);
+        return Ok(());
     }
-    let found = UsbTransport::list_all()?;
-    let units = dth30::list().unwrap_or_else(|e| {
-        log::debug!("DT-H30/U2-family device list: {e}");
-        Vec::new()
-    });
-    if found.is_empty() && units.is_empty() {
+    let backends = backends(d, TunerConfig::default(), default_state_dir(), None);
+    if let Some(s) = d.serial.as_deref() {
+        let (b, name) = pick(&backends, Some(s))?;
+        print!("{}", b.info(&name)?);
+        return Ok(());
+    }
+    let units = all_units(&backends);
+    if units.is_empty() {
         return Err("no supported device found".into());
     }
     let mut failed = 0;
-    for (i, (name, f)) in units.iter().enumerate() {
+    for (i, (b, u)) in units.iter().enumerate() {
         if i > 0 {
             println!();
         }
-        if let Err(e) = info_dth30(name, f, d.firmware.as_deref()) {
-            failed += 1;
-            println!("error: {e}");
-        }
-    }
-    if !units.is_empty() && !found.is_empty() {
-        println!();
-    }
-    for (i, f) in found.iter().enumerate() {
-        if i > 0 {
-            println!();
-        }
-        let r = match f.open(recipient_mode(d)) {
-            Ok(t) => info_of(t),
+        match b.info(&u.name) {
+            Ok(text) => print!("{text}"),
             Err(e) => {
-                println!("model: {} ({:04x})", dth10_core::product_label(f.product_id), f.product_id);
-                println!("serial: {}", f.serial.as_deref().unwrap_or("-"));
-                Err(e.into())
+                println!("model: {} ({:04x})", u.label, u.product_id);
+                println!("unit: {}", u.name);
+                println!("error: {e}");
+                failed += 1;
             }
-        };
-        if let Err(e) = r {
-            failed += 1;
-            println!("error: {e}");
         }
     }
     if failed > 0 {
-        return Err(format!("{failed} of {} devices could not be read", found.len() + units.len()).into());
-    }
-    Ok(())
-}
-
-/// `info` of a DT-H30/U2-family unit: what [`dth30::probe`] reads (it resets
-/// the chip) and where its firmware would come from.
-fn info_dth30(name: &str, f: &dth30::Found, firmware: Option<&Path>) -> Result<(), Box<dyn Error>> {
-    println!("model: {} ({:04x})", f.product_label(), f.product_id);
-    println!("unit: {name} (serial {})", f.serial.as_deref().filter(|s| !s.is_empty()).unwrap_or("-"));
-    let state_dir = default_state_dir();
-    match dth30::firmware_path(firmware, &state_dir) {
-        Some(p) => match dth30_core::vixs::Firmware::load(&p) {
-            Ok(fw) => println!("firmware: {} (image {} bytes, verified)", p.display(), fw.len()),
-            Err(e) => println!("firmware: {}: {e}", p.display()),
-        },
-        None => println!(
-            "firmware: {} not found (put it in {} or give --firmware)",
-            dth30::FIRMWARE_FILE,
-            state_dir.display()
-        ),
-    }
-    let u = dth30::probe(f)?;
-    for (iface, addr, kind, mps) in &u.endpoints {
-        println!("endpoint: interface {iface} 0x{addr:02x} {kind} max packet {mps}");
-    }
-    println!("board: 0x{:08x} (board 0x{:02x}), front end {}", u.board_id, u.board_id as u8, u.kit);
-    Ok(())
-}
-
-fn info_of(t: UsbTransport) -> Result<(), Box<dyn Error>> {
-    println!("model: {} ({:04x})", dth10_core::product_label(t.product_id()), t.product_id());
-    println!("serial: {}", t.serial().unwrap_or("-"));
-    println!("endpoints: {:?}", t.pipes());
-    let dev0 = Device::new(t.clone());
-    let di = dev0.read_device_information()?;
-    print_desc(0, &di);
-    match dev0.firmware_version() {
-        Ok((a, b, c)) => println!("firmware: {a}.{b}.{c}"),
-        Err(e) => println!("firmware: {e}"),
-    }
-    if di.desc.flags & 1 != 0 {
-        let dev1 = Device::new(t).with_tuner_index(1);
-        match dev1.read_device_information() {
-            Ok(di1) => print_desc(1, &di1),
-            Err(e) => println!("tuner #1: {e}"),
-        }
+        return Err(format!("{failed} of {} devices could not be read", units.len()).into());
     }
     Ok(())
 }
@@ -494,38 +430,6 @@ pub(crate) fn default_state_dir() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// The application key file: `--app-keys`, `$DTH10_APP_KEYS`, `CoBDACom.dll`
-/// in the state directory, `CoBDACom.dll` next to the executable.
-pub(crate) fn app_keys_path(explicit: Option<&Path>, state_dir: &Path) -> Option<PathBuf> {
-    if let Some(p) = explicit {
-        return Some(p.to_path_buf());
-    }
-    if let Some(p) = std::env::var_os("DTH10_APP_KEYS") {
-        return Some(PathBuf::from(p));
-    }
-    let candidates = [
-        Some(state_dir.join("CoBDACom.dll")),
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("CoBDACom.dll"))),
-    ];
-    candidates.into_iter().flatten().find(|p| p.is_file())
-}
-
-/// `<state dir>/DTH10_<serial>.cepm` (the prefix tells the file's product in a
-/// folder shared with other tuners' files), with the directory created; `None`
-/// when the directory cannot be used.
-pub(crate) fn state_file_for(dir: &Path, serial: Option<&str>) -> Option<PathBuf> {
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        log::warn!("state directory {}: {e}; running without the handshake cache", dir.display());
-        return None;
-    }
-    let name: String = serial
-        .unwrap_or("device")
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    Some(dir.join(format!("DTH10_{name}.cepm")))
-}
-
 /// The tuner of `--tuner` for a channel of `system`: terrestrial channels only.
 pub(crate) fn tuner_of(tuner: Option<u8>, system: System) -> Result<usize, String> {
     match (tuner, system) {
@@ -550,14 +454,34 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
     let tuner_index = tuner_of(a.tuner, ch.system)?;
     let program = DeviceProgram::parse(&a.program).ok_or_else(|| format!("bad --program {:?}", a.program))?;
     let state_dir = a.state_dir.clone().unwrap_or_else(default_state_dir);
+    let cepm_dir = if a.no_state { None } else { Some(state_dir.clone()) };
+    let template = tune_config(a, program);
+    let raw = a.mode == Mode::Raw;
+    let req = Request { system: ch.system, tuner: tuner_index, raw };
     let queue = TsQueue::new();
-    let (mut tuner, t0) = match target_of(&a.dev)? {
-        Target::Dth10 => open_dth10(a, &ch, program, &state_dir, queue.clone())?,
-        // One terrestrial tuner: refused before the firmware start.
-        Target::Dth30(..) if ch.system == System::IsdbS => return Err("this unit has no satellite tuner".into()),
-        Target::Dth30(..) if tuner_index != 0 => return Err("this unit has one terrestrial tuner (tuner 0)".into()),
-        Target::Dth30(name, _) => open_dth30(a, &name, program, &state_dir, queue.clone())?,
+    let t0;
+    let mut tuner: Box<dyn Session> = if let Some(p) = device_node(&a.dev) {
+        let keys = Arc::new(KeyStore::new(a.app_keys.clone(), state_dir.clone()));
+        let b = Dth10Backend::new(template, cepm_dir, keys);
+        b.check("", req)?;
+        stop::install();
+        t0 = Instant::now();
+        b.open_transport(open_node(p, &a.dev)?, queue.clone())?
+    } else {
+        let backends = backends_with(&a.dev, template, state_dir.clone(), cepm_dir, a.app_keys.clone());
+        let (b, name) = pick(&backends, a.dev.serial.as_deref())?;
+        // What the unit's family needs (the key file, the firmware, a
+        // tuner it has), before the device is touched.
+        b.check(&name, req)?;
+        stop::install();
+        t0 = Instant::now();
+        b.open(&name, queue.clone())?
     };
+    tuner.set_stream_mode(if raw { StreamModeCfg::Raw } else { StreamModeCfg::Device });
+    tuner.set_device_program(program);
+    tuner.set_lock_wait_ms(System::IsdbT, a.ter_lock_wait);
+    tuner.set_lock_wait_ms(System::IsdbS, a.sat_lock_wait);
+    log::info!("device ready in {:?}", t0.elapsed());
     tuner.set_channel_on(tuner_index, &ch)?;
     log::info!("streaming {} after {:?}, C/N {:.1} dB", ch.name, t0.elapsed(), tuner.signal_level_of(tuner_index));
     let mut out: Box<dyn Write> = match a.output.as_ref() {
@@ -617,52 +541,19 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Open a DTH10-series device for `tune` (reading the application
-/// credentials first: a missing file is the likeliest setup problem).
-fn open_dth10(
-    a: &TuneArgs,
-    ch: &Channel,
-    program: DeviceProgram,
-    state_dir: &Path,
-    queue: TsQueue,
-) -> Result<(Box<dyn Session>, Instant), Box<dyn Error>> {
-    let decrypt = !a.no_decrypt;
-    // Read the application credentials before touching the device: a missing
-    // file is the most likely setup problem and should fail at once. BS/CS
-    // channels need them whatever the mode (the satellite stream only exists
-    // in device mode).
-    let need_keys = decrypt && (a.mode == Mode::Device || ch.system == System::IsdbS);
-    let (keys, keys_path) = if need_keys {
-        let path = app_keys_path(a.app_keys.as_deref(), state_dir)
-            .ok_or_else(|| format!("device mode (and every BS/CS channel) needs the vendor application's CoBDACom.dll (PCastTV3): put it in {} or give --app-keys", state_dir.display()))?;
-        let t = Instant::now();
-        let keys = AppKeys::load(&path)?;
-        log::info!(
-            "application credentials read from {} in {:?} ({} IV candidates)",
-            path.display(),
-            t.elapsed(),
-            keys.iv_candidates()
-        );
-        (Some(Arc::new(keys)), Some(path))
-    } else {
-        (None, None)
-    };
-    stop::install();
-    let t0 = Instant::now();
-    let transport = open_transport(&a.dev)?;
-    let serial = transport.serial().map(str::to_owned);
-    log::info!("device {} opened in {:?}", serial.as_deref().unwrap_or("?"), t0.elapsed());
+/// The DTH10-series settings of `tune`.
+fn tune_config(a: &TuneArgs, program: DeviceProgram) -> TunerConfig {
     let (lnb_voltage, lnb_power) = lnb_of(a.lnb);
-    let cfg = TunerConfig {
-        recipient: RecipientMode::platform_default(),
+    TunerConfig {
+        recipient: recipient_mode(&a.dev),
         serial: String::new(),
         stream_mode: if a.mode == Mode::Device { StreamModeCfg::Device } else { StreamModeCfg::Raw },
         device_program: program,
-        device_decrypt: decrypt,
-        cepm_state: if a.no_state { None } else { state_file_for(state_dir, serial.as_deref()) },
-        app_keys: keys_path,
+        device_decrypt: !a.no_decrypt,
+        cepm_state: None,
+        app_keys: None,
         drop_filler: !a.keep_filler,
-        read_depth: a.read_depth.unwrap_or_else(dth10_tuner::config::default_read_depth).clamp(1, 64),
+        read_depth: a.read_depth.unwrap_or_else(dth_common::stream::default_read_depth).clamp(1, 64),
         exclusive: true,
         log_events: false,
         ter_lock_wait_ms: a.ter_lock_wait,
@@ -675,40 +566,7 @@ fn open_dth10(
         lnb_power,
         booster: a.booster,
         sat_lock_wait_ms: a.sat_lock_wait,
-    };
-    let mut tuner = Tuner::open_with(transport, &cfg, queue)?;
-    if let Some(k) = keys {
-        tuner.with_app_keys(k);
     }
-    log::info!("device ready in {:?}", t0.elapsed());
-    Ok((Box::new(tuner), t0))
-}
-
-/// Open a DT-H30/U2-family unit for `tune` and bring its chip up.
-fn open_dth30(
-    a: &TuneArgs,
-    name: &str,
-    program: DeviceProgram,
-    state_dir: &Path,
-    queue: TsQueue,
-) -> Result<(Box<dyn Session>, Instant), Box<dyn Error>> {
-    let path = dth30::firmware_path(a.dev.firmware.as_deref(), state_dir).ok_or_else(|| {
-        format!(
-            "the DT-H30/U2 family needs the vendor driver {} for its firmware: put it in {} or give --firmware",
-            dth30::FIRMWARE_FILE,
-            state_dir.display()
-        )
-    })?;
-    let fw = dth30_core::vixs::Firmware::load(&path).map_err(|e| format!("firmware {}: {e}", path.display()))?;
-    stop::install();
-    let t0 = Instant::now();
-    let depth = a.read_depth.unwrap_or_else(dth10_tuner::config::default_read_depth).clamp(1, 64);
-    let mut t = Dth30Tuner::open(name, &fw, depth, queue)?;
-    t.set_stream_mode(if a.mode == Mode::Device { StreamModeCfg::Device } else { StreamModeCfg::Raw });
-    t.set_device_program(program);
-    t.set_lock_wait_ms(System::IsdbT, a.ter_lock_wait);
-    log::info!("unit {name} ready in {:?}", t0.elapsed());
-    Ok((Box::new(t), t0))
 }
 
 #[cfg(test)]
@@ -743,15 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn state_file_name() {
-        let dir = std::env::temp_dir().join("dth10-test-state");
-        assert_eq!(
-            state_file_for(&dir, Some("04110199-1108 22N0326")),
-            Some(dir.join("DTH10_04110199-1108_22N0326.cepm"))
-        );
-        let _ = std::fs::remove_dir(&dir);
-        let a = args(&["tune", "-c", "27", "--app-keys", "k.dll"]);
-        assert_eq!(app_keys_path(a.app_keys.as_deref(), &dir), Some(PathBuf::from("k.dll")));
+    fn lnb_values() {
         assert_eq!(lnb_of(0), (0, false));
         assert_eq!(lnb_of(11), (110, true));
         assert_eq!(lnb_of(150), (150, true));

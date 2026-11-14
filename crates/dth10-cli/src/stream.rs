@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use clap::Args;
 
 use crate::{ChannelArgs, Mode, channel_of, stop};
-use dth10_tuner::System;
-use dth10_tuner::ipc::{Conn, Target};
-use dth10_tuner::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice};
+use dth_common::System;
+use dth_proto::ipc::{Conn, Target};
+use dth_proto::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice};
 
 #[derive(Args)]
 pub struct StreamArgs {
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn tuner_is_optional() {
-        use dth10_tuner::proto::TunerChoice;
+        use dth_proto::proto::TunerChoice;
         assert_eq!(args(&["stream", "-c", "27"]).tuner, None, "no key: tuner 0");
         assert_eq!(args(&["stream", "-c", "27", "--tuner", "1"]).tuner, Some(TunerChoice::Index(1)));
         assert_eq!(args(&["stream", "-c", "27", "--tuner", "auto"]).tuner, Some(TunerChoice::Auto));

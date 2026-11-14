@@ -207,6 +207,15 @@ fn split_tp_slot(s: &str) -> Option<(u8, u8)> {
     Some((tp.parse().ok()?, slot.parse().ok()?))
 }
 
+/// The tuner a channel of `system` goes to by default: terrestrial channels
+/// to tuner #0, satellite channels to the satellite tuner (#1).
+pub fn default_tuner(system: System) -> usize {
+    match system {
+        System::IsdbT => 0,
+        System::IsdbS => 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

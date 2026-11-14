@@ -55,8 +55,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Mutex, Once};
 
 use config::Config;
-use dth10_core::LockExt;
-use dth10_tuner::TsQueue;
+use dth_common::LockExt;
+use dth_common::TsQueue;
 
 #[cfg(target_arch = "x86")]
 macro_rules! bon_abi {

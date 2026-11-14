@@ -12,9 +12,8 @@ name = "BonDriver_DTH10"
 crate-type = ["cdylib"]
 
 [dependencies]
-dth10-core.workspace = true
-dth10-usb.workspace = true
-dth10-tuner.workspace = true
+dth-common.workspace = true
+dth-proto.workspace = true
 log.workspace = true
 env_logger.workspace = true
 

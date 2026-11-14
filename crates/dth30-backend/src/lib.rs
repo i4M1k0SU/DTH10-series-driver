@@ -1,6 +1,6 @@
-//! The DT-H30/U2 family (DT-H30/U2, DT-H50/U2, DT-H50/U2W: a ViXS XCode2
-//! behind a PLX NET2280, `dth30-core`) behind [`Session`], for
-//! `dth10 serve`.
+//! The DT-H30/U2 family (DT-H30/U2, DT-H50/U2: a ViXS XCode2 behind a PLX
+//! NET2280, `dth30-core`) behind [`dth_common`]'s [`Backend`]
+//! ([`Dth30Backend`]) and [`Session`] ([`Dth30Tuner`]).
 //!
 //! The family has one terrestrial tuner. Its two TS outputs map to the
 //! stream modes:
@@ -19,22 +19,22 @@
 //! is named `DTH30-<product ID>` instead (`-2`, `-3`, ... for further units
 //! of the same product, in USB location order) ([`list`]).
 
-use std::path::Path;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dth10_core::{Error, Result};
+use dth_common::{
+    Backend, Channel, DeviceProgram, Error, Request, Result, Session, StreamModeCfg, System, TsQueue, Unit,
+};
 use dth30_core::device::{Config as DevConfig, Dth30, StreamInfo};
 use dth30_core::psi::{ProgramScanner, ProgramSpec};
 use dth30_core::vixs::stream::{card_state, is_cdxm_packet, parse_generic_block};
 use dth30_core::vixs::{Firmware, Options};
 pub use dth30_usb::Found;
 use dth30_usb::{Net2280Usb, StreamReader};
-
-use crate::session::Session;
-use crate::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue};
 
 /// File name of the vendor driver the firmware is taken from.
 pub const FIRMWARE_FILE: &str = "BufFsUSB.sys";
@@ -130,6 +130,95 @@ pub fn firmware_path(explicit: Option<&Path>, state_dir: &Path) -> Option<std::p
         std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(FIRMWARE_FILE))),
     ];
     candidates.into_iter().flatten().find(|p| p.is_file())
+}
+
+/// The family as a [`Backend`]: units by [`list`], the firmware looked
+/// for on each open ([`firmware_path`]).
+pub struct Dth30Backend {
+    firmware: Option<PathBuf>,
+    state_dir: PathBuf,
+    read_depth: usize,
+}
+
+impl Dth30Backend {
+    /// `firmware`: the vendor driver given on the command line, if any;
+    /// `state_dir`: where else it is looked for; `read_depth`: bulk reads in
+    /// flight per stream.
+    pub fn new(firmware: Option<PathBuf>, state_dir: PathBuf, read_depth: usize) -> Self {
+        Self { firmware, state_dir, read_depth }
+    }
+
+    fn firmware(&self) -> std::result::Result<PathBuf, String> {
+        firmware_path(self.firmware.as_deref(), &self.state_dir).ok_or_else(|| {
+            format!(
+                "the DT-H30/U2 family needs the vendor driver {FIRMWARE_FILE} for its firmware: put it in {} or give --firmware",
+                self.state_dir.display()
+            )
+        })
+    }
+}
+
+impl Backend for Dth30Backend {
+    fn family(&self) -> &'static str {
+        "DT-H30/U2 family"
+    }
+
+    fn units(&self) -> Result<Vec<Unit>> {
+        Ok(list()?
+            .into_iter()
+            .map(|(name, f)| Unit {
+                name,
+                vendor_id: f.vendor_id,
+                product_id: f.product_id,
+                label: f.product_label(),
+                location: f.location,
+            })
+            .collect())
+    }
+
+    /// One terrestrial tuner, and the firmware file.
+    fn check(&self, _name: &str, req: Request) -> std::result::Result<(), String> {
+        if req.system == System::IsdbS {
+            return Err("this unit has no satellite tuner".into());
+        }
+        if req.tuner != 0 {
+            return Err("this unit has one terrestrial tuner (tuner 0)".into());
+        }
+        self.firmware().map(|_| ())
+    }
+
+    fn open(&self, name: &str, queue: TsQueue) -> Result<Box<dyn Session>> {
+        let path = self.firmware().map_err(Error::Unsupported)?;
+        let fw = Firmware::load(&path).map_err(|e| Error::Unsupported(format!("firmware {}: {e}", path.display())))?;
+        Ok(Box::new(Dth30Tuner::open(name, &fw, self.read_depth, queue)?))
+    }
+
+    /// The firmware source and what [`probe`] reads (which resets the chip).
+    fn info(&self, name: &str) -> Result<String> {
+        let (name, f) = find(Some(name))?.ok_or_else(|| Error::Usb(format!("no DT-H30/U2-family unit {name}")))?;
+        let mut s = String::new();
+        let _ = writeln!(s, "model: {} ({:04x})", f.product_label(), f.product_id);
+        let _ = writeln!(s, "unit: {name} (serial {})", f.serial.as_deref().filter(|v| !v.is_empty()).unwrap_or("-"));
+        match self.firmware() {
+            Ok(p) => match Firmware::load(&p) {
+                Ok(fw) => {
+                    let _ = writeln!(s, "firmware: {} (image {} bytes, verified)", p.display(), fw.len());
+                }
+                Err(e) => {
+                    let _ = writeln!(s, "firmware: {}: {e}", p.display());
+                }
+            },
+            Err(e) => {
+                let _ = writeln!(s, "firmware: {e}");
+            }
+        }
+        let u = probe(&f)?;
+        for (iface, addr, kind, mps) in &u.endpoints {
+            let _ = writeln!(s, "endpoint: interface {iface} 0x{addr:02x} {kind} max packet {mps}");
+        }
+        let _ = writeln!(s, "board: 0x{:08x} (board 0x{:02x}), front end {}", u.board_id, u.board_id as u8, u.kit);
+        Ok(s)
+    }
 }
 
 /// One opened unit of the family.
@@ -389,10 +478,6 @@ impl Session for Dth30Tuner {
         if tuner == 0 {
             self.queue = queue;
         }
-    }
-    /// The firmware descrambles with the card: no link decryption.
-    fn needs_app_keys(&self, _raw: bool, _system: System) -> bool {
-        false
     }
     fn has_second_terrestrial(&self) -> bool {
         false

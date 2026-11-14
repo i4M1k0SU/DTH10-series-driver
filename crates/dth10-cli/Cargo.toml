@@ -14,10 +14,12 @@ name = "dth10"
 path = "src/main.rs"
 
 [dependencies]
+dth-common.workspace = true
+dth-proto.workspace = true
 dth10-core.workspace = true
 dth10-usb.workspace = true
-dth10-tuner.workspace = true
-dth30-core.workspace = true
+dth10-backend.workspace = true
+dth30-backend.workspace = true
 log.workspace = true
 env_logger.workspace = true
 clap.workspace = true

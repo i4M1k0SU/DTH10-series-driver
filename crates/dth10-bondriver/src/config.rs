@@ -1,10 +1,12 @@
 //! Settings read from `<DLL name>.ini` next to the DLL (TVTest convention),
 //! via `GetPrivateProfileStringW` so the file format matches other BonDrivers.
-//! The tuner-related keys map onto [`TunerConfig`] (docs/30).
+//! The tuner-related keys map onto [`Tuning`], what the DLL asks the server
+//! for with each stream request (docs/30).
 //!
-//! Some [`TunerConfig`] fields are deliberately not read from the ini: each has
-//! one working value on every unit of the series, so the DLL always uses the
-//! default (the `dth10` command keeps options for most of them, for diagnostics):
+//! Some of the server's DTH10-series settings are deliberately not in the
+//! ini: each has one working value on every unit of the series, so the
+//! server the DLL starts always uses it (the `dth10` command keeps options
+//! for most of them, for diagnostics):
 //! * `recipient`: the device recipient, the only one WinUSB lets through for
 //!   this protocol's `wIndex` arguments (docs/30); the DLL is Windows-only.
 //! * `device_decrypt`: on. Without the link decryption the device-mode stream
@@ -38,8 +40,8 @@
 
 use std::path::{Path, PathBuf};
 
-use dth10_tuner::config::{DeviceProgram, StreamModeCfg, TunerConfig, parse_num};
-use dth10_tuner::proto::TunerChoice;
+use dth_common::stream::{DeviceProgram, StreamModeCfg, parse_num};
+use dth_proto::proto::TunerChoice;
 
 use crate::client::ServerConfig;
 use windows_sys::Win32::System::LibraryLoader::{
@@ -48,13 +50,58 @@ use windows_sys::Win32::System::LibraryLoader::{
 };
 use windows_sys::Win32::System::WindowsProgramming::GetPrivateProfileStringW;
 
+/// The `[Device]`, `[Stream]`, `[ISDB-T]` and `[ISDB-S]` keys: what the DLL
+/// asks the server for with every stream request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tuning {
+    /// `[Device] Serial`: the unit (USB serial number or unit name; empty = the only one).
+    pub serial: String,
+    /// `[Stream] Mode = raw | device`
+    pub stream_mode: StreamModeCfg,
+    /// `[Stream] Program = first | all | <service id>`
+    pub device_program: DeviceProgram,
+    /// The key file the server is pointed at (`CoBDACom.dll` next to the DLL).
+    pub app_keys: Option<PathBuf>,
+    /// `[ISDB-T] LockWaitMs`
+    pub ter_lock_wait_ms: u64,
+    /// `[ISDB-T] Attenuator`
+    pub attenuator: bool,
+    /// `[ISDB-S] LnbVoltage`: 0, 110 or 150 (x 0.1 V)
+    pub lnb_voltage: u32,
+    /// `[ISDB-S] LnbPower`
+    pub lnb_power: bool,
+    /// `[ISDB-S] Booster`
+    pub booster: bool,
+    /// `[ISDB-S] LockWaitMs`
+    pub sat_lock_wait_ms: u64,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Tuning {
+            serial: String::new(),
+            // Device mode: the DLL shows BS/CS by default, and one raw tune of the
+            // terrestrial stream would stop them until a power cycle (docs/40).
+            stream_mode: StreamModeCfg::Device,
+            device_program: DeviceProgram::First,
+            app_keys: None,
+            ter_lock_wait_ms: 1200,
+            attenuator: false,
+            lnb_voltage: 150,
+            lnb_power: false,
+            booster: false,
+            sat_lock_wait_ms: 1500,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub ini_path: Option<PathBuf>,
     /// The folder of the DLL (the server executable and its log live there).
     pub dll_dir: Option<PathBuf>,
     /// `[Device]`, `[Stream]`, `[ISDB-T]`, `[ISDB-S]` keys.
-    pub tuner: TunerConfig,
+    pub tuner: Tuning,
     /// `[Device] Spaces`: the tuning spaces this DLL shows, as indices of
     /// `channels::space_name` (0 = terrestrial, 1 = BS, 2 = CS110); all by default.
     pub spaces: Vec<u32>,
@@ -74,9 +121,7 @@ impl Default for Config {
         Config {
             ini_path: None,
             dll_dir: None,
-            // Device mode: the DLL shows BS/CS by default, and one raw tune of the
-            // terrestrial stream would stop them until a power cycle (docs/40).
-            tuner: TunerConfig { stream_mode: StreamModeCfg::Device, ..TunerConfig::default() },
+            tuner: Tuning::default(),
             spaces: vec![0, 1, 2],
             ter_tuner: TunerChoice::Auto,
             server: ServerConfig::default(),
@@ -226,7 +271,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dth10_usb::RecipientMode;
 
     #[test]
     fn spaces_parse() {
@@ -252,18 +296,6 @@ mod tests {
         (c, dir)
     }
 
-    /// The settings every unit of the series shares: not in the ini at all.
-    fn assert_fixed(t: &TunerConfig) {
-        // the device recipient (the DLL is Windows-only), link decryption,
-        // filler dropped, 6 MHz, satellite TS on path #1 / auto EP, the
-        // satellite I2C path from the device's descriptor, no own cache file
-        assert_eq!(t.recipient, RecipientMode::Device);
-        assert!(t.device_decrypt && t.drop_filler);
-        assert_eq!((t.ter_bandwidth_hz, t.sat_stream_path, t.sat_endpoint), (6_000_000, 1, 0));
-        assert_eq!(t.sat_i2c_path, None);
-        assert_eq!(t.cepm_state, None);
-    }
-
     /// Without an ini: the defaults, with the key file next to the DLL.
     #[test]
     fn no_ini_gives_the_defaults() {
@@ -282,7 +314,6 @@ mod tests {
         assert_eq!((t.attenuator, t.booster), (false, false));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (5, 5));
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("warn", ""));
-        assert_fixed(t);
     }
 
     /// The ini template shipped with the DLL sets every key to its default:
@@ -309,7 +340,6 @@ mod tests {
             (d.server.idle_exit_secs, d.server.start_timeout_secs)
         );
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), (d.log_level.as_str(), d.log_file.as_str()));
-        assert_fixed(t);
     }
 
     /// Every key the DLL reads, by section: the shipped template must list
@@ -371,7 +401,6 @@ mod tests {
         assert_eq!((t.attenuator, t.booster), (true, true));
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("debug", "C:\\logs\\bon.log"));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (9, 7));
-        assert_fixed(t);
     }
 
     #[test]
@@ -437,7 +466,10 @@ mod tests {
         assert_eq!(c.tuner.app_keys, Some(dir.join("CoBDACom.dll")));
         // the old [Helper] section and ReadDepth are not read
         assert_eq!(c.server.idle_exit_secs, 5);
-        assert_eq!(c.tuner.read_depth, TunerConfig::default().read_depth);
-        assert_fixed(&c.tuner);
+        // nothing else of the tuning comes from the retired keys
+        assert_eq!(
+            c.tuner,
+            Tuning { serial: "SN1".into(), app_keys: Some(dir.join("CoBDACom.dll")), ..Tuning::default() }
+        );
     }
 }
