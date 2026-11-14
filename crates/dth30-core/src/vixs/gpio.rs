@@ -5,7 +5,7 @@
 //! LED, bit 2 (0xB4) or bit 4 (0xC6) is set while the tuner is not in use.
 //! Board 0xBB uses bit 2 to select one of its two front ends instead.
 //!
-//! Not verified on hardware.
+//! Checked on a DT-H50/U2 (board 0xB4); the other boards are unverified.
 
 use super::mmr::{BOARD_ID, Chip};
 use crate::Result;

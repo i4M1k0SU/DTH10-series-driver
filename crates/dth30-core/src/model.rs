@@ -2,7 +2,7 @@
 //!
 //! The USB product ID names the product; which tuner board it carries is
 //! only known from the ViXS board-ID register (see [`crate::vixs`]). All of
-//! these are unverified on hardware.
+//! these but the DT-H50/U2 (board 0xB4) are unverified on hardware.
 
 /// BUFFALO's USB vendor ID.
 pub const VENDOR_ID: u16 = 0x0411;

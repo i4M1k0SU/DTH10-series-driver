@@ -14,7 +14,7 @@
 //! the SDRAM address of nine words in 0x3040; the host answers by writing
 //! those two values back to 0x3038 / 0x3024.
 //!
-//! Not verified on hardware.
+//! Checked on a DT-H50/U2 (board 0xB4); the other boards are unverified.
 
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,8 @@ pub mod m2h {
     pub const DATA_READY: u32 = 0x0C;
     /// `txc_mips_strm_stat`: stream state; 6 = ready to close.
     pub const STREAM_STATUS: u32 = 0x0E;
+    /// `txc_write_input_done`: an input (function 11) was consumed.
+    pub const INPUT_DONE: u32 = 0x0F;
 }
 
 /// Message IDs at or above this are refused with status 5.
@@ -194,8 +196,8 @@ pub struct M2hMessage {
 /// Handler for firmware messages: returns whether it handled the message.
 /// Unhandled messages are refused the way the vendor refuses messages
 /// without a registered handler. The handler must not acknowledge. It does
-/// not see [`m2h::DATA_READY`] and [`m2h::STREAM_STATUS`], which the host
-/// answers itself.
+/// not see [`m2h::DATA_READY`], [`m2h::STREAM_STATUS`] and
+/// [`m2h::INPUT_DONE`], which the host answers itself.
 pub type M2hHandler<B> = Box<dyn FnMut(&mut Chip<B>, &M2hMessage) -> Result<bool> + Send>;
 
 /// How command completion is waited for.
@@ -407,7 +409,7 @@ impl<B: RemotePci> Vixs<B> {
         mips::ack_m2h(&mut self.chip)
     }
 
-    /// The vendor's handling of the two stream messages (2-vixs-bringup.md
+    /// The vendor's handling of the three stream messages (2-vixs-bringup.md
     /// §5.3): word 5 is the FB address of a descriptor whose first word is
     /// the stream handle the host gave in the OPEN; the host must replace it
     /// with the firmware's handle, which the firmware then follows as a
@@ -417,7 +419,7 @@ impl<B: RemotePci> Vixs<B> {
     /// it does not come, and over USB it has not been seen. Returns the
     /// result word, or `None` for other messages.
     fn stream_message(&mut self, msg: &M2hMessage) -> Result<Option<u32>> {
-        if msg.id != m2h::DATA_READY && msg.id != m2h::STREAM_STATUS {
+        if ![m2h::DATA_READY, m2h::STREAM_STATUS, m2h::INPUT_DONE].contains(&msg.id) {
             return Ok(None);
         }
         let desc = msg.words[5];
@@ -427,8 +429,8 @@ impl<B: RemotePci> Vixs<B> {
             return Ok(Some(2));
         };
         self.chip.fb_write(desc, s.phys)?;
-        if msg.id == m2h::DATA_READY {
-            log::trace!("ViXS data ready for stream {host:#x}");
+        if msg.id != m2h::STREAM_STATUS {
+            log::trace!("ViXS message {:#x} for stream {host:#x}", msg.id);
             return Ok(Some(RESULT_OK));
         }
         let state = self.chip.fb_read(desc + 8)?;

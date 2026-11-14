@@ -15,7 +15,7 @@
 //! [`I2c::write_read`]. The vendor itself never sends more than 64 bytes, so
 //! the continuation transactions (no START) are unverified.
 //!
-//! Not verified on hardware.
+//! Checked on a DT-H50/U2 (board 0xB4) with its TOSHIBA front end.
 
 use core::time::Duration;
 

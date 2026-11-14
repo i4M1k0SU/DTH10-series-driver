@@ -8,7 +8,7 @@
 //! budget is shared by all entries). The vendor polls without bound; here
 //! each entry gives up after [`READ_LIMIT`] reads.
 //!
-//! Not verified on hardware.
+//! Checked on a DT-H50/U2 (board 0xB4); the other boards are unverified.
 
 use super::mmr::{Chip, INT_ENABLE};
 use crate::bus::RemotePci;

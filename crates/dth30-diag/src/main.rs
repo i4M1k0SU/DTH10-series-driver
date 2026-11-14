@@ -1,7 +1,7 @@
 //! Hardware diagnostics for the BUFFALO DT-H30/U2 family (DT-H30/U2,
 //! DT-H50/U2, DT-H50/U2W): a ViXS XCode2 chip behind a PLX NET2280.
 //!
-//! A developer tool, unverified on hardware. Every command that touches the
+//! A developer tool, checked on a DT-H50/U2 only. Every command that touches the
 //! device opens it afresh: `probe` only resets the NET2280 side and reads
 //! the chip's identity (no firmware), the others first bring the chip up
 //! with the firmware from the user's own vendor driver file.
@@ -20,7 +20,7 @@ use dth30_core::frontend::StdSleep;
 use dth30_core::frontend::regs::{read_regs, write_regs};
 use dth30_core::model;
 use dth30_core::psi::ProgramScanner;
-use dth30_core::vixs::stream::{CasMode, parse_generic_block};
+use dth30_core::vixs::stream::{CasMode, card_state, parse_generic_block};
 use dth30_core::vixs::{Firmware, Options, Vixs};
 use dth30_usb::{LocalSpace, Net2280Usb, StreamReader};
 
@@ -33,7 +33,7 @@ const FW_ENV: &str = "DTH30_FIRMWARE";
 #[command(
     name = "dth30-diag",
     version,
-    about = "Hardware diagnostics for the BUFFALO DT-H30/U2 family of USB TV tuners (developer tool, unverified on hardware)"
+    about = "Hardware diagnostics for the BUFFALO DT-H30/U2 family of USB TV tuners (developer tool, checked on a DT-H50/U2 only)"
 )]
 struct Cli {
     /// Select the device by USB serial number (default: the first one found).
@@ -123,8 +123,9 @@ enum Cmd {
         /// Record the Raw stream (EP 0x83, the full TS as the chip passes it) instead.
         #[arg(long)]
         raw: bool,
-        /// CAS set-up: "drm" (B-CAS DRM, the vendor's) or "plain" (non-DRM fallback).
-        #[arg(long, default_value = "drm", value_parser = parse_cas_mode)]
+        /// CAS set-up: "plain" (B-CAS, the TS comes out in the clear) or "drm" (the vendor's; the
+        /// firmware encrypts the TS again for the vendor's viewer).
+        #[arg(long, default_value = "plain", value_parser = parse_cas_mode)]
         cas: CasMode,
     },
 }
@@ -417,16 +418,19 @@ fn reader(d: &mut Dth30<Net2280Usb>, s: &StreamInfo) -> Res<StreamReader> {
 }
 
 /// Drain the CAS channel without waiting, logging each block's kind.
-fn drain_cas(r: &mut StreamReader) -> Res {
+/// Returns the card state of the last block, if any came.
+fn drain_cas(r: &mut StreamReader) -> Res<Option<u32>> {
+    let mut card = None;
     while let Some(b) = r.next(Duration::from_millis(1))? {
         match parse_generic_block(&b) {
             Some((h, body)) => {
-                log::info!("CAS block kind 0x{:x} card 0x{:x} body {} bytes", h.kind, h.card, body.len())
+                log::info!("CAS block kind 0x{:x} card 0x{:x} body {} bytes", h.kind, h.card, body.len());
+                card = Some(h.card);
             }
             None => log::info!("CAS block of {} bytes", b.len()),
         }
     }
-    Ok(())
+    Ok(card)
 }
 
 /// Counts TS packets and those whose transport_scrambling_control is set.
@@ -468,6 +472,19 @@ fn record(
     let mut d = tune(serial, a, cas)?;
     let cas_info = d.open_cas()?;
     let mut cas_rd = reader(&mut d, &cas_info)?;
+    // The card was reset with the open; the firmware descrambles once it
+    // reports the card activated.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut card = 0;
+    while card & card_state::ACTIVATED == 0 && Instant::now() < deadline {
+        card = drain_cas(&mut cas_rd)?.unwrap_or(card);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if card & card_state::ACTIVATED != 0 {
+        println!("B-CAS card activated (state 0x{card:x})");
+    } else {
+        println!("B-CAS card not activated within 5 s (state 0x{card:x}); the TS will stay scrambled");
+    }
     let raw_info = d.open_raw()?;
     let mut raw_rd = reader(&mut d, &raw_info)?;
     let mut out = std::fs::File::create(output)?;

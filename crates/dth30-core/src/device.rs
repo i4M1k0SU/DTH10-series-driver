@@ -25,8 +25,9 @@
 //! is closed (the firmware drains it during the flush), then cancel the IN
 //! transfers and call [`Dth30::flush_endpoint_fifo`].
 //!
-//! Which [`CasMode`] yields a clear TS is unknown until tried on hardware
-//! (§7.5). Nothing here is verified on hardware.
+//! With [`CasMode::Bcas`] (the default) the Program stream comes out in the
+//! clear once the card is activated. Checked on a DT-H50/U2 (board 0xB4,
+//! TOSHIBA kit); the other boards are unverified.
 
 use core::time::Duration;
 
@@ -214,15 +215,20 @@ impl<B: RemotePci> Dth30<B> {
         self.fe.status()
     }
 
-    /// Open the CAS object with [`Config::cas_mode`]. Read the returned
-    /// endpoint continuously while it is open.
+    /// Open the CAS object with [`Config::cas_mode`] and ask for a card
+    /// reset ([`Vixs::reset_card`]). Read the returned endpoint
+    /// continuously while it is open, and wait for a block with
+    /// [`card_state::ACTIVATED`](crate::vixs::stream::card_state) before
+    /// expecting a descrambled Program stream.
     pub fn open_cas(&mut self) -> Result<StreamInfo> {
         if self.cas.is_some() {
             return Err(Error::Protocol("the CAS object is already open"));
         }
         let mode = self.cfg.cas_mode;
         let h = self.vixs_mut().open_generic(mode)?;
-        Ok(self.opened(h))
+        let info = self.opened(h.clone());
+        self.vixs_mut().reset_card(&h)?;
+        Ok(info)
     }
 
     /// Open the Raw stream (PSI / TS pass-through) on [`Config::ts_port`].
@@ -399,7 +405,7 @@ mod tests {
     use crate::vixs::i2c::{CMD_ERROR, ctrl_word};
     use crate::vixs::mmr::testutil::*;
     use crate::vixs::stream::tests::{script_cmds, sent_payload};
-    use crate::vixs::stream::{build_open_generic, build_open_psi};
+    use crate::vixs::stream::{build_card_reset, build_open_generic, build_open_psi};
     use crate::vixs::tests::{layout, opts};
 
     const T100: u32 = 415 | 100 << 16;
@@ -517,9 +523,20 @@ mod tests {
         let mut d = device(0xB4, Config::default());
         script_cmds(
             d.vixs_mut(),
-            &[(25, 0, 1), (8, 1, 1), (8, 2, 1), (10, 3, 1), (9, 2, 1), (10, 4, 1), (9, 1, 1), (26, 0, 1), (24, 5, 1)],
+            &[
+                (25, 0, 1),
+                (11, 1, 1),
+                (8, 2, 1),
+                (8, 3, 1),
+                (10, 4, 1),
+                (9, 3, 1),
+                (10, 5, 1),
+                (9, 2, 1),
+                (26, 0, 1),
+                (24, 6, 1),
+            ],
         );
-        script_handles(&mut d, &[(0, 0, 0xCA5), (1, 0x18, 0xAA7), (2, 0x18, 0x9E0)]);
+        script_handles(&mut d, &[(0, 0, 0xCA5), (2, 0x18, 0xAA7), (3, 0x18, 0x9E0)]);
         bus(&mut d).clear();
 
         let cas = d.open_cas().unwrap();
@@ -539,13 +556,15 @@ mod tests {
         assert_eq!((pn.endpoint, pn.transfer_len, pn.phys), (0x84, 48128, 0x9E0));
 
         let m = bus(&mut d);
-        assert_eq!(sent_payload(m, 0)[..0x530], build_open_generic(1, CasMode::BcasDrm));
-        assert_eq!(sent_payload(m, 1)[..0x1198], build_open_psi(2, 0));
-        let p = sent_payload(m, 2);
+        assert_eq!(sent_payload(m, 0)[..0x530], build_open_generic(1, CasMode::Bcas));
+        // The card reset right after the CAS open.
+        assert_eq!(sent_payload(m, 1)[..0x2DC], build_card_reset(0xCA5));
+        assert_eq!(sent_payload(m, 2)[..0x1198], build_open_psi(2, 0));
+        let p = sent_payload(m, 3);
         assert_eq!((w(&p, 0x18), w(&p, 0x20), w(&p, 0x28)), (3, 0xCA5, 0xAA7));
         assert_eq!((w(&p, 0x7C), w(&p, 0xC08), w(&p, 0xC40), w(&p, 0xC70)), (0x100, 0x1FF, 0x1F0, 0x408));
         assert_eq!((w(&p, 0xEE4), w(&p, 0xEE8)), (1, 0x110));
-        assert_eq!(w(&p, 0xF2C), 16);
+        assert_eq!(w(&p, 0xF2C), 8);
         assert_eq!((w(&p, 0x1068), w(&p, 0x106C), w(&p, 0x1070)), (2, 0x100, 0x110));
         assert_eq!((w(&p, 0x10CC), w(&p, 0x10D0)), (0x1F01, 0x1F01));
         assert_eq!((w(&p, 0x112C), w(&p, 0x1130)), (2, 0x0F));
@@ -556,7 +575,7 @@ mod tests {
         assert!(d.open_raw().is_err());
         assert!(d.open_program(&spec()).is_err());
         assert!(d.tsd_config().is_err());
-        assert!(d.set_cas_mode(CasMode::Bcas).is_err());
+        assert!(d.set_cas_mode(CasMode::BcasDrm).is_err());
         assert_eq!(bus(&mut d).bulk().len(), n);
         assert_eq!(d.stream(StreamKind::Program).unwrap().phys(), 0x9E0);
 
@@ -564,7 +583,7 @@ mod tests {
         bus(&mut d).clear();
         d.close_all().unwrap();
         let funcs: Vec<(u32, u32)> = bus(&mut d).bulk().iter().map(|(_, s)| (w(s, 0x0C), w(s, 0x1C))).collect();
-        assert_eq!(funcs, [(10, 3), (9, 2), (10, 4), (9, 1), (26, 0)]);
+        assert_eq!(funcs, [(10, 4), (9, 3), (10, 5), (9, 2), (26, 0)]);
         assert!([StreamKind::Generic, StreamKind::Raw, StreamKind::Program].iter().all(|&k| d.stream(k).is_none()));
         assert!((0..MAX_SLOTS).all(|i| !d.vixs_mut().ring().unwrap().is_reserved(i)));
         d.close_program().unwrap(); // nothing open: nothing sent
@@ -588,18 +607,18 @@ mod tests {
     }
 
     #[test]
-    fn non_drm_mode() {
-        let cfg = Config { cas_mode: CasMode::Bcas, ts_port: 1, ..Config::default() };
+    fn drm_mode() {
+        let cfg = Config { cas_mode: CasMode::BcasDrm, ts_port: 1, ..Config::default() };
         let mut d = device(0xB4, cfg);
-        script_cmds(d.vixs_mut(), &[(25, 0, 1), (8, 1, 1), (26, 0, 1)]);
+        script_cmds(d.vixs_mut(), &[(25, 0, 1), (11, 1, 1), (8, 2, 1), (26, 0, 1)]);
         d.open_cas().unwrap();
         d.open_program(&spec()).unwrap();
         let m = bus(&mut d);
-        assert_eq!(w(&sent_payload(m, 0), 0x08), 16);
-        let p = sent_payload(m, 1);
-        assert_eq!((w(&p, 0xF2C), w(&p, 0x08), w(&p, 0x10), w(&p, 0x28)), (8, 1, 1, 0));
+        assert_eq!(w(&sent_payload(m, 0), 0x08), 32);
+        let p = sent_payload(m, 2);
+        assert_eq!((w(&p, 0xF2C), w(&p, 0x08), w(&p, 0x10), w(&p, 0x28)), (16, 1, 1, 0));
         // Switching back needs the CAS object closed (the Program stream too).
         d.close_cas().unwrap();
-        assert!(d.set_cas_mode(CasMode::BcasDrm).is_err());
+        assert!(d.set_cas_mode(CasMode::Bcas).is_err());
     }
 }

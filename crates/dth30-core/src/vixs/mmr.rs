@@ -15,7 +15,7 @@
 //!
 //! The FB window is 1 MB of SDRAM selected by RBM_SWAP (0x43C) bits 14:8.
 //!
-//! Not verified on hardware.
+//! Checked on a DT-H50/U2 (board 0xB4); the other boards are unverified.
 
 use core::time::Duration;
 

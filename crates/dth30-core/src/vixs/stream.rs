@@ -23,10 +23,9 @@
 //! does not clear its slots (§0.3), so the only intended difference is that
 //! fields it leaves unwritten are zero here. The firmware overwrites the
 //! stream-handle field of an OPEN with its own handle; only that word is
-//! read back (§1.2). Which [`CasMode`] yields a clear TS is not known
-//! (§7.5).
+//! read back (§1.2). [`CasMode::Bcas`] yields a clear TS (see [`CasMode`]).
 //!
-//! Nothing here is verified on hardware.
+//! Checked on a DT-H50/U2: the opens, card reset, flush and close.
 
 use super::Vixs;
 use super::cmd::{self, func};
@@ -73,18 +72,19 @@ pub const MAX_AAC: usize = 2;
 pub const NO_VIDEO_PID: u16 = 0xFFFF;
 
 /// The CAS set-up, a pair of the generic open's mode (+0x08) and the Program
-/// open's secured mode (+0xF2C). The vendor's filter always uses
-/// [`CasMode::BcasDrm`]; the kernel and the filter's own builder also accept
-/// [`CasMode::Bcas`] (§0.5, §7.3). Which one gives a clear TS has to be
-/// tried on hardware (§7.5).
+/// open's secured mode (+0xF2C). In both the firmware descrambles with the
+/// card once it is activated ([`Vixs::reset_card`]). With
+/// [`CasMode::Bcas`] the Program stream comes out in the clear (seen on a
+/// DT-H50/U2). With [`CasMode::BcasDrm`], which the vendor's filter always
+/// uses, the firmware encrypts it again for the vendor's viewer (keys only
+/// through the vendor's SECODE; not supported here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CasMode {
     /// B-CAS with the "DRM" hand-off: generic mode 32, secured mode 16 (the
-    /// vendor default).
-    #[default]
+    /// vendor's).
     BcasDrm,
-    /// Plain B-CAS: generic mode 16, secured mode 8 (non-DRM fallback,
-    /// never used by the vendor).
+    /// Plain B-CAS: generic mode 16, secured mode 8.
+    #[default]
     Bcas,
 }
 
@@ -419,6 +419,30 @@ pub fn build_flush(phys: u32) -> [u8; FLUSH_LEN] {
     b
 }
 
+/// Input kind (+0xA0) of a request to the CAS object (the kernel's mapping
+/// of the filter's class 0x800000).
+pub const INPUT_KIND_CAS: u32 = 0x1_0000;
+/// CAS request (+0xB8): reset the card.
+pub const CAS_REQUEST_RESET: u32 = 16;
+/// Size of the input payload sent (the fields used end before 0x2DC).
+pub const INPUT_LEN: usize = 0x2DC;
+
+/// Function 11 (input) with the vendor filter's card-reset request
+/// (6-stream-payloads.md §7.2): the CAS object's handle, input kind
+/// 0x10000, length 512 (one byte rounded up), request 16, +0x1BC = 1 and
+/// a data length of 1. The byte itself is not delivered over USB; the
+/// firmware resets the card all the same.
+pub fn build_card_reset(phys: u32) -> [u8; INPUT_LEN] {
+    let mut b = [0u8; INPUT_LEN];
+    put(&mut b, 0x000, phys);
+    put(&mut b, 0x0A0, INPUT_KIND_CAS);
+    put(&mut b, 0x0B0, 512);
+    put(&mut b, 0x0B8, CAS_REQUEST_RESET);
+    put(&mut b, 0x1BC, 1);
+    put(&mut b, 0x1C0, 1);
+    b
+}
+
 /// Function 9: close a Raw or Program stream. The OPEN payload is sent
 /// again with the handle in the first two words (§6.4).
 pub fn build_close(open: &[u8; OPEN_LEN], phys: u32) -> [u8; OPEN_LEN] {
@@ -624,6 +648,23 @@ impl<B: RemotePci> Vixs<B> {
         self.open_stream(StreamKind::Generic, cookie, func::OPEN_GENERIC, p)
     }
 
+    /// Ask the firmware to reset the B-CAS card (function 11 on the CAS
+    /// object), as the vendor's filter does right after opening it. The
+    /// firmware then initialises the card itself; a generic block with
+    /// [`card_state::ACTIVATED`] follows on the CAS endpoint, and only
+    /// after that does it descramble.
+    pub fn reset_card(&mut self, cas: &StreamHandle) -> Result<()> {
+        if cas.kind != StreamKind::Generic {
+            return Err(Error::Protocol("the card reset goes to the CAS object"));
+        }
+        let r = self.send_cmd(func::INPUT, &build_card_reset(cas.phys))?;
+        if !r.ok() {
+            log::error!("card reset request failed with status {}", r.status);
+            return Err(Error::Protocol("ViXS card reset refused"));
+        }
+        Ok(())
+    }
+
     /// Open the Raw stream (function 8, kind 1) on TS port `ts_port`.
     pub fn open_psi(&mut self, ts_port: u32) -> Result<StreamHandle> {
         let cookie = self.new_cookie();
@@ -728,9 +769,17 @@ pub(crate) mod tests {
 
     #[test]
     fn cas_modes() {
-        assert_eq!(CasMode::default(), CasMode::BcasDrm);
+        assert_eq!(CasMode::default(), CasMode::Bcas);
         assert_eq!((CasMode::BcasDrm.generic_mode(), CasMode::BcasDrm.secured_mode()), (32, 16));
         assert_eq!((CasMode::Bcas.generic_mode(), CasMode::Bcas.secured_mode()), (16, 8));
+    }
+
+    #[test]
+    fn card_reset_payload() {
+        let b = build_card_reset(0xA02B_F010);
+        only(&b, &[0x000, 0x0A0, 0x0B0, 0x0B8, 0x1BC, 0x1C0]);
+        assert_eq!((w(&b, 0), w(&b, 0xA0), w(&b, 0xB0), w(&b, 0xB8)), (0xA02B_F010, 0x1_0000, 512, 16));
+        assert_eq!((w(&b, 0x1BC), w(&b, 0x1C0)), (1, 1));
     }
 
     #[test]
