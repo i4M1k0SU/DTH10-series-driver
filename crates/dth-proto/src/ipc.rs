@@ -1,4 +1,4 @@
-//! Where `dth10 serve` listens and its clients (`dth10 stream`, the BonDriver)
+//! Where `dth serve` listens and its clients (`dth stream`, the BonDriver)
 //! connect: a Unix domain socket, on Linux and on Windows
 //! alike (Windows has had AF_UNIX since Windows 10 1803; `socket2` exposes
 //! it on both), or, as an alternative, TCP on the loopback interface. Both
@@ -16,7 +16,7 @@ use socket2::{Domain, SockAddr, Socket, Type};
 
 /// The Unix socket used when nothing else is given on Linux.
 #[cfg(unix)]
-pub const DEFAULT_SOCKET: &str = "/run/dth10/dth10.sock";
+pub const DEFAULT_SOCKET: &str = "/run/dth/dth.sock";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -37,9 +37,10 @@ impl fmt::Display for Target {
 
 impl Target {
     /// `--socket PATH` / `--listen ADDR` (or `--connect ADDR`) of the command line,
-    /// else `$DTH10_SOCKET` / `$DTH10_LISTEN`, else the platform default: the
-    /// socket `/run/dth10/dth10.sock` on Linux, `dth10.sock` next to the
-    /// executable on Windows.
+    /// else `$DTH_SOCKET` / `$DTH_LISTEN` (or the former `$DTH10_SOCKET` /
+    /// `$DTH10_LISTEN`), else the platform default: the socket
+    /// `/run/dth/dth.sock` on Linux, `dth.sock` next to the executable on
+    /// Windows.
     pub fn resolve(socket: Option<&Path>, addr: Option<&str>) -> Target {
         if let Some(p) = socket {
             return Target::Unix(p.to_path_buf());
@@ -47,10 +48,10 @@ impl Target {
         if let Some(a) = addr {
             return Target::Tcp(a.to_owned());
         }
-        if let Some(p) = std::env::var_os("DTH10_SOCKET") {
+        if let Some(p) = std::env::var_os("DTH_SOCKET").or_else(|| std::env::var_os("DTH10_SOCKET")) {
             return Target::Unix(PathBuf::from(p));
         }
-        if let Ok(a) = std::env::var("DTH10_LISTEN") {
+        if let Ok(a) = std::env::var("DTH_LISTEN").or_else(|_| std::env::var("DTH10_LISTEN")) {
             return Target::Tcp(a);
         }
         #[cfg(unix)]
@@ -63,7 +64,7 @@ impl Target {
                 .ok()
                 .and_then(|p| p.parent().map(Path::to_path_buf))
                 .unwrap_or_else(std::env::temp_dir);
-            Target::Unix(dir.join("dth10.sock"))
+            Target::Unix(dir.join("dth.sock"))
         }
     }
 }
@@ -103,7 +104,7 @@ impl Listener {
                         Ok(()) => {
                             return Err(io::Error::new(
                                 io::ErrorKind::AddrInUse,
-                                format!("another dth10 serve answers at {}", path.display()),
+                                format!("another dth serve answers at {}", path.display()),
                             ));
                         }
                         Err(_) => std::fs::remove_file(path)?,
@@ -122,7 +123,7 @@ impl Listener {
                     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("bad address {addr}")))?;
                 let l = TcpListener::bind(sa).map_err(|e| {
                     if e.kind() == io::ErrorKind::AddrInUse {
-                        io::Error::new(e.kind(), format!("another dth10 serve listens at {sa}"))
+                        io::Error::new(e.kind(), format!("another dth serve listens at {sa}"))
                     } else {
                         e
                     }

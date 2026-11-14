@@ -34,7 +34,7 @@
 //! x64 calling convention otherwise.
 //!
 //! The DLL never opens the device itself: the tuner is held by the server
-//! process `dth10.exe serve` in the DLL's folder (`client`), which lets
+//! process `dth.exe serve` in the DLL's folder (`client`), which lets
 //! several DLL instances (two TVTest windows, GR and BS/CS) share one unit
 //! and brings the stream back by itself after a crash or an unplug.
 //!
@@ -126,7 +126,7 @@ static VTABLE: VTableWithRtti = VTableWithRtti {
 };
 
 struct State {
-    /// The client of the server (the tuner itself lives in `dth10.exe serve`,
+    /// The client of the server (the tuner itself lives in `dth.exe serve`,
     /// see [`client`]); `None` until OpenTuner.
     backend: Option<client::Client>,
     queue: TsQueue,
@@ -170,7 +170,7 @@ fn install_panic_hook() {
     ONCE.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            log::error!("panic in BonDriver_DTH10: {info}");
+            log::error!("panic in BonDriver_DTH: {info}");
             previous(info);
         }));
     });
@@ -194,7 +194,7 @@ pub extern "C" fn CreateBonDriver() -> *mut c_void {
         init_logging(&config);
         install_panic_hook();
         log::info!(
-            "BonDriver_DTH10 {} ini {:?} mode {:?} spaces {:?} tuner {}",
+            "BonDriver_DTH {} ini {:?} mode {:?} spaces {:?} tuner {}",
             env!("CARGO_PKG_VERSION"),
             config.ini_path,
             config.tuner.stream_mode,

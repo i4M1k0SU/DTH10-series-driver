@@ -1,5 +1,5 @@
-//! What a client (`dth10 stream`, or the BonDriver) and
-//! `dth10 serve` (the daemon that holds the device) say to each other over
+//! What a client (`dth stream`, or the BonDriver) and
+//! `dth serve` (the daemon that holds the device) say to each other over
 //! the daemon's socket ([`crate::ipc`]): the client sends one request line,
 //! the daemon answers one reply line and, after `ok` to a stream request, the
 //! transport stream follows until either side closes the connection.

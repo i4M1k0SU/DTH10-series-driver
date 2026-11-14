@@ -23,7 +23,7 @@ TARGETS = (
     "aarch64-apple-darwin",
 )
 # The command-line binaries every archive carries.
-BINARIES = ("dth10", "dth10-diag", "dth30-diag")
+BINARIES = ("dth", "dth10-diag", "dth30-diag")
 
 
 def validate_tag(version, tag):
@@ -60,7 +60,7 @@ def archive_name(version, target):
     if target not in TARGETS:
         raise ValueError(f"Unsupported release target: {target}")
     suffix = ".zip" if "windows" in target else ".tar.gz"
-    return f"dth10-{version}-{target}{suffix}"
+    return f"dth-{version}-{target}{suffix}"
 
 
 def package(root, target, output):
@@ -73,8 +73,8 @@ def package(root, target, output):
     files += [(root / name, name) for name in ("README.md", "LICENSE")]
     if windows:
         files += [
-            (binary_dir / "BonDriver_DTH10.dll", "BonDriver_DTH10.dll"),
-            (root / "crates/dth10-bondriver/BonDriver_DTH10.ini", "BonDriver_DTH10.ini"),
+            (binary_dir / "BonDriver_DTH.dll", "BonDriver_DTH.dll"),
+            (root / "crates/dth-bondriver/BonDriver_DTH.ini", "BonDriver_DTH.ini"),
         ]
     for source, _ in files:
         if not source.is_file():

@@ -1,5 +1,5 @@
-//! The DLL's client of the server: the tuner is held by `dth10 serve`, the
-//! server process (`dth10.exe` in the DLL's folder) that this DLL starts when
+//! The DLL's client of the server: the tuner is held by `dth serve`, the
+//! server process (`dth.exe` in the DLL's folder) that this DLL starts when
 //! none answers,
 //! and every DLL instance (another TVTest window, a renamed copy of this DLL
 //! with its own ini) is a client of the same server. The device's terrestrial
@@ -9,7 +9,7 @@
 //! the server ends by itself after `[Server] IdleExitSec` seconds without a
 //! client.
 //!
-//! Where they meet is not configurable: the socket file `dth10.sock` in the
+//! Where they meet is not configurable: the socket file `dth.sock` in the
 //! DLL's folder (AF_UNIX, Windows 10 1803 or later). Where that cannot be
 //! used (an older Windows, a folder path too long for a socket address) the
 //! DLL falls back by itself to a loopback TCP port derived from the folder,
@@ -67,8 +67,8 @@ impl Default for ServerConfig {
 }
 
 /// The server executable and its socket file, both in the DLL's folder.
-const SERVER_EXE: &str = "dth10.exe";
-const SERVER_SOCKET: &str = "dth10.sock";
+const SERVER_EXE: &str = "dth.exe";
+const SERVER_SOCKET: &str = "dth.sock";
 /// The loopback ports of the TCP fallback: one of a hundred, picked by the
 /// DLL's folder.
 const FALLBACK_PORT_BASE: u16 = 40780;
@@ -208,7 +208,7 @@ fn server_target(dll_dir: &Path) -> Target {
     t
 }
 
-/// The server's command line: `dth10.exe serve` in the DLL's folder, told
+/// The server's command line: `dth.exe serve` in the DLL's folder, told
 /// where to listen and what the ini says about the tuner.
 fn launch_spec(cfg: &Config, dll_dir: &Path, target: &Target) -> Launch {
     let mut args: Vec<OsString> = vec!["serve".into(), "-v".into()];
@@ -231,7 +231,7 @@ fn launch_spec(cfg: &Config, dll_dir: &Path, target: &Target) -> Launch {
         args.push("--app-keys".into());
         args.push(k.clone().into());
     }
-    Launch { exe: dll_dir.join(SERVER_EXE), args, log: dll_dir.join("dth10-serve.log") }
+    Launch { exe: dll_dir.join(SERVER_EXE), args, log: dll_dir.join("dth-serve.log") }
 }
 
 /// One `status` request: `Ok(Some(status))` when a unit answered, `Ok(None)`
@@ -416,7 +416,7 @@ impl Inner {
         let inner = self.clone();
         let name = ch.name.clone();
         let handle = std::thread::Builder::new()
-            .name("dth10-client-ts".into())
+            .name("dth-client-ts".into())
             .spawn(move || {
                 let mut buf = vec![0u8; 64 * 1024];
                 let mut pending: Vec<u8> = Vec::new();
@@ -521,7 +521,7 @@ impl Client {
     pub fn open(cfg: &Config, queue: TsQueue) -> Result<Client, String> {
         static INSTANCE: AtomicU64 = AtomicU64::new(0);
         let dll_dir =
-            cfg.dll_dir.clone().ok_or("the DLL's own folder is unknown, so the server dth10.exe cannot be found")?;
+            cfg.dll_dir.clone().ok_or("the DLL's own folder is unknown, so the server dth.exe cannot be found")?;
         let target = server_target(&dll_dir);
         let launch = launch_spec(cfg, &dll_dir, &target);
         let inner = Arc::new(Inner {
@@ -548,10 +548,9 @@ impl Client {
             closing: AtomicBool::new(false),
         });
         inner.ensure_server()?;
-        log::info!("server: using the dth10 serve at {} as client {}", inner.target, inner.client);
+        log::info!("server: using the dth serve at {} as client {}", inner.target, inner.client);
         let sup = inner.clone();
-        let supervisor =
-            std::thread::Builder::new().name("dth10-client-watch".into()).spawn(move || supervise(sup)).ok();
+        let supervisor = std::thread::Builder::new().name("dth-client-watch".into()).spawn(move || supervise(sup)).ok();
         Ok(Client { inner, supervisor })
     }
 
@@ -675,7 +674,7 @@ mod tests {
 
     #[test]
     fn a_server_that_ends_at_once_is_not_waited_for() {
-        // A stand-in dth10.exe that exits at once (cmd.exe with no console
+        // A stand-in dth.exe that exits at once (cmd.exe with no console
         // input): OpenTuner fails well within the timeout, by its exit.
         let dir = dll_folder("none");
         let system32 =
@@ -706,7 +705,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A stand-in for `dth10 serve`: answers status, serves every stream
+    /// A stand-in for `dth serve`: answers status, serves every stream
     /// request with a few packets and ends the first stream at once (as a
     /// crash of the server would), counting the stream requests.
     fn fake_server(target: Target, streams: Arc<AtomicUsize>, stop: Arc<AtomicBool>) -> JoinHandle<()> {

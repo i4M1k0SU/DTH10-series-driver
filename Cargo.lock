@@ -313,6 +313,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "dth-bondriver"
+version = "1.1.0"
+dependencies = [
+ "cc",
+ "dth-common",
+ "dth-proto",
+ "env_logger",
+ "jiff",
+ "log",
+ "windows-sys",
+ "winresource",
+]
+
+[[package]]
+name = "dth-cli"
+version = "1.1.0"
+dependencies = [
+ "clap",
+ "dth-common",
+ "dth-proto",
+ "dth10-backend",
+ "dth10-core",
+ "dth10-usb",
+ "dth30-backend",
+ "env_logger",
+ "jiff",
+ "libc",
+ "log",
+ "windows-sys",
+ "winresource",
+]
+
+[[package]]
 name = "dth-common"
 version = "1.1.0"
 
@@ -332,39 +365,6 @@ dependencies = [
  "dth10-core",
  "dth10-usb",
  "log",
-]
-
-[[package]]
-name = "dth10-bondriver"
-version = "1.1.0"
-dependencies = [
- "cc",
- "dth-common",
- "dth-proto",
- "env_logger",
- "jiff",
- "log",
- "windows-sys",
- "winresource",
-]
-
-[[package]]
-name = "dth10-cli"
-version = "1.1.0"
-dependencies = [
- "clap",
- "dth-common",
- "dth-proto",
- "dth10-backend",
- "dth10-core",
- "dth10-usb",
- "dth30-backend",
- "env_logger",
- "jiff",
- "libc",
- "log",
- "windows-sys",
- "winresource",
 ]
 
 [[package]]

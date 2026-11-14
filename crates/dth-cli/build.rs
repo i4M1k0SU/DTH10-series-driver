@@ -2,5 +2,5 @@
 mod windows;
 
 fn main() {
-    windows::compile("dth10.exe", false);
+    windows::compile("dth.exe", false);
 }

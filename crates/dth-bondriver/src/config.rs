@@ -5,7 +5,7 @@
 //!
 //! Some of the server's DTH10-series settings are deliberately not in the
 //! ini: each has one working value on every unit of the series, so the
-//! server the DLL starts always uses it (the `dth10` command keeps options
+//! server the DLL starts always uses it (the `dth` command keeps options
 //! for most of them, for diagnostics):
 //! * `recipient`: the device recipient, the only one WinUSB lets through for
 //!   this protocol's `wIndex` arguments (docs/30); the DLL is Windows-only.
@@ -26,16 +26,16 @@
 //!
 //! * `read_depth`: the server's own default (4 on Windows, the vendor
 //!   driver's value). It was a server-wide setting anyway, decided by the DLL
-//!   that started the server; `dth10 serve --read-depth` remains for tests.
+//!   that started the server; `dth serve --read-depth` remains for tests.
 //!
-//! The DLL always works through the server `dth10.exe` in its own folder, at
-//! the socket file `dth10.sock` there (loopback TCP when a Unix socket cannot
+//! The DLL always works through the server `dth.exe` in its own folder, at
+//! the socket file `dth.sock` there (loopback TCP when a Unix socket cannot
 //! be used), so the former `[Helper] Use` / `Exe` / `Socket` / `Address` keys
 //! are gone too (the section is now `[Server]`), and so are `[Stream] CepmState` (the server keeps its
 //! handshake cache `DTH10_<serial>.cepm` in the DLL's folder) and
 //! `[Stream] AppKeys` (the key file is always `CoBDACom.dll` in the DLL's folder).
 //!
-//! The ini template shipped with the DLL (`BonDriver_DTH10.ini`) holds every
+//! The ini template shipped with the DLL (`BonDriver_DTH.ini`) holds every
 //! key read here, set to its default; a test keeps the two in step.
 
 use std::path::{Path, PathBuf};
@@ -320,7 +320,7 @@ mod tests {
     /// loading it gives the same settings as no ini at all.
     #[test]
     fn shipped_template_is_the_defaults() {
-        let template = include_str!("../BonDriver_DTH10.ini");
+        let template = include_str!("../BonDriver_DTH.ini");
         let (c, dir) = load_with("template", Some(template));
         let (d, _) = load_with("template-none", None);
         let (t, u) = (&c.tuner, &d.tuner);
@@ -366,7 +366,7 @@ mod tests {
     fn shipped_template_lists_exactly_the_keys_read() {
         let mut section = String::new();
         let mut found: Vec<(String, String)> = Vec::new();
-        for line in include_str!("../BonDriver_DTH10.ini").lines().map(str::trim) {
+        for line in include_str!("../BonDriver_DTH.ini").lines().map(str::trim) {
             if let Some(name) = line.strip_circumfix('[', ']') {
                 section = name.to_owned();
             } else if !line.starts_with(';')

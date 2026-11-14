@@ -1,4 +1,4 @@
-//! `dth10 serve`: hold the tuner(s) open for good and stream to clients over
+//! `dth serve`: hold the tuner(s) open for good and stream to clients over
 //! a socket (`dth_proto::ipc`: a Unix domain socket on Linux and Windows
 //! alike, or TCP on the loopback interface; on Windows the BonDriver starts
 //! this as its server).
@@ -10,12 +10,12 @@
 //! terrestrial tuner (the two-tuner models) the two streams are two GR
 //! tuners instead, picked by the request's `tuner=` (`0` without it, `1`, or
 //! `auto` = the first free one). A client only asks for a stream and
-//! reads it. When the client goes away (a recorder kills `dth10 stream`,
+//! reads it. When the client goes away (a recorder kills `dth stream`,
 //! TVTest closes), the connection closes and the daemon stops that stream
 //! while the other one goes on; with both idle the kits go to standby. The
 //! CEPM sessions, the application credentials and the kits' state stay in
 //! this process between requests, so a request takes about a second instead
-//! of the device start of `dth10 tune`. A request for a stream that another
+//! of the device start of `dth tune`. A request for a stream that another
 //! client holds takes it over (the older client's connection ends) unless it
 //! says `busy=fail`; the same client (by the `client=` id it gives) replaces
 //! its own stream at once. A unit that goes away (USB error) is opened again
@@ -56,11 +56,11 @@ use crate::{RecipientArg, default_state_dir, lnb_of, stop};
 
 #[derive(Args)]
 pub struct ServeArgs {
-    /// Listen on this socket file (default: $DTH10_SOCKET, else /run/dth10/dth10.sock on Linux,
-    /// dth10.sock next to this executable on Windows).
+    /// Listen on this socket file (default: $DTH_SOCKET, else /run/dth/dth.sock on Linux,
+    /// dth.sock next to this executable on Windows).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
-    /// Listen on this TCP address instead (e.g. 127.0.0.1:40780; $DTH10_LISTEN).
+    /// Listen on this TCP address instead (e.g. 127.0.0.1:40780; $DTH_LISTEN).
     #[arg(long, value_name = "ADDR", conflicts_with = "socket")]
     listen: Option<String>,
     /// Serve this unit, by USB serial number (repeatable). Default: every supported device found.
@@ -69,8 +69,8 @@ pub struct ServeArgs {
     /// bmRequestType recipient of the vendor requests (default: device on Windows, interface elsewhere).
     #[arg(long, value_enum)]
     recipient: Option<RecipientArg>,
-    /// Directory of the CEPM handshake cache (DTH10_<serial>.cepm). Default: $DTH10_STATE_DIR,
-    /// else /var/lib/dth10 when it is writable, else the directory of this executable.
+    /// Directory of the CEPM handshake cache (DTH10_<serial>.cepm). Default: $DTH_STATE_DIR,
+    /// else /var/lib/dth when it is writable, else the directory of this executable.
     #[arg(long, value_name = "DIR")]
     state_dir: Option<PathBuf>,
     /// The vendor application's CoBDACom.dll (PCastTV3), from which the application
@@ -665,7 +665,7 @@ fn discover(units: &Units, backends: &[Arc<dyn Backend>], make_unit: MakeUnit<'_
         if u.iter().any(|x| x.serial == unit.name) {
             continue;
         }
-        log::info!("dth10 serve: unit {} ({}) at {}", unit.name, unit.label, unit.location);
+        log::info!("dth serve: unit {} ({}) at {}", unit.name, unit.label, unit.location);
         u.push(make_unit(&unit.name, backend));
     }
 }
@@ -755,12 +755,12 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
         let u = units.locked();
         if u.is_empty() {
             log::warn!(
-                "dth10 serve: no supported device found (VID 0411); listening on {target}{idle} and looking for one every {} s",
+                "dth serve: no supported device found (VID 0411); listening on {target}{idle} and looking for one every {} s",
                 SCAN_WITHOUT_UNIT.as_secs()
             );
         } else {
             log::info!(
-                "dth10 serve: unit(s) {}; listening on {target}{idle}",
+                "dth serve: unit(s) {}; listening on {target}{idle}",
                 u.iter().map(|x| x.serial.as_str()).collect::<Vec<_>>().join(", ")
             );
         }
@@ -805,11 +805,11 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             && activity.active.load(Ordering::Relaxed) == 0
             && activity.last_end.locked().elapsed() >= Duration::from_secs(a.idle_exit)
         {
-            log::info!("dth10 serve: no client for {} s, ending", a.idle_exit);
+            log::info!("dth serve: no client for {} s, ending", a.idle_exit);
             break;
         }
     }
-    log::info!("dth10 serve: stopping");
+    log::info!("dth serve: stopping");
     let units: Vec<Arc<Unit>> = units.locked().clone();
     for u in &units {
         for s in &u.slots {

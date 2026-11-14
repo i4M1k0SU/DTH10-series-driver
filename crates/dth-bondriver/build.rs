@@ -7,7 +7,7 @@
 mod windows;
 
 fn main() {
-    windows::compile("BonDriver_DTH10.dll", true);
+    windows::compile("BonDriver_DTH.dll", true);
     println!("cargo:rerun-if-changed=tests/rtti_check.cpp");
     if std::env::var_os("CARGO_FEATURE_RTTI_CHECK").is_some() && std::env::var("CARGO_CFG_WINDOWS").is_ok() {
         cc::Build::new().cpp(true).file("tests/rtti_check.cpp").compile("dth10_rtti_check");

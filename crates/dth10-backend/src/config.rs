@@ -9,7 +9,7 @@ use dth10_usb::RecipientMode;
 
 #[derive(Debug, Clone)]
 pub struct TunerConfig {
-    /// bmRequestType recipient of the vendor requests (`dth10 --recipient`; the
+    /// bmRequestType recipient of the vendor requests (`dth --recipient`; the
     /// DLL always uses the platform default, device on Windows, docs/30).
     pub recipient: RecipientMode,
     /// `[Device] Serial`: pick the device whose USB serial number matches (empty = first).
@@ -20,10 +20,10 @@ pub struct TunerConfig {
     pub device_program: DeviceProgram,
     /// In device mode, run the CEPM handshake and decrypt the link encryption
     /// (docs/22) so the host receives clear TS. Always on in the DLL and the
-    /// daemon; `dth10 tune --no-decrypt` turns it off for analysis.
+    /// daemon; `dth tune --no-decrypt` turns it off for analysis.
     pub device_decrypt: bool,
     /// File keeping the handshake results between runs (`DTH10_<serial>.cepm`
-    /// in the state directory, see `dth10 --state-dir`);
+    /// in the state directory, see `dth --state-dir`);
     /// the device keeps a handshake until it loses the session (docs/22 §6c).
     pub cepm_state: Option<PathBuf>,
     /// `[Stream] AppKeys`: the vendor application's `CoBDACom.dll` (supplied by
@@ -32,7 +32,7 @@ pub struct TunerConfig {
     /// Required for `device_decrypt`.
     pub app_keys: Option<PathBuf>,
     /// Drop the bridge's TEI+null filler packets (the DLL and the daemon always
-    /// do; `dth10 tune --keep-filler` keeps them for analysis).
+    /// do; `dth tune --keep-filler` keeps them for analysis).
     pub drop_filler: bool,
     /// `[Stream] ReadDepth`: bulk IN transfers kept in flight (39936 bytes
     /// each, 19 ms of stream). The host controller fills them without the
@@ -40,14 +40,14 @@ pub struct TunerConfig {
     /// original driver) on Windows, 16 elsewhere, where hubs and older
     /// kernels have shown completion gaps of over 100 ms.
     pub read_depth: usize,
-    /// One stream at a time (TVTest, `dth10 tune`): tuning a channel on one
+    /// One stream at a time (TVTest, `dth tune`): tuning a channel on one
     /// tuner stops the other tuner's stream and puts its kit to standby.
-    /// `false` (`dth10 serve`): the streams of the two tuners (terrestrial and
+    /// `false` (`dth serve`): the streams of the two tuners (terrestrial and
     /// satellite, or two terrestrial ones) run independently, each in the
     /// device's own mode (docs/40).
     pub exclusive: bool,
     /// Log the device's interrupt events (card events) while open
-    /// (`dth10 serve`; `DTH10_EVENTS=1` does the same for every front end).
+    /// (`dth serve`; `DTH10_EVENTS=1` does the same for every front end).
     pub log_events: bool,
     /// `[ISDB-T] LockWaitMs`
     pub ter_lock_wait_ms: u64,
@@ -61,7 +61,7 @@ pub struct TunerConfig {
     /// Command path (bRequest bit7) for the satellite demodulator/tuner I2C and
     /// GPIO. `None` = as the vendor driver: the tuner #0 path when TLV #1 flags
     /// bit2 is set (the DT-H70/U2, whose tuner #1 path reaches no I2C device,
-    /// docs/40), else the proxy path #1 (docs/20 §5.2). `dth10 tune
+    /// docs/40), else the proxy path #1 (docs/20 §5.2). `dth tune
     /// --sat-i2c-path` overrides it for diagnostics.
     pub sat_i2c_path: Option<u8>,
     /// Command path (bRequest bit7) of the satellite stream-enable command:

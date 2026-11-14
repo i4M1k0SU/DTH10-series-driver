@@ -1,16 +1,16 @@
 [package]
-name = "dth10-cli"
-description = "Stand-alone tuner command and daemon for the BUFFALO DTH10 series of USB TV tuners: tune and stream the TS (Linux usbfs / Windows WinUSB)"
+name = "dth-cli"
+description = "Stand-alone tuner command and daemon for the BUFFALO DTH10 series and DT-H30/U2 family of USB TV tuners: tune and stream the TS (Linux usbfs / Windows WinUSB)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# The package is dth10-cli (named like the other crates of the workspace);
-# the command it builds is `dth10` (`dth10.exe` next to the BonDriver DLL).
+# The package is dth-cli (named like the other crates of the workspace);
+# the command it builds is `dth` (`dth.exe` next to the BonDriver DLL).
 [[bin]]
-name = "dth10"
+name = "dth"
 path = "src/main.rs"
 
 [dependencies]

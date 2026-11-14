@@ -1,8 +1,8 @@
-//! `dth10`: stand-alone tuner command for the BUFFALO DTH10 series of USB TV
+//! `dth`: stand-alone tuner command for the BUFFALO DTH10 series of USB TV
 //! tuners (the models the vendor's Windows driver covers; verified on
 //! a DT-H70/U2).
 //!
-//! `dth10 tune` opens the device, tunes, and writes the transport stream to
+//! `dth tune` opens the device, tunes, and writes the transport stream to
 //! stdout (or a file) until it is stopped (SIGTERM / SIGINT / Ctrl-C, the
 //! reader closing the pipe, or `--duration`): the tuner command a recorder
 //! such as Mirakurun or mirakc runs. Every run opens the device itself. In the
@@ -12,8 +12,8 @@
 //! the handshake needs are read from the user's copy of the vendor
 //! application's `CoBDACom.dll` (`--app-keys`); they are not built in.
 //!
-//! `dth10 serve` holds the device open for good instead and streams to
-//! `dth10 stream` clients over a Unix domain socket (on Windows too, where
+//! `dth serve` holds the device open for good instead and streams to
+//! `dth stream` clients over a Unix domain socket (on Windows too, where
 //! the BonDriver starts it as its server; TCP on the loopback interface is
 //! the alternative): the terrestrial and the satellite stream of one unit then run
 //! independently, so a recorder can list the unit as two tuners (GR and
@@ -45,7 +45,11 @@ use dth10_usb::{RecipientMode, UsbTransport};
 use dth30_backend::Dth30Backend;
 
 #[derive(Parser)]
-#[command(name = "dth10", version, about = "User-mode tuner command for the BUFFALO DTH10 series of USB TV tuners")]
+#[command(
+    name = "dth",
+    version,
+    about = "User-mode tuner command for the BUFFALO DTH10 series and DT-H30/U2 family of USB TV tuners"
+)]
 struct Cli {
     /// Log level: error, warn, info, debug or trace (RUST_LOG overrides it).
     #[arg(long, global = true, value_name = "LEVEL")]
@@ -66,11 +70,11 @@ enum Cmd {
     Info(DeviceArgs),
     /// Tune and write the TS to stdout (or --output) until stopped.
     Tune(Box<TuneArgs>),
-    /// Hold the device open for good and stream to `dth10 stream` clients over a socket.
+    /// Hold the device open for good and stream to `dth stream` clients over a socket.
     Serve(serve::ServeArgs),
-    /// Ask `dth10 serve` for a stream and write its TS to stdout (a recorder's tuner command).
+    /// Ask `dth serve` for a stream and write its TS to stdout (a recorder's tuner command).
     Stream(Box<stream::StreamArgs>),
-    /// Ask `dth10 serve` for the C/N of both systems (a health check).
+    /// Ask `dth serve` for the C/N of both systems (a health check).
     Status(stream::StatusArgs),
 }
 
@@ -151,8 +155,8 @@ struct TuneArgs {
     /// Device mode: leave the link encryption in place (output stays encrypted; for analysis).
     #[arg(long)]
     no_decrypt: bool,
-    /// Directory of the CEPM handshake cache (DTH10_<serial>.cepm). Default: $DTH10_STATE_DIR,
-    /// else /var/lib/dth10 when it is writable, else the directory of this executable.
+    /// Directory of the CEPM handshake cache (DTH10_<serial>.cepm). Default: $DTH_STATE_DIR,
+    /// else /var/lib/dth when it is writable, else the directory of this executable.
     #[arg(long, value_name = "DIR")]
     state_dir: Option<PathBuf>,
     /// Neither read nor write the handshake cache (a new handshake every run).
@@ -230,7 +234,7 @@ fn main() {
         Cmd::Status(a) => stream::status(&a),
     };
     if let Err(e) = r {
-        eprintln!("dth10: {e}");
+        eprintln!("dth: {e}");
         std::process::exit(1);
     }
 }
@@ -416,13 +420,15 @@ fn writable_dir(p: &Path) -> bool {
     p.is_dir() && unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0
 }
 
+/// The state directory: `$DTH_STATE_DIR` (or the former `$DTH10_STATE_DIR`),
+/// else `/var/lib/dth` when it is writable (or the former `/var/lib/dth10`,
+/// which keeps its handshake cache), else the directory of this executable.
 pub(crate) fn default_state_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("DTH10_STATE_DIR") {
+    if let Some(d) = std::env::var_os("DTH_STATE_DIR").or_else(|| std::env::var_os("DTH10_STATE_DIR")) {
         return PathBuf::from(d);
     }
     #[cfg(unix)]
-    {
-        let p = Path::new("/var/lib/dth10");
+    for p in [Path::new("/var/lib/dth"), Path::new("/var/lib/dth10")] {
         if writable_dir(p) {
             return p.to_path_buf();
         }
@@ -574,7 +580,7 @@ mod tests {
     use super::*;
 
     fn args(v: &[&str]) -> TuneArgs {
-        let cli = Cli::parse_from(std::iter::once("dth10").chain(v.iter().copied()));
+        let cli = Cli::parse_from(std::iter::once("dth").chain(v.iter().copied()));
         match cli.cmd {
             Cmd::Tune(t) => *t,
             _ => panic!("not tune"),
@@ -619,7 +625,7 @@ mod tests {
     fn tuner_option() {
         assert_eq!(args(&["tune", "-c", "27"]).tuner, None);
         assert_eq!(args(&["tune", "-c", "27", "--tuner", "1"]).tuner, Some(1));
-        assert!(Cli::try_parse_from(["dth10", "tune", "-c", "27", "--tuner", "2"]).is_err());
+        assert!(Cli::try_parse_from(["dth", "tune", "-c", "27", "--tuner", "2"]).is_err());
         assert_eq!(tuner_of(None, System::IsdbT), Ok(0));
         assert_eq!(tuner_of(None, System::IsdbS), Ok(1));
         assert_eq!(tuner_of(Some(1), System::IsdbT), Ok(1));

@@ -1,4 +1,4 @@
-//! `dth10 stream`: ask `dth10 serve` for a stream and copy its TS to stdout,
+//! `dth stream`: ask `dth serve` for a stream and copy its TS to stdout,
 //! the tuner command a recorder runs when the device is held by the daemon.
 //! It owns no device: when the recorder kills it (or closes its pipe) the
 //! connection closes and the daemon stops the stream properly.
@@ -44,11 +44,11 @@ pub struct StreamArgs {
     /// Fail instead of taking the stream over from another client that holds it.
     #[arg(long)]
     if_free: bool,
-    /// The socket file of `dth10 serve` (default: $DTH10_SOCKET, else /run/dth10/dth10.sock on Linux,
-    /// dth10.sock next to this executable on Windows).
+    /// The socket file of `dth serve` (default: $DTH_SOCKET, else /run/dth/dth.sock on Linux,
+    /// dth.sock next to this executable on Windows).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
-    /// The TCP address of `dth10 serve` instead (e.g. 127.0.0.1:40780; $DTH10_LISTEN).
+    /// The TCP address of `dth serve` instead (e.g. 127.0.0.1:40780; $DTH_LISTEN).
     #[arg(long, value_name = "ADDR", conflicts_with = "socket")]
     connect: Option<String>,
 }
@@ -79,13 +79,13 @@ pub fn run(a: &StreamArgs) -> Result<(), Box<dyn Error>> {
     let target = Target::resolve(a.socket.as_deref(), a.connect.as_deref());
     stop::install();
     let t0 = Instant::now();
-    let conn = Conn::connect(&target).map_err(|e| format!("cannot reach dth10 serve at {target}: {e}"))?;
+    let conn = Conn::connect(&target).map_err(|e| format!("cannot reach dth serve at {target}: {e}"))?;
     (&conn).write_all(format!("{}\n", req.to_line()).as_bytes())?;
     // Tuning can take a few seconds (handshake, PSI learn) before the reply.
     conn.set_read_timeout(Some(Duration::from_secs(60)))?;
     let mut r = BufReader::new(&conn);
     let mut line = String::new();
-    (&mut r).take(MAX_LINE as u64).read_line(&mut line).map_err(|e| format!("no reply from dth10 serve: {e}"))?;
+    (&mut r).take(MAX_LINE as u64).read_line(&mut line).map_err(|e| format!("no reply from dth serve: {e}"))?;
     match Reply::parse(&line) {
         Reply::Ok(info) => log::info!("streaming after {:?}: {info}", t0.elapsed()),
         Reply::Busy(why) => return Err(format!("busy: {why}").into()),
@@ -133,20 +133,20 @@ pub struct StatusArgs {
     /// The unit, by USB serial number (needed when the daemon serves several).
     #[arg(long, value_name = "SERIAL")]
     serial: Option<String>,
-    /// The socket file of `dth10 serve` (default: $DTH10_SOCKET, else /run/dth10/dth10.sock on Linux,
-    /// dth10.sock next to this executable on Windows).
+    /// The socket file of `dth serve` (default: $DTH_SOCKET, else /run/dth/dth.sock on Linux,
+    /// dth.sock next to this executable on Windows).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
-    /// The TCP address of `dth10 serve` instead (e.g. 127.0.0.1:40780; $DTH10_LISTEN).
+    /// The TCP address of `dth serve` instead (e.g. 127.0.0.1:40780; $DTH_LISTEN).
     #[arg(long, value_name = "ADDR", conflicts_with = "socket")]
     connect: Option<String>,
 }
 
-/// `dth10 status`: ask the daemon for the C/N of both systems (a health check
+/// `dth status`: ask the daemon for the C/N of both systems (a health check
 /// for scripts; the BonDriver sends the same request).
 pub fn status(a: &StatusArgs) -> Result<(), Box<dyn Error>> {
     let target = Target::resolve(a.socket.as_deref(), a.connect.as_deref());
-    let conn = Conn::connect(&target).map_err(|e| format!("cannot reach dth10 serve at {target}: {e}"))?;
+    let conn = Conn::connect(&target).map_err(|e| format!("cannot reach dth serve at {target}: {e}"))?;
     conn.set_read_timeout(Some(Duration::from_secs(15)))?;
     (&conn).write_all(
         format!(
@@ -160,7 +160,7 @@ pub fn status(a: &StatusArgs) -> Result<(), Box<dyn Error>> {
     (&mut BufReader::new(&conn))
         .take(MAX_LINE as u64)
         .read_line(&mut line)
-        .map_err(|e| format!("no reply from dth10 serve: {e}"))?;
+        .map_err(|e| format!("no reply from dth serve: {e}"))?;
     match Reply::parse(&line) {
         Reply::Ok(info) => {
             let st = Status::parse(&info);
@@ -197,7 +197,7 @@ mod tests {
     use crate::{Cli, Cmd};
 
     fn args(v: &[&str]) -> super::StreamArgs {
-        match Cli::parse_from(std::iter::once("dth10").chain(v.iter().copied())).cmd {
+        match Cli::parse_from(std::iter::once("dth").chain(v.iter().copied())).cmd {
             Cmd::Stream(s) => *s,
             _ => panic!("not stream"),
         }
@@ -209,7 +209,7 @@ mod tests {
         assert_eq!((a.attenuator, a.booster), (None, None), "the daemon's settings");
         let a = args(&["stream", "-c", "27", "--attenuator", "--booster=0"]);
         assert_eq!((a.attenuator, a.booster), (Some(1), Some(0)));
-        assert!(Cli::try_parse_from(["dth10", "stream", "-c", "27", "--booster=2"]).is_err());
+        assert!(Cli::try_parse_from(["dth", "stream", "-c", "27", "--booster=2"]).is_err());
     }
 
     #[test]
@@ -218,6 +218,6 @@ mod tests {
         assert_eq!(args(&["stream", "-c", "27"]).tuner, None, "no key: tuner 0");
         assert_eq!(args(&["stream", "-c", "27", "--tuner", "1"]).tuner, Some(TunerChoice::Index(1)));
         assert_eq!(args(&["stream", "-c", "27", "--tuner", "auto"]).tuner, Some(TunerChoice::Auto));
-        assert!(Cli::try_parse_from(["dth10", "stream", "-c", "27", "--tuner", "2"]).is_err());
+        assert!(Cli::try_parse_from(["dth", "stream", "-c", "27", "--tuner", "2"]).is_err());
     }
 }
