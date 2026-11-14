@@ -121,13 +121,25 @@ pub fn kit_for_board(board_id: u8, subsystem: (u16, u16)) -> Option<KitKind> {
 }
 
 /// Number of front ends on a board: two on 0xC6 (DT-H50/U2W, two MJ110
-/// kits) and 0xBB (dual TOSHIBA), one elsewhere. Only the first one is
-/// supported by [`crate::frontend`] (the second one's addressing on 0xC6 is
-/// unresolved, docs/26 4-tuning §10.5).
+/// kits) and 0xBB (dual TOSHIBA), one elsewhere. See
+/// [`second_front_end`] for which second ones are driven.
 pub fn tuner_count(board_id: u8) -> u8 {
     match board_id {
         0xBB | 0xC6 => 2,
         _ => 1,
+    }
+}
+
+/// The 8-bit I2C addresses (demodulator, tuner) of a board's second front
+/// end, where it is driven: on 0xC6 the second MJ110 kit at demodulator
+/// 0x3C with its tuner at 0xC0 behind that demodulator's repeater, as the
+/// vendor kernel's standby writes it (the vendor's user mode never drives
+/// it on this board; static analysis, unverified on hardware). The dual
+/// TOSHIBA board (0xBB, same addresses behind a GPIO select) is not driven.
+pub fn second_front_end(board_id: u8) -> Option<(u8, u8)> {
+    match board_id {
+        0xC6 => Some((0x3C, 0xC0)),
+        _ => None,
     }
 }
 
@@ -209,6 +221,9 @@ mod tests {
         assert_eq!(kit_for_board(0x00, ANY), None);
         assert_eq!(kit_for_board(0xB6, ANY), None);
         assert_eq!(tuner_count(0xC6), 2);
+        assert_eq!(second_front_end(0xC6), Some((0x3C, 0xC0)));
+        assert_eq!(second_front_end(0xBB), None);
+        assert_eq!(second_front_end(0xB4), None);
         assert_eq!(tuner_count(0xBB), 2);
         assert_eq!(tuner_count(0xB4), 1);
     }

@@ -61,6 +61,9 @@ pub struct Config {
     pub cas_mode: CasMode,
     /// TS port of the Raw and Program streams (0 on single-tuner boards).
     pub ts_port: u32,
+    /// The TS input port of the second front end on a dual board (1: the
+    /// second kit is taken to feed port 1; inferred).
+    pub ts_port_second: u32,
     /// I2C channel and clock of the front end.
     pub i2c_channel: u8,
     pub i2c_khz: u32,
@@ -68,7 +71,14 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { subsystem: None, cas_mode: CasMode::default(), ts_port: 0, i2c_channel: 0, i2c_khz: FRONTEND_KHZ }
+        Self {
+            subsystem: None,
+            cas_mode: CasMode::default(),
+            ts_port: 0,
+            ts_port_second: 1,
+            i2c_channel: 0,
+            i2c_khz: FRONTEND_KHZ,
+        }
     }
 }
 
@@ -130,6 +140,8 @@ impl StreamInfo {
 /// A DT-H30/U2-family device (see the module documentation).
 pub struct Dth30<B: RemotePci> {
     fe: Frontend<FeBus<B>>,
+    /// The front end in use (0, or 1 on a dual board).
+    tuner: usize,
     board_id: u32,
     kit: KitKind,
     cfg: Config,
@@ -157,7 +169,7 @@ impl<B: RemotePci> Dth30<B> {
             .ok_or_else(|| Error::Unsupported(format!("board ID {board:#04x}")))?;
         log::info!("board {board:#04x}: {} front end", kit.name());
         let bus = FeBus { vixs, channel: cfg.i2c_channel, khz: cfg.i2c_khz };
-        Ok(Self { fe: Frontend::new(bus, kit), board_id, kit, cfg, cas: None, raw: None, program: None })
+        Ok(Self { fe: Frontend::new(bus, kit), tuner: 0, board_id, kit, cfg, cas: None, raw: None, program: None })
     }
 
     /// Start the chip and the firmware ([`Vixs::bring_up`]), then
@@ -202,6 +214,51 @@ impl<B: RemotePci> Dth30<B> {
     pub fn set_in_use(&mut self, in_use: bool) -> Result<()> {
         let s = if in_use { gpio::app_status::WATCHING } else { gpio::app_status::NOT_USING };
         self.vixs_mut().set_app_status(s)
+    }
+
+    /// The front ends this crate drives on the board: 2 on a dual board
+    /// with a known second front end ([`model::second_front_end`]), else 1.
+    pub fn tuner_count(&self) -> usize {
+        if model::second_front_end(self.board()).is_some() { 2 } else { 1 }
+    }
+
+    /// The front end in use.
+    pub fn tuner(&self) -> usize {
+        self.tuner
+    }
+
+    /// Switch to front end `tuner` (one at a time, as the vendor stack: one
+    /// Raw and one Program stream per device). Refused while the Raw or
+    /// Program stream is open. Both front ends go through the board's
+    /// standby (which also sets the first tuner's loop-through, the second
+    /// kit's RF input, inferred), then the chosen one is initialised; the
+    /// Raw and Program streams then use its TS port.
+    pub fn select_tuner(&mut self, tuner: usize) -> Result<()> {
+        if tuner == self.tuner {
+            return Ok(());
+        }
+        if tuner >= self.tuner_count() {
+            return Err(Error::Unsupported(format!("no front end #{tuner} on this board")));
+        }
+        if self.raw.is_some() || self.program.is_some() {
+            return Err(Error::Protocol("close the Raw and Program streams before switching front ends"));
+        }
+        if let Err(e) = self.standby() {
+            log::warn!("front-end standby: {e}");
+        }
+        let (demod, tuner_addr) = match tuner {
+            0 => (self.kit.demod_addr(), self.kit.tuner_addr()),
+            _ => model::second_front_end(self.board()).ok_or(Error::Unsupported("no second front end".into()))?,
+        };
+        self.fe.set_addresses(demod, tuner_addr);
+        self.tuner = tuner;
+        log::info!("front end #{tuner}: demodulator 0x{demod:02x}, tuner 0x{tuner_addr:02x}");
+        self.fe.init()
+    }
+
+    /// The TS input port of the front end in use.
+    fn ts_port(&self) -> u32 {
+        if self.tuner == 0 { self.cfg.ts_port } else { self.cfg.ts_port_second }
     }
 
     /// The TS input set-up for the board's kit. Refused while a stream is
@@ -255,7 +312,7 @@ impl<B: RemotePci> Dth30<B> {
         if self.raw.is_some() {
             return Err(Error::Protocol("the Raw stream is already open"));
         }
-        let port = self.cfg.ts_port;
+        let port = self.ts_port();
         let h = self.vixs_mut().open_psi(port)?;
         Ok(self.opened(h))
     }
@@ -273,7 +330,7 @@ impl<B: RemotePci> Dth30<B> {
             log::warn!("Program open without the CAS object or the Raw stream open");
         }
         let es = spec.es_entries();
-        let (port, mode) = (self.cfg.ts_port, self.cfg.cas_mode);
+        let (port, mode) = (self.ts_port(), self.cfg.cas_mode);
         let p = ProgramParams::new(port, cas, raw, spec.sid, spec.pmt_pid, spec.pcr_pid, &es, mode);
         let h = self.vixs_mut().open_program(&p)?;
         Ok(self.opened(h))
@@ -463,6 +520,43 @@ mod tests {
         assert_eq!(d.config().i2c_khz, 400);
         let v = Vixs::with_chip(chip(0x0300_0012), layout(), opts(Completion::Poll));
         std::assert_matches!(Dth30::new(v, Config::default()).err(), Some(Error::Unsupported(_)));
+    }
+
+    #[test]
+    fn second_front_end_of_the_dual_board() {
+        let mut d = device(0xC6, Config::default());
+        assert_eq!((d.tuner_count(), d.tuner()), (2, 0));
+        assert_eq!(d.frontend_mut().addresses(), (0x30, 0xC6));
+        bus(&mut d).clear();
+        d.select_tuner(1).unwrap();
+        assert_eq!((d.tuner(), d.frontend_mut().addresses()), (1, (0x3C, 0xC0)));
+        // Standby on both kits (100 kHz), then the second kit's init.
+        let acc = accesses(&bus(&mut d).ops());
+        let standby_second = pos(&acc, Acc::W(0x100C, ctrl_word(4, true, true, true, 0x3C)));
+        assert!(
+            acc.iter().rposition(|a| *a == Acc::W(0x100C, ctrl_word(4, true, true, true, 0x3C))).unwrap()
+                > standby_second
+        );
+        // The Raw stream of front end #1 reads TS port 1.
+        script_cmds(d.vixs_mut(), &[(8, 0, 1)]);
+        bus(&mut d).clear();
+        d.open_raw().unwrap();
+        assert_eq!(w(&sent_payload(bus(&mut d), 0), 0x08), 1);
+        // No switch while a stream is open; back to #0 once it is closed.
+        assert!(d.select_tuner(0).is_err());
+        script_cmds(d.vixs_mut(), &[(10, 1, 1), (9, 0, 1)]);
+        d.close_raw().unwrap();
+        d.select_tuner(0).unwrap();
+        assert_eq!((d.tuner(), d.frontend_mut().addresses()), (0, (0x30, 0xC6)));
+        assert!(d.select_tuner(2).is_err());
+    }
+
+    #[test]
+    fn single_front_end_boards() {
+        let mut d = device(0xB4, Config::default());
+        assert_eq!(d.tuner_count(), 1);
+        d.select_tuner(0).unwrap();
+        std::assert_matches!(d.select_tuner(1), Err(Error::Unsupported(_)));
     }
 
     #[test]

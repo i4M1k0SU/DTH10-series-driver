@@ -194,6 +194,9 @@ struct Unit {
     tuner: Mutex<Option<Box<dyn Session>>>,
     /// Whether tuner #1 is a second terrestrial tuner; `None` until the unit was first opened.
     second_ter: Mutex<Option<bool>>,
+    /// The two tuners stream one at a time (DT-H50/U2W): a stream on one
+    /// takes the other's over; known once the unit was first opened.
+    exclusive: AtomicBool,
     /// Per tuner: the connection streaming it and the flag that ends that connection's stream.
     slots: [Mutex<Slot>; 2],
     /// The last C/N read of each tuner, answered to a status request while
@@ -277,6 +280,25 @@ fn claim(slot: &Slot, busy_fail: bool, client: Option<&str>) -> Claim {
     }
 }
 
+/// On a unit whose tuners stream one at a time, claim the other tuner's
+/// slot as well: `Ok(None)` when it is free, `Ok(Some(owner))` when its
+/// stream was taken over (stop flag set, slot freed), `Err(owner)` when the
+/// request may not take it ([`claim`] says busy).
+fn take_other(o: &mut Slot, busy_fail: bool, client: Option<&str>) -> Result<Option<u64>, u64> {
+    if o.owner == 0 {
+        return Ok(None);
+    }
+    if claim(o, busy_fail, client) == Claim::Busy {
+        return Err(o.owner);
+    }
+    if let Some(prev) = o.stop.take() {
+        prev.store(true, Ordering::Relaxed);
+    }
+    let owner = o.owner;
+    *o = Slot::default();
+    Ok(Some(owner))
+}
+
 /// The tuner a stream request goes to (key `tuner=`, see `dth10_tuner::proto`):
 /// a satellite channel to the satellite tuner; a terrestrial one to tuner 0,
 /// to tuner 1 when it names it on a unit whose tuner #1 is a second terrestrial
@@ -342,6 +364,7 @@ impl Unit {
             t.with_app_keys(k);
         }
         *self.second_ter.locked() = Some(t.has_second_terrestrial());
+        self.exclusive.store(t.exclusive_tuners(), Ordering::Relaxed);
         log::info!("unit {}: opened in {:?}", self.serial, t0.elapsed());
         *tuner = Some(t);
         Ok(())
@@ -517,6 +540,29 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
             let _ = reply(&conn, &Reply::Busy(why));
             return;
         }
+        // Tuners that stream one at a time: the other tuner's stream is
+        // claimed too (busy, or taken over and its slot freed, so that its
+        // connection's end does not release this stream).
+        if unit.exclusive.load(Ordering::Relaxed) {
+            let other_name = tuner_name(system, 1 - i, second_ter);
+            match take_other(&mut slots[1 - i], req.busy_fail, req.client.as_deref()) {
+                Ok(None) => {}
+                Ok(Some(prev)) => log::info!(
+                    "unit {}: {other_name} stream of connection {prev} ends: connection {id} streams {name} (one tuner at a time)",
+                    unit.serial
+                ),
+                Err(owner) => {
+                    let why = format!(
+                        "{other_name} stream of unit {} is held by connection {owner} (its tuners stream one at a time)",
+                        unit.serial
+                    );
+                    log::info!("connection {id}: {}: busy ({why})", describe(name));
+                    let _ = reply(&conn, &Reply::Busy(why));
+                    return;
+                }
+            }
+        }
+        let s = &mut slots[i];
         if let Some(prev) = s.stop.take() {
             prev.store(true, Ordering::Relaxed);
             log::info!(
@@ -818,6 +864,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             queues: [TsQueue::new(), TsQueue::new()],
             tuner: Mutex::new(None),
             second_ter: Mutex::new(None),
+            exclusive: AtomicBool::new(false),
             slots: [Mutex::new(Slot::default()), Mutex::new(Slot::default())],
             cnr: Mutex::new(Cnr::default()),
             tuning: AtomicUsize::new(0),
@@ -956,6 +1003,25 @@ mod tests {
         // the same client changing channel replaces its own stream even with busy=fail
         assert_eq!(claim(&held(3, Some("a")), true, Some("a")), Claim::Replace);
         assert_eq!(claim(&held(3, Some("a")), false, Some("a")), Claim::Replace);
+    }
+
+    #[test]
+    fn exclusive_tuners_take_the_other_stream() {
+        let mut free = Slot::default();
+        assert_eq!(take_other(&mut free, true, None), Ok(None));
+        let mut s = held(5, Some("a"));
+        let stop = Arc::new(AtomicBool::new(false));
+        s.stop = Some(stop.clone());
+        // busy=fail from another client: refused, nothing changes.
+        assert_eq!(take_other(&mut s, true, Some("b")), Err(5));
+        assert!(!stop.load(Ordering::Relaxed));
+        assert_eq!(s.owner, 5);
+        // The same client, or a take-over request: the stream ends.
+        assert_eq!(take_other(&mut s, true, Some("a")), Ok(Some(5)));
+        assert!(stop.load(Ordering::Relaxed));
+        assert_eq!(s.owner, 0);
+        let mut s = held(7, None);
+        assert_eq!(take_other(&mut s, false, None), Ok(Some(7)));
     }
 
     #[test]
