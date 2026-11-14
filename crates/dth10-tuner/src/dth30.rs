@@ -263,6 +263,18 @@ impl Dth30Tuner {
         }
     }
 
+    /// Reset the card again when it was put back after a removal (called
+    /// from the periodic status read and before a tune).
+    fn check_card(&mut self) {
+        if !self.cas.as_ref().is_some_and(|c| c.reinserted.swap(false, Ordering::Relaxed)) {
+            return;
+        }
+        log::info!("unit {}: B-CAS card put back; resetting it", self.name);
+        if let Err(e) = self.dev.reset_card() {
+            log::warn!("unit {}: card reset: {e}", self.name);
+        }
+    }
+
     /// The unit's lamps: in use while a stream runs (the vendor
     /// application's "watching"), idle otherwise. Kept through a channel
     /// change so they do not flicker.
@@ -287,6 +299,7 @@ impl Dth30Tuner {
 
 impl Dth30Tuner {
     fn tune_and_start(&mut self, ch: &Channel) -> Result<()> {
+        self.check_card();
         self.dev.tune(ch.frequency_hz)?;
         if !self.wait_lock()? {
             return Err(Error::Protocol("ISDB-T: no lock (no signal on this channel)"));
@@ -365,6 +378,7 @@ impl Session for Dth30Tuner {
     }
 
     fn poll_status(&mut self) -> [Option<f32>; 2] {
+        self.check_card();
         let ter = self.current.is_some().then(|| self.signal_level_of(0));
         if let Some(c) = ter {
             log::debug!("unit {}: status: C/N {c:.1} dB", self.name);
@@ -400,9 +414,13 @@ impl Drop for Dth30Tuner {
 /// is open (an unread FIFO may stall the firmware). A block's card state
 /// names the event it reports (inserted, activated, an EMM...), so
 /// `activated` is kept from the activation until the card is removed.
+/// A card put back after a removal is only reported inserted: the firmware
+/// does not reset it by itself, so `reinserted` asks the control side to
+/// (see [`Dth30Tuner::check_card`]).
 struct CasWatch {
     card: Arc<AtomicU32>,
     activated: Arc<AtomicBool>,
+    reinserted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: JoinHandle<(StreamInfo, StreamReader)>,
 }
@@ -411,17 +429,24 @@ impl CasWatch {
     fn start(info: StreamInfo, mut r: StreamReader) -> Self {
         let card = Arc::new(AtomicU32::new(0));
         let activated = Arc::new(AtomicBool::new(false));
+        let reinserted = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
-        let (c, a, s) = (card.clone(), activated.clone(), stop.clone());
+        let (c, a, ri, s) = (card.clone(), activated.clone(), reinserted.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
+            let mut removed = false;
             while !s.load(Ordering::Relaxed) {
                 match r.next(Duration::from_millis(100)) {
                     Ok(Some(b)) => {
                         let Some((h, _)) = parse_generic_block(&b) else { continue };
                         if h.card & card_state::REMOVED != 0 {
                             a.store(false, Ordering::Relaxed);
+                            removed = true;
                         } else if h.card & card_state::ACTIVATED != 0 {
                             a.store(true, Ordering::Relaxed);
+                            removed = false;
+                        } else if h.card & card_state::INSERTED != 0 && removed {
+                            ri.store(true, Ordering::Relaxed);
+                            removed = false;
                         }
                         if c.swap(h.card, Ordering::Relaxed) != h.card {
                             log::info!("B-CAS card event 0x{:x}", h.card);
@@ -436,7 +461,7 @@ impl CasWatch {
             }
             (info, r)
         });
-        Self { card, activated, stop, thread }
+        Self { card, activated, reinserted, stop, thread }
     }
 
     fn stop(self) -> (StreamInfo, StreamReader) {

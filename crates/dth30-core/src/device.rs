@@ -242,6 +242,14 @@ impl<B: RemotePci> Dth30<B> {
         Ok(info)
     }
 
+    /// Ask for a card reset again on the open CAS object: the firmware
+    /// does not reset a card that is put back after a removal (its block
+    /// reports it inserted but not activated, and the TS stays scrambled).
+    pub fn reset_card(&mut self) -> Result<()> {
+        let h = self.cas.clone().ok_or(Error::Protocol("the CAS object is not open"))?;
+        self.vixs_mut().reset_card(&h)
+    }
+
     /// Open the Raw stream (PSI / TS pass-through) on [`Config::ts_port`].
     pub fn open_raw(&mut self) -> Result<StreamInfo> {
         if self.raw.is_some() {
