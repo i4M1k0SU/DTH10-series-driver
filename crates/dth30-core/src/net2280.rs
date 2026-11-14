@@ -221,7 +221,9 @@ pub fn hw_init<B: RemotePci + ?Sized>(bus: &B, pid: u16, pipes: &[u8], sleep: fn
 
     let fifo = [0, 1, 2, 3].map(|i| FIFO_WINDOW + FIFO_STRIDE * i);
     if !dma_mapped {
-        log::warn!("no NET2280 DMA channel serves endpoint {:#04x}; using channel A", endpoints[0]);
+        // The DT-H50/U2's EEPROM leaves every EP_CFG at endpoint 0, so this
+        // is the normal case there; channel A is the one that serves EP-A.
+        log::debug!("no NET2280 DMA channel was mapped to endpoint {:#04x}; using channel A", endpoints[0]);
     }
     log::debug!("NET2280 up: ViXS id {vixs_id:08x}, FB {fb:08x}, MMR {mmr:08x}, EP_CFG {ep_cfg:08x?}");
     Ok(Layout { vixs_id, bars, fb, mmr, endpoints, fifo, ep_cfg, dma_offset, dma_mapped })

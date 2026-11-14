@@ -1,17 +1,23 @@
 //! `nusb`-based transport for [`dth30_core`]: the PLX NET2280 in PCI host mode.
 //!
-//! **None of this has run against hardware.** It reproduces, byte for byte,
-//! what the vendor's USB layer sends according to the static analysis in
-//! docs/26 (§2-§6, §9 of the NET2280 report); the packet layouts are unit
-//! tested ([`packet`]), the transfers themselves are not.
+//! It reproduces, byte for byte, what the vendor's USB layer sends according
+//! to the static analysis in docs/26 (§2-§6, §9 of the NET2280 report); the
+//! packet layouts are unit tested ([`packet`]). On a DT-H50/U2 the register
+//! accesses, the bulk OUT DMA and the interrupt endpoint work; the TS
+//! endpoints have not carried data yet.
 //!
 //! What goes over the bus:
 //!
 //! * Enumeration: the first configuration is selected (only when another one
-//!   is active) and interface 0 is claimed. No vendor control transfer, no
-//!   reset, no `CLEAR_FEATURE`: the vendor stack sends none either. The
-//!   register endpoints 0x0D / 0x8D / 0x0E / 0x8E must exist, as the vendor
-//!   stack requires.
+//!   is active) and every interface of it is claimed, alternate setting 0, as
+//!   the vendor stack selects them all. The DT-H50/U2 has three: interface 0
+//!   with bulk 0x01 / 0x02 / 0x03 / 0x81 (unused), interface 1 with bulk OUT
+//!   0x04 and the TS endpoints 0x82 / 0x83 / 0x84, and interface 2 with the
+//!   register endpoints 0x0D / 0x8D / 0x0E / 0x8E and the status endpoint
+//!   0x8F. Each endpoint is opened on the interface that has it. No vendor
+//!   control transfer, no reset, no `CLEAR_FEATURE`: the vendor stack sends
+//!   none either. The register endpoints must exist, as the vendor stack
+//!   requires.
 //! * Register accesses ([`Net2280Usb::local_read`] and friends,
 //!   [`dth30_core::bus::RemotePci`]): a 10-byte OUT packet for a write, a
 //!   6-byte OUT packet followed by a 4-byte IN reply for a read. One mutex
@@ -100,21 +106,29 @@ fn map_io(e: nusb::Error) -> Error {
     Error::Usb(e.to_string())
 }
 
-/// One endpoint of interface 0 as its descriptor gives it.
+/// One endpoint of the claimed interfaces as its descriptor gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndpointInfo {
+    /// The interface that has it.
+    pub interface: u8,
     pub address: u8,
     pub transfer_type: TransferType,
     pub max_packet_size: usize,
 }
 
-fn endpoint_list(iface: &Interface) -> Vec<EndpointInfo> {
-    let Some(desc) = iface.descriptor() else { return Vec::new() };
-    desc.endpoints()
-        .map(|e| EndpointInfo {
-            address: e.address(),
-            transfer_type: e.transfer_type(),
-            max_packet_size: e.max_packet_size(),
+fn endpoint_list(ifaces: &[Interface]) -> Vec<EndpointInfo> {
+    ifaces
+        .iter()
+        .filter_map(|i| i.descriptor().map(|d| (i.interface_number(), d)))
+        .flat_map(|(n, d)| {
+            d.endpoints()
+                .map(|e| EndpointInfo {
+                    interface: n,
+                    address: e.address(),
+                    transfer_type: e.transfer_type(),
+                    max_packet_size: e.max_packet_size(),
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -149,14 +163,18 @@ macro_rules! each {
 }
 
 impl<D: EndpointDirection> Pipe<D> {
-    fn open(iface: &Interface, addr: u8) -> Result<Self> {
-        let ty =
-            iface.descriptor().and_then(|d| d.endpoints().find(|e| e.address() == addr).map(|e| e.transfer_type()));
+    /// Open `addr` on whichever of `ifaces` has it.
+    fn open(ifaces: &[Interface], addr: u8) -> Result<Self> {
+        let found = ifaces.iter().find_map(|i| {
+            i.descriptor().and_then(|d| d.endpoints().find(|e| e.address() == addr).map(|e| (i, e.transfer_type())))
+        });
+        let Some((iface, ty)) = found else {
+            return Err(Error::Unsupported(format!("endpoint {addr:#04x} is on none of the claimed interfaces")));
+        };
         match ty {
-            Some(TransferType::Bulk) => iface.endpoint::<Bulk, D>(addr).map(Pipe::Bulk).map_err(map_io),
-            Some(TransferType::Interrupt) => iface.endpoint::<Interrupt, D>(addr).map(Pipe::Interrupt).map_err(map_io),
-            Some(t) => Err(Error::Unsupported(format!("endpoint {addr:#04x} is {t:?}, not bulk or interrupt"))),
-            None => Err(Error::Unsupported(format!("endpoint {addr:#04x} does not exist on interface 0"))),
+            TransferType::Bulk => iface.endpoint::<Bulk, D>(addr).map(Pipe::Bulk).map_err(map_io),
+            TransferType::Interrupt => iface.endpoint::<Interrupt, D>(addr).map(Pipe::Interrupt).map_err(map_io),
+            t => Err(Error::Unsupported(format!("endpoint {addr:#04x} is {t:?}, not bulk or interrupt"))),
         }
     }
 
@@ -299,12 +317,12 @@ impl Found {
     }
 }
 
-/// An opened DT-H30/U2-family device (interface 0 claimed, register
+/// An opened DT-H30/U2-family device (every interface claimed, register
 /// endpoints open). Implements [`RemotePci`]; methods take `&self`, so one
 /// handle can be shared (e.g. in an `Arc`) by the control path and a reader.
 pub struct Net2280Usb {
     device: nusb::Device,
-    iface: Interface,
+    ifaces: Vec<Interface>,
     serial: Option<String>,
     product_id: u16,
     endpoints: Vec<EndpointInfo>,
@@ -406,21 +424,37 @@ impl Net2280Usb {
             log::debug!("set_configuration({wanted}): {e}");
         }
         let product_id = device.device_descriptor().product_id();
-        // Detaching is a no-op on Windows; on Linux it frees interface 0 from a
-        // kernel driver that may have bound to it.
-        let iface = device.detach_and_claim_interface(0).wait().map_err(map_io)?;
-        let endpoints = endpoint_list(&iface);
+        // Detaching is a no-op on Windows; on Linux it frees an interface from
+        // a kernel driver that may have bound to it.
+        let numbers: Vec<u8> = match device.active_configuration() {
+            Ok(c) => c.interfaces().map(|g| g.interface_number()).collect(),
+            Err(e) => {
+                log::debug!("active configuration: {e}");
+                vec![0]
+            }
+        };
+        let mut ifaces = Vec::with_capacity(numbers.len());
+        for n in numbers {
+            ifaces.push(device.detach_and_claim_interface(n).wait().map_err(map_io)?);
+        }
+        let endpoints = endpoint_list(&ifaces);
         let present: Vec<u8> = endpoints.iter().map(|e| e.address).collect();
         let missing = missing_endpoints(&present);
         if !missing.is_empty() {
             return Err(Error::Unsupported(format!(
-                "interface 0 lacks the NET2280 register endpoints {} (has {})",
+                "the device lacks the NET2280 register endpoints {} (has {})",
                 hex_list(&missing),
                 hex_list(&present)
             )));
         }
         for e in &endpoints {
-            log::debug!("endpoint {:#04x}: {:?}, max packet {}", e.address, e.transfer_type, e.max_packet_size);
+            log::debug!(
+                "interface {} endpoint {:#04x}: {:?}, max packet {}",
+                e.interface,
+                e.address,
+                e.transfer_type,
+                e.max_packet_size
+            );
         }
         for addr in [EP_STATIN, EP_A_OUT, EP_B_IN, EP_C_IN, EP_D_IN] {
             if !present.contains(&addr) {
@@ -428,14 +462,14 @@ impl Net2280Usb {
             }
         }
         let regs = RegPipes {
-            local_out: Pipe::open(&iface, EP_CFGOUT)?,
-            local_in: Pipe::open(&iface, EP_CFGIN)?,
-            remote_out: Pipe::open(&iface, EP_PCIOUT)?,
-            remote_in: Pipe::open(&iface, EP_PCIIN)?,
+            local_out: Pipe::open(&ifaces, EP_CFGOUT)?,
+            local_in: Pipe::open(&ifaces, EP_CFGIN)?,
+            remote_out: Pipe::open(&ifaces, EP_PCIOUT)?,
+            remote_in: Pipe::open(&ifaces, EP_PCIIN)?,
         };
         Ok(Net2280Usb {
             device,
-            iface,
+            ifaces,
             serial,
             product_id,
             endpoints,
@@ -450,8 +484,9 @@ impl Net2280Usb {
         &self.device
     }
 
-    pub fn interface(&self) -> &Interface {
-        &self.iface
+    /// The claimed interfaces, in descriptor order.
+    pub fn interfaces(&self) -> &[Interface] {
+        &self.ifaces
     }
 
     /// The device's USB serial number string, when it has one.
@@ -469,12 +504,12 @@ impl Net2280Usb {
         model::product_label(self.product_id)
     }
 
-    /// The endpoints of interface 0 (current alternate setting).
+    /// The endpoints of every claimed interface (alternate setting 0).
     pub fn endpoints(&self) -> &[EndpointInfo] {
         &self.endpoints
     }
 
-    /// The endpoint with address `addr`, if interface 0 has it.
+    /// The endpoint with address `addr`, if a claimed interface has it.
     pub fn endpoint(&self, addr: u8) -> Option<EndpointInfo> {
         self.endpoints.iter().copied().find(|e| e.address == addr)
     }
@@ -578,7 +613,7 @@ impl Net2280Usb {
         if addr == EP_CFGIN || addr == EP_PCIIN || addr == EP_STATIN {
             return Err(Error::Protocol("register and status endpoints do not carry a stream"));
         }
-        StreamReader::new(Pipe::open(&self.iface, addr)?, transfer_len, depth)
+        StreamReader::new(Pipe::open(&self.ifaces, addr)?, transfer_len, depth)
     }
 }
 
@@ -633,7 +668,7 @@ impl RemotePci for Net2280Usb {
         let idx = match outs.iter().position(|p| p.address() == endpoint) {
             Some(i) => i,
             None => {
-                outs.push(Pipe::open(&self.iface, endpoint)?);
+                outs.push(Pipe::open(&self.ifaces, endpoint)?);
                 outs.len() - 1
             }
         };
@@ -656,7 +691,7 @@ impl RemotePci for Net2280Usb {
     fn interrupt_status(&self, timeout: Duration) -> Result<Option<u32>> {
         let mut st = self.status.locked();
         if st.is_none() {
-            *st = Some(Pipe::open(&self.iface, EP_STATIN)?);
+            *st = Some(Pipe::open(&self.ifaces, EP_STATIN)?);
         }
         let Some(pipe) = st.as_mut() else { return Err(Error::Protocol("status endpoint not open")) };
         if pipe.pending() == 0 {

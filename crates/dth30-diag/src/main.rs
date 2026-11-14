@@ -274,7 +274,10 @@ fn pipes(t: &Net2280Usb) -> Vec<u8> {
 fn info(serial: Option<&str>) -> Res {
     let t = open(serial)?;
     for e in t.endpoints() {
-        println!("endpoint 0x{:02x} {:?} max packet {}", e.address, e.transfer_type, e.max_packet_size);
+        println!(
+            "interface {} endpoint 0x{:02x} {:?} max packet {}",
+            e.interface, e.address, e.transfer_type, e.max_packet_size
+        );
     }
     // The NET2280's own identity and a few registers: reads only.
     println!("NET2280 config 0x00 (vendor/device): 0x{:08x}", t.local_read(LocalSpace::Config, 0x00)?);
