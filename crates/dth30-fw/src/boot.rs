@@ -14,8 +14,8 @@ use core::arch::global_asm;
 pub const MAGIC: u32 = 0x3348_5444;
 /// Firmware version (image +0x104, FB 0xC4): major << 16 | minor.
 /// From version 2 the firmware clears the key RAM when it starts, and the
-/// host no longer does.
-pub const VERSION: u32 = 0x0000_0002;
+/// host no longer does. Version 3 starts from the state after power-on too.
+pub const VERSION: u32 = 0x0000_0003;
 
 global_asm!(
     r#"
@@ -63,9 +63,14 @@ _reset:
 
     .org 0x500
 _boot:
+    // After power-on the watch registers and Cause hold anything. A watch
+    // exception left pending in Cause (WP) is taken as soon as Status.ERL
+    // goes, so all of that is cleared first.
+    mtc0  $zero, $18                // WatchLo: no watchpoint
+    mtc0  $zero, $19                // WatchHi
+    mtc0  $zero, $13                // Cause
     lui   $t0, 0x0040               // Status: BEV = 1, kernel mode, interrupts off
     mtc0  $t0, $12
-    mtc0  $zero, $13                // Cause
     mtc0  $zero, $11                // Compare: drops a pending timer interrupt
     lui   $t0, 0xB004               // Only core 0 runs this firmware.
     lw    $t1, 0x3214($t0)
