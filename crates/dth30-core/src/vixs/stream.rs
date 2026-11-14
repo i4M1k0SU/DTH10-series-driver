@@ -279,9 +279,15 @@ pub struct EsEntry {
     pub pid: u16,
     pub stream_type: u8,
     /// The ECM PID sent with this stream (the vendor sends the
-    /// program-level CA descriptor's PID for every stream; 0 when none).
+    /// program-level CA descriptor's PID for every stream;
+    /// [`NO_ECM_PID`] when none).
     pub ecm_pid: u16,
 }
+
+/// The ECM PID of a stream that is not scrambled. The firmware takes 0 as
+/// well, but cannot tell two zeros from a duplicate and refuses the open
+/// (result 2) when more than one stream has 0.
+pub const NO_ECM_PID: u16 = 0x1FFF;
 
 /// The first MPEG-1/2 video stream's PID (stream type 1 or 2), else
 /// [`NO_VIDEO_PID`], as the vendor's filter picks it.
@@ -477,11 +483,12 @@ pub mod card_state {
 pub struct GenericBlockHeader {
     /// +0x30, see [`generic_kind`].
     pub kind: u32,
-    /// +0x44.
-    pub buf_index: u32,
+    /// +0x84: the firmware's ring number of the block (card state and
+    /// response blocks; +0x44 is always 0 in those).
+    pub ring_index: u32,
     /// +0x48: body length (used for device I/O blocks).
     pub size: u32,
-    /// +0x60 non-zero: the last frame.
+    /// +0x60 non-zero: the last frame (always 0 in card blocks).
     pub last: bool,
     /// +0x88, see [`card_state`].
     pub card: u32,
@@ -494,7 +501,7 @@ pub fn parse_generic_block(b: &[u8]) -> Option<(GenericBlockHeader, &[u8])> {
         return None;
     }
     let w = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-    let h = GenericBlockHeader { kind: w(0x30), buf_index: w(0x44), size: w(0x48), last: w(0x60) != 0, card: w(0x88) };
+    let h = GenericBlockHeader { kind: w(0x30), ring_index: w(0x84), size: w(0x48), last: w(0x60) != 0, card: w(0x88) };
     Some((h, &b[GENERIC_HEADER_LEN..]))
 }
 
@@ -1003,7 +1010,8 @@ pub(crate) mod tests {
     fn generic_blocks() {
         let mut b = vec![0u8; 0x8000];
         b[0x30..0x34].copy_from_slice(&0x20_0000u32.to_le_bytes());
-        b[0x44] = 7;
+        b[0x44] = 9; // not the ring number
+        b[0x84] = 7;
         b[0x48] = 0x10;
         b[0x60] = 1;
         b[0x88..0x8C].copy_from_slice(&0x2000u32.to_le_bytes());
@@ -1013,7 +1021,7 @@ pub(crate) mod tests {
             h,
             GenericBlockHeader {
                 kind: generic_kind::DRM,
-                buf_index: 7,
+                ring_index: 7,
                 size: 0x10,
                 last: true,
                 card: card_state::INSERTED

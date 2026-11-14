@@ -505,7 +505,9 @@ mod tests {
         );
         assert_eq!(&s[0x24..0x29], &[1, 2, 3, 4, 5]);
         assert!(s[0x29..].iter().all(|&b| b == 0));
-        let s = build_slot(0, 0x12_0000, 9, &[]).unwrap();
+        // Function 0 (ping) takes no payload. (A close without its payload
+        // would make the vendor's firmware corrupt FB 0x30.)
+        let s = build_slot(0, 0x12_0000, 0, &[]).unwrap();
         assert_eq!(u32::from_le_bytes(s[0x14..0x18].try_into().unwrap()), 0);
         assert!(build_slot(0, 0, 8, &vec![0; MAX_PAYLOAD + 1]).is_err());
         assert!(build_slot(0, 0, 8, &vec![0; MAX_PAYLOAD]).is_ok());
@@ -584,7 +586,8 @@ mod tests {
         // The next command takes the next slot.
         let slot_fb1 = v.ring.as_ref().unwrap().slot_fb(1);
         script_completion(v.bus(), 9, slot_fb1, 0);
-        let r = v.send_cmd(func::CLOSE_STREAM, &[]).unwrap();
+        // A close always carries the stream's open record (see `stream::build_close`).
+        let r = v.send_cmd(func::CLOSE_STREAM, &[0; crate::vixs::stream::OPEN_LEN]).unwrap();
         assert_eq!((r.slot, r.ok()), (1, false));
     }
 
