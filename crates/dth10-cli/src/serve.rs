@@ -776,7 +776,9 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     let state_dir = a.state_dir.clone().unwrap_or_else(default_state_dir);
     let keys = Arc::new(Keys { explicit: a.app_keys.clone(), state_dir: state_dir.clone(), loaded: Mutex::new(None) });
     if let Err(e) = keys.get() {
-        log::warn!("{e}; until then only raw terrestrial streams are served");
+        log::warn!(
+            "{e}; until then DTH10-series units serve only raw terrestrial streams (DT-H30/U2-family units need no key file)"
+        );
     }
     let recipient = match a.recipient {
         Some(RecipientArg::Device) => RecipientMode::Device,
