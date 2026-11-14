@@ -28,7 +28,7 @@ pub const READ_LIMIT: u32 = 10_000;
 /// `clear_table`: zero the 128-entry table from here, as the vendor's host
 /// does after its firmware has started (about a second of register
 /// accesses over USB). A firmware that clears the table itself makes this
-/// unnecessary ([`super::Firmware::clears_key_ram`]).
+/// unnecessary (the project's own does, [`super::Firmware::is_own`]).
 pub fn init<B: RemotePci>(chip: &mut Chip<B>, clear_table: bool) -> Result<()> {
     let v = chip.mmr_read_checked(0x000)? | 0x402;
     chip.mmr_write_checked(0x000, v)?;

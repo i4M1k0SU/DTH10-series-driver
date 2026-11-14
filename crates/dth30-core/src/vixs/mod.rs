@@ -157,7 +157,8 @@ impl<B: RemotePci> Vixs<B> {
         self.mem = Some(mem);
         self.mips = Some(info);
 
-        dma::init(&mut self.chip, !fw.clears_key_ram())?;
+        // The project's own firmware clears the key RAM itself when it starts.
+        dma::init(&mut self.chip, !fw.is_own())?;
         i2c::init(&mut self.chip)?;
         gpio::init(&mut self.chip)?;
         if self.opts.read_otp {

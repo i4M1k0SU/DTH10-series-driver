@@ -211,12 +211,6 @@ impl Firmware {
         FIRMWARE_FILES.iter().flat_map(|name| dirs.iter().map(move |d| d.join(name))).find(|p| p.is_file())
     }
 
-    /// Whether the firmware clears the chip's key RAM itself when it starts
-    /// (the project's own, from version 2): the host then need not.
-    pub fn clears_key_ram(&self) -> bool {
-        self.is_own() && self.word(OWN_MAGIC_OFFSET + 4).is_some_and(|v| v >= 2)
-    }
-
     /// Whether this is the project's own firmware rather than the vendor's.
     pub fn is_own(&self) -> bool {
         self.word(OWN_MAGIC_OFFSET) == Some(OWN_MAGIC)
@@ -432,17 +426,13 @@ mod tests {
         img[0x110..0x114].copy_from_slice(&1u32.to_le_bytes());
         img[0x124..0x128].copy_from_slice(&0x3C1A_A010u32.to_le_bytes());
         let f = Firmware::from_bytes(&img).unwrap();
-        assert!(f.is_own() && !f.clears_key_ram());
+        assert!(f.is_own());
         assert_eq!(f.vectors().unwrap()[0].words[0], 0x3C1A_A010);
-        // From version 2 the firmware clears the key RAM itself.
-        img[0x104..0x108].copy_from_slice(&2u32.to_le_bytes());
-        assert!(Firmware::from_bytes(&img).unwrap().clears_key_ram());
         // The mark does not excuse a broken vector table.
         img[0x110..0x114].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         assert!(Firmware::from_bytes(&img).is_err());
         // The vendor's image has no such mark.
-        let vendor = Firmware::unverified(test_image());
-        assert!(!vendor.is_own() && !vendor.clears_key_ram());
+        assert!(!Firmware::unverified(test_image()).is_own());
     }
 
     /// An own image for the file tests: the mark and a one-entry vector table.
