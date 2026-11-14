@@ -10,14 +10,19 @@
 #![feature(asm_experimental_arch)]
 
 mod boot;
+mod card;
+mod cas;
 mod dma;
 mod host;
 mod hw;
+mod keyram;
 mod otp;
 mod ts;
 
 use core::panic::PanicInfo;
 
+use card::Card;
+use cas::Cas;
 use dma::Dma;
 use host::{Command, FAILED, Host, OK, UNSUPPORTED};
 use hw::{Clock, fb_r, fb_w};
@@ -37,6 +42,8 @@ struct Firmware {
     host: Host,
     dma: Dma,
     ts: Ts,
+    card: Card,
+    cas: Cas,
 }
 
 impl Firmware {
@@ -58,7 +65,10 @@ impl Firmware {
             },
             9 => self.ts.close(fb_r(p)),
             10 => self.ts.flush(fb_r(p)),
+            11 => self.cas.input(p, &mut self.card),
             24 => self.ts.configure(),
+            25 => self.cas.open(p),
+            26 => self.cas.close(fb_r(p)),
             _ => FAILED,
         }
     }
@@ -81,7 +91,8 @@ pub extern "C" fn fw_main() -> ! {
     let clock = Clock::new(khz);
     let mut host = Host::new(&clock);
     host.handshake();
-    let mut fw = Firmware { clock, host, dma: Dma::new(), ts: Ts::new() };
+    let card = Card::new(&clock);
+    let mut fw = Firmware { clock, host, dma: Dma::new(), ts: Ts::new(), card, cas: Cas::new() };
     fw.host.ready();
     loop {
         fw.host.poll_tick();
@@ -89,7 +100,12 @@ pub extern "C" fn fw_main() -> ! {
             let result = fw.command(&c);
             fw.host.complete(&c, result);
         }
+        fw.card.poll();
+        while let Some(out) = fw.card.take_output() {
+            fw.cas.card_output(out, &mut fw.host);
+        }
         fw.dma.poll();
+        fw.cas.poll(fw.card.status(), &mut fw.dma);
         fw.ts.poll(&mut fw.dma);
     }
 }

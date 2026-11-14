@@ -187,8 +187,7 @@ impl Host {
     }
 
     /// Take a message body for message `id`; `None` when all are in use.
-    /// Returns the body's index for [`Host::send`]; the descriptor (zeroed,
-    /// 0x25C bytes) is at the body's +0x24.
+    /// Returns the body's index for [`Host::descriptor`] and [`Host::send`].
     pub fn message(&mut self, id: u32) -> Option<u8> {
         let i = self.used.iter().position(|u| !u)?;
         self.used[i] = true;
@@ -204,6 +203,11 @@ impl Host {
 
     fn body(i: u8) -> u32 {
         MSG_BASE + MSG_STRIDE * u32::from(i)
+    }
+
+    /// Physical address of a message's descriptor (0x25C bytes, zeroed).
+    pub fn descriptor(m: u8) -> u32 {
+        Self::body(m) + MSG_DESC
     }
 
     /// Queue a message; it goes out when the earlier ones are acknowledged.
