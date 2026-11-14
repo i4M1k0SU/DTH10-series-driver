@@ -1,0 +1,32 @@
+[package]
+name = "dth-bondriver"
+description = "BonDriver (IBonDriver2) DLL for the BUFFALO DTH10/DTH30 series of USB TV tuners: a client of `dth serve`, which it starts itself"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "BonDriver_DTH"
+crate-type = ["cdylib"]
+
+[dependencies]
+dth-common.workspace = true
+dth-proto.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_WindowsProgramming"] }
+
+[features]
+# `cargo test --features rtti-check`: a C++ test (tests/rtti_check.cpp, built
+# with the host's MSVC by build.rs) runs a real dynamic_cast<IBonDriver2*> on
+# the object from CreateBonDriver. Off by default: a plain build needs no C++.
+rtti-check = []
+
+[build-dependencies]
+jiff.workspace = true
+cc = "1.11.1"
+winresource.workspace = true

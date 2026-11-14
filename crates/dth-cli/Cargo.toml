@@ -1,0 +1,37 @@
+[package]
+name = "dth-cli"
+description = "Stand-alone tuner command and daemon for the BUFFALO DTH10/DTH30 series of USB TV tuners: tune and stream the TS (Linux usbfs / Windows WinUSB / macOS IOKit)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The package is dth-cli (named like the other crates of the workspace);
+# the command it builds is `dth` (`dth.exe` next to the BonDriver DLL).
+[[bin]]
+name = "dth"
+path = "src/main.rs"
+
+[dependencies]
+dth-common.workspace = true
+dth-proto.workspace = true
+dth10-core.workspace = true
+dth10-usb.workspace = true
+dth10-backend.workspace = true
+dth30-backend.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# SIGTERM / SIGINT / SIGHUP end the stream; access(2) for the state directory.
+libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+# Ctrl-C ends the stream.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[build-dependencies]
+jiff.workspace = true
+winresource.workspace = true

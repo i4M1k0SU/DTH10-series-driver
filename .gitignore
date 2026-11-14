@@ -226,8 +226,10 @@ $RECYCLE.BIN/
 # End of https://www.toptal.com/developers/gitignore/api/rust,windows,linux,macos,visualstudiocode,clion
 
 CoBDACom.dll
+BufFsUSB.sys
 *.cepm
 *.log
+dth.sock
 dth10.sock
 
 # Python release tooling

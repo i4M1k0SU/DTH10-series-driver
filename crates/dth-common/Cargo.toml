@@ -1,0 +1,10 @@
+[package]
+name = "dth-common"
+description = "Device-independent parts shared by the BUFFALO DTH10/DTH30 series drivers (std only): the error type, channel tables, stream settings, the TS queue and the Session / Backend traits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

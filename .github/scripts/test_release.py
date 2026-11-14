@@ -27,16 +27,16 @@ class ReleaseTests(unittest.TestCase):
         )
         for name in ("README.md", "LICENSE"):
             (self.root / name).write_text(name, encoding="utf-8")
-        ini = self.root / "crates/dth10-bondriver/BonDriver_DTH10.ini"
+        ini = self.root / "crates/dth-bondriver/BonDriver_DTH.ini"
         ini.parent.mkdir(parents=True)
         ini.write_text("[Device]\n", encoding="utf-8")
 
     def binaries(self, target):
         directory = self.root / "target" / target / "release"
         directory.mkdir(parents=True)
-        names = ("dth10", "dth10-diag", "dth30-diag")
+        names = ("dth", "dth10-diag", "dth30-diag")
         if "windows" in target:
-            names = ("dth10.exe", "dth10-diag.exe", "dth30-diag.exe", "BonDriver_DTH10.dll")
+            names = ("dth.exe", "dth10-diag.exe", "dth30-diag.exe", "BonDriver_DTH.dll")
         for name in (*names, "CoBDACom.dll", "unwanted.pdb"):
             (directory / name).write_bytes(b"binary")
         return directory
@@ -67,11 +67,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(
             names,
             {
-                "dth10.exe",
+                "dth.exe",
                 "dth10-diag.exe",
                 "dth30-diag.exe",
-                "BonDriver_DTH10.dll",
-                "BonDriver_DTH10.ini",
+                "BonDriver_DTH.dll",
+                "BonDriver_DTH.ini",
                 "README.md",
                 "LICENSE",
             },
@@ -85,13 +85,13 @@ class ReleaseTests(unittest.TestCase):
                 modes = {Path(info.name).name: info.mode for info in bundle.getmembers()}
             self.assertEqual(
                 modes,
-                {"dth10": 0o755, "dth10-diag": 0o755, "dth30-diag": 0o755, "README.md": 0o644, "LICENSE": 0o644},
+                {"dth": 0o755, "dth10-diag": 0o755, "dth30-diag": 0o755, "README.md": 0o644, "LICENSE": 0o644},
             )
 
     def test_missing_binary_prevents_archive(self):
         target = "x86_64-pc-windows-msvc"
         directory = self.binaries(target)
-        (directory / "BonDriver_DTH10.dll").unlink()
+        (directory / "BonDriver_DTH.dll").unlink()
         with self.assertRaises(FileNotFoundError):
             release.package(self.root, target, self.root / "dist")
         self.assertFalse((self.root / "dist").exists())

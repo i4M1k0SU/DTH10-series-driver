@@ -313,13 +313,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "dth10-bondriver"
+name = "dth-bondriver"
 version = "1.1.0"
 dependencies = [
  "cc",
- "dth10-core",
- "dth10-tuner",
- "dth10-usb",
+ "dth-common",
+ "dth-proto",
  "env_logger",
  "jiff",
  "log",
@@ -328,14 +327,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "dth10-cli"
+name = "dth-cli"
 version = "1.1.0"
 dependencies = [
  "clap",
+ "dth-common",
+ "dth-proto",
+ "dth10-backend",
  "dth10-core",
- "dth10-tuner",
  "dth10-usb",
- "dth30-core",
+ "dth30-backend",
  "env_logger",
  "jiff",
  "libc",
@@ -345,11 +346,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "dth-common"
+version = "1.1.0"
+
+[[package]]
+name = "dth-proto"
+version = "1.1.0"
+dependencies = [
+ "dth-common",
+ "socket2",
+]
+
+[[package]]
+name = "dth10-backend"
+version = "1.1.0"
+dependencies = [
+ "dth-common",
+ "dth10-core",
+ "dth10-usb",
+ "log",
+]
+
+[[package]]
 name = "dth10-core"
 version = "1.1.0"
 dependencies = [
  "aes",
  "cmac",
+ "dth-common",
  "log",
  "num-bigint",
  "num-integer",
@@ -363,25 +387,13 @@ name = "dth10-diag"
 version = "1.1.0"
 dependencies = [
  "clap",
+ "dth-common",
  "dth10-core",
- "dth10-tuner",
  "dth10-usb",
  "env_logger",
  "jiff",
  "log",
  "winresource",
-]
-
-[[package]]
-name = "dth10-tuner"
-version = "1.1.0"
-dependencies = [
- "dth10-core",
- "dth10-usb",
- "dth30-core",
- "dth30-usb",
- "log",
- "socket2",
 ]
 
 [[package]]
@@ -394,10 +406,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dth30-backend"
+version = "1.1.0"
+dependencies = [
+ "dth-common",
+ "dth30-core",
+ "dth30-usb",
+ "log",
+]
+
+[[package]]
 name = "dth30-core"
 version = "1.1.0"
 dependencies = [
- "dth10-core",
+ "dth-common",
  "log",
  "sha2",
 ]
@@ -407,7 +429,6 @@ name = "dth30-diag"
 version = "1.1.0"
 dependencies = [
  "clap",
- "dth10-core",
  "dth30-core",
  "dth30-usb",
  "env_logger",
@@ -420,7 +441,7 @@ dependencies = [
 name = "dth30-usb"
 version = "1.1.0"
 dependencies = [
- "dth10-core",
+ "dth-common",
  "dth30-core",
  "log",
  "nusb",

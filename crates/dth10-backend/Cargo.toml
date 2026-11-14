@@ -1,0 +1,14 @@
+[package]
+name = "dth10-backend"
+description = "The BUFFALO DTH10 series behind dth-common's Session and Backend: device-mode PID learning, CEPM decryption, the TS reader thread"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dth-common.workspace = true
+dth10-core.workspace = true
+dth10-usb.workspace = true
+log.workspace = true

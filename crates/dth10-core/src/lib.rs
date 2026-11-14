@@ -136,19 +136,7 @@ pub fn unverified_kit_error(pid: u16, tuner: u8, e: Error) -> Error {
     }
 }
 
-/// `Mutex::lock` that carries on when a thread panicked while holding the
-/// lock: what these crates keep behind a mutex (queues, handshake sets,
-/// connection slots) stays usable, and a poisoned lock would otherwise take
-/// the whole tuner down with the one thread.
-pub trait LockExt<T> {
-    fn locked(&self) -> std::sync::MutexGuard<'_, T>;
-}
-
-impl<T> LockExt<T> for std::sync::Mutex<T> {
-    fn locked(&self) -> std::sync::MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
+pub use dth_common::LockExt;
 
 #[cfg(test)]
 mod tests {

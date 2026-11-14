@@ -1,15 +1,18 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/dth-common",
+    "crates/dth-proto",
     "crates/dth10-core",
     "crates/dth10-usb",
     "crates/dth10-diag",
-    "crates/dth10-tuner",
-    "crates/dth10-cli",
-    "crates/dth10-bondriver",
+    "crates/dth10-backend",
+    "crates/dth-cli",
+    "crates/dth-bondriver",
     "crates/dth30-core",
     "crates/dth30-usb",
     "crates/dth30-diag",
+    "crates/dth30-backend",
 ]
 
 [workspace.package]
@@ -21,11 +24,14 @@ license = "MIT"
 repository = "https://github.com/i4M1k0SU/DTH10-series-driver/"
 
 [workspace.dependencies]
+dth-common = { path = "crates/dth-common" }
+dth-proto = { path = "crates/dth-proto" }
 dth10-core = { path = "crates/dth10-core" }
 dth10-usb = { path = "crates/dth10-usb" }
-dth10-tuner = { path = "crates/dth10-tuner" }
+dth10-backend = { path = "crates/dth10-backend" }
 dth30-core = { path = "crates/dth30-core" }
 dth30-usb = { path = "crates/dth30-usb" }
+dth30-backend = { path = "crates/dth30-backend" }
 nusb = "0.2.9"
 log = "0.4.35"
 env_logger = "0.11.11"
