@@ -489,6 +489,8 @@ fn record(
     raw: bool,
 ) -> Res {
     let mut d = tune(serial, a, cas)?;
+    // The lamps show the unit in use while it records, as the vendor's application does.
+    d.set_in_use(true)?;
     // The Raw stream is the broadcast TS as received and needs no card: the
     // CAS object is only opened (and the card reset) for the Program stream.
     let mut cas_rd = if raw { None } else { Some(open_cas_and_wait(&mut d)?) };
@@ -509,6 +511,7 @@ fn record(
         r.stop();
         let _ = d.flush_endpoint_fifo(cas_info.endpoint);
     }
+    let _ = d.set_in_use(false);
     result?;
     println!("wrote {}: {} packets, {} scrambled", output.display(), count.packets, count.scrambled);
     Ok(())

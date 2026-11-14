@@ -263,6 +263,15 @@ impl Dth30Tuner {
         }
     }
 
+    /// The unit's lamps: in use while a stream runs (the vendor
+    /// application's "watching"), idle otherwise. Kept through a channel
+    /// change so they do not flicker.
+    fn lamps(&mut self, in_use: bool) {
+        if let Err(e) = self.dev.set_in_use(in_use) {
+            log::debug!("unit {}: lamps: {e}", self.name);
+        }
+    }
+
     /// Stop the stream: Program, then Raw.
     fn stop_stream(&mut self) {
         let Some(p) = self.pump.take() else { return };
@@ -273,6 +282,21 @@ impl Dth30Tuner {
         if let Some((info, r)) = raw {
             self.close_stream(&info, r);
         }
+    }
+}
+
+impl Dth30Tuner {
+    fn tune_and_start(&mut self, ch: &Channel) -> Result<()> {
+        self.dev.tune(ch.frequency_hz)?;
+        if !self.wait_lock()? {
+            return Err(Error::Protocol("ISDB-T: no lock (no signal on this channel)"));
+        }
+        if self.mode == StreamModeCfg::Device {
+            self.ensure_cas()?;
+        }
+        self.start_stream()?;
+        self.current = Some(ch.clone());
+        Ok(())
     }
 }
 
@@ -310,16 +334,9 @@ impl Session for Dth30Tuner {
         log::info!("unit {}: tune {} ({} Hz), {:?}", self.name, ch.name, ch.frequency_hz, self.mode);
         self.stop_stream();
         self.current = None;
-        self.dev.tune(ch.frequency_hz)?;
-        if !self.wait_lock()? {
-            return Err(Error::Protocol("ISDB-T: no lock (no signal on this channel)"));
-        }
-        if self.mode == StreamModeCfg::Device {
-            self.ensure_cas()?;
-        }
-        self.start_stream()?;
-        self.current = Some(ch.clone());
-        Ok(())
+        let started = self.tune_and_start(ch);
+        self.lamps(started.is_ok());
+        started
     }
 
     fn signal_level_of(&mut self, tuner: usize) -> f32 {
@@ -339,6 +356,7 @@ impl Session for Dth30Tuner {
         if tuner == 0 {
             self.stop_stream();
             self.current = None;
+            self.lamps(false);
         }
     }
 
@@ -357,6 +375,7 @@ impl Session for Dth30Tuner {
     fn close(&mut self) {
         self.stop_stream();
         self.current = None;
+        self.lamps(false);
         if let Some(c) = self.cas.take() {
             let (info, r) = c.stop();
             self.close_stream(&info, r);

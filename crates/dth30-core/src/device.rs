@@ -193,6 +193,17 @@ impl<B: RemotePci> Dth30<B> {
         r
     }
 
+    /// Show the unit as in use (the vendor application's "watching") or
+    /// idle ("not using") on its lamps, as the application does through
+    /// the driver while it views or records. Only boards 0xB4 and 0xC6
+    /// have the lamps; on a DT-H50/U2 in use is power blue and status red,
+    /// idle is power red (standby) and status green. Bring-up leaves the
+    /// unit idle.
+    pub fn set_in_use(&mut self, in_use: bool) -> Result<()> {
+        let s = if in_use { gpio::app_status::WATCHING } else { gpio::app_status::NOT_USING };
+        self.vixs_mut().set_app_status(s)
+    }
+
     /// The TS input set-up for the board's kit. Refused while a stream is
     /// open (the firmware would answer status 30).
     pub fn tsd_config(&mut self) -> Result<()> {
