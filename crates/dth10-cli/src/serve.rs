@@ -27,6 +27,13 @@
 //! vendor's `CoBDACom.dll`) is read when it is there, or when a request first
 //! needs it; without it the daemon still serves raw terrestrial streams and
 //! refuses device-mode and BS/CS requests with the reason.
+//!
+//! Units of the DT-H30/U2 family (`dth10_tuner::dth30`) are served the same
+//! way: one terrestrial tuner, `raw` = the scrambled TS as received,
+//! `device` = one service descrambled by the unit's own B-CAS card. They
+//! need no application key file but the firmware from the vendor's
+//! `BufFsUSB.sys` (`--firmware`). A unit without a USB serial number is
+//! named `DTH30-<product ID>`.
 
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -38,7 +45,8 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use dth10_core::LockExt;
 use dth10_core::cepm::AppKeys;
-use dth10_tuner::{DeviceProgram, StreamModeCfg, System, TsQueue, Tuner, TunerConfig, default_tuner};
+use dth10_tuner::dth30::{self, Dth30Tuner};
+use dth10_tuner::{DeviceProgram, Session, StreamModeCfg, System, TsQueue, Tuner, TunerConfig, default_tuner};
 use dth10_usb::{RecipientMode, UsbTransport};
 
 use crate::{RecipientArg, app_keys_path, default_state_dir, lnb_of, state_file_for, stop};
@@ -69,6 +77,10 @@ pub struct ServeArgs {
     /// the state directory, else next to this executable.
     #[arg(long, value_name = "FILE")]
     app_keys: Option<PathBuf>,
+    /// DT-H30/U2 family: the vendor driver BufFsUSB.sys the firmware is taken from. Default:
+    /// $DTH30_FIRMWARE, else BufFsUSB.sys in the state directory, else next to this executable.
+    #[arg(long, value_name = "FILE")]
+    firmware: Option<PathBuf>,
     /// Antenna (LNB) supply for BS/CS: 0 (off), 110 (11 V) or 150 (15 V). The DT-H70/U2
     /// has no such supply (the setting is for family models that have one).
     #[arg(long, value_name = "V", default_value_t = 0)]
@@ -136,16 +148,50 @@ impl Keys {
     }
 }
 
+/// The family of a unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    /// The DTH10 series (`dth10_tuner::Tuner`).
+    Dth10,
+    /// The DT-H30/U2 family (`dth10_tuner::dth30`).
+    Dth30,
+}
+
+impl Family {
+    /// Whether a request needs the application credentials (before the
+    /// unit is open; [`Session::needs_app_keys`] says the same once it is).
+    fn needs_app_keys(self, raw: bool, system: System) -> bool {
+        match self {
+            Family::Dth10 => !raw || system == System::IsdbS,
+            Family::Dth30 => false,
+        }
+    }
+
+    /// The family of a unit named on the command line: a DT-H30/U2-family
+    /// name, or a serial number found among that family's devices now; else
+    /// the DTH10 series.
+    fn of_name(name: &str) -> Family {
+        if name.starts_with(dth30::UNIT_PREFIX) || dth30::list().is_ok_and(|l| l.iter().any(|(n, _)| n == name)) {
+            Family::Dth30
+        } else {
+            Family::Dth10
+        }
+    }
+}
+
 /// One served unit.
 struct Unit {
     serial: String,
+    family: Family,
+    /// DT-H30/U2 family: where the firmware is looked for.
+    firmware: Firmware,
     cfg: TunerConfig,
     keys: Arc<Keys>,
     recipient: RecipientMode,
     /// The TS of each tuner: 0 = terrestrial, 1 = satellite (or the second terrestrial tuner).
     queues: [TsQueue; 2],
     /// `None` while the unit is not open (lost; opened again on the next request).
-    tuner: Mutex<Option<Tuner>>,
+    tuner: Mutex<Option<Box<dyn Session>>>,
     /// Whether tuner #1 is a second terrestrial tuner; `None` until the unit was first opened.
     second_ter: Mutex<Option<bool>>,
     /// Per tuner: the connection streaming it and the flag that ends that connection's stream.
@@ -275,15 +321,22 @@ fn tuner_name(system: System, tuner: usize, second_ter: bool) -> &'static str {
 
 impl Unit {
     /// Open the device unless it is open already.
-    fn open(&self, tuner: &mut Option<Tuner>) -> Result<(), String> {
+    fn open(&self, tuner: &mut Option<Box<dyn Session>>) -> Result<(), String> {
         if tuner.is_some() {
             return Ok(());
         }
         let t0 = Instant::now();
-        let transport = UsbTransport::open_matching(self.recipient, Some(&self.serial))
-            .map_err(|e| format!("unit {}: {e}", self.serial))?;
-        let mut t = Tuner::open_with(transport, &self.cfg, self.queues[0].clone())
-            .map_err(|e| format!("unit {}: {e}", self.serial))?;
+        let err = |e: dth10_core::Error| format!("unit {}: {e}", self.serial);
+        let mut t: Box<dyn Session> = match self.family {
+            Family::Dth10 => {
+                let transport = UsbTransport::open_matching(self.recipient, Some(&self.serial)).map_err(err)?;
+                Box::new(Tuner::open_with(transport, &self.cfg, self.queues[0].clone()).map_err(err)?)
+            }
+            Family::Dth30 => {
+                let fw = self.firmware.load()?;
+                Box::new(Dth30Tuner::open(&self.serial, &fw, self.cfg.read_depth, self.queues[0].clone()).map_err(err)?)
+            }
+        };
         t.set_queue(1, self.queues[1].clone());
         if let Some(k) = self.keys.loaded() {
             t.with_app_keys(k);
@@ -408,7 +461,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
     // Device mode and BS/CS decrypt the link, which takes the application
     // credentials; a raw terrestrial stream does not. Refused here, before the
     // stream is claimed, with a reason the client can act on.
-    let keys = if !req.raw || system == System::IsdbS {
+    let keys = if unit.family.needs_app_keys(req.raw, system) {
         match unit.keys.get() {
             Ok(k) => Some(k),
             Err(e) => {
@@ -675,22 +728,47 @@ const SCAN_WITHOUT_UNIT: Duration = Duration::from_secs(2);
 const SCAN_WITH_UNITS: Duration = Duration::from_secs(10);
 
 /// Add a unit for every supported device that is not served yet.
-fn discover(units: &Units, make_unit: &dyn Fn(&str) -> Arc<Unit>) {
-    let found = match UsbTransport::list_all() {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("device list: {e}");
-            return;
-        }
-    };
+fn discover(units: &Units, make_unit: &dyn Fn(&str, Family) -> Arc<Unit>) {
+    let mut found: Vec<(String, Family, String, String)> = Vec::new();
+    match UsbTransport::list_all() {
+        Ok(v) => found.extend(v.into_iter().filter_map(|d| {
+            let serial = d.serial?;
+            Some((serial, Family::Dth10, dth10_core::product_label(d.product_id), d.location))
+        })),
+        Err(e) => log::debug!("device list: {e}"),
+    }
+    match dth30::list() {
+        Ok(v) => found.extend(v.into_iter().map(|(n, d)| (n, Family::Dth30, d.product_label(), d.location))),
+        Err(e) => log::debug!("DT-H30/U2-family device list: {e}"),
+    }
     let mut u = units.locked();
-    for d in found {
-        let Some(serial) = d.serial else { continue };
+    for (serial, family, label, location) in found {
         if u.iter().any(|x| x.serial == serial) {
             continue;
         }
-        log::info!("dth10 serve: unit {serial} ({}) at {}", dth10_core::product_label(d.product_id), d.location);
-        u.push(make_unit(&serial));
+        log::info!("dth10 serve: unit {serial} ({label}) at {location}");
+        u.push(make_unit(&serial, family));
+    }
+}
+
+/// Where a DT-H30/U2-family unit's firmware comes from: looked for on each
+/// open, so the file may be put in place while the daemon runs.
+#[derive(Clone)]
+struct Firmware {
+    explicit: Option<PathBuf>,
+    state_dir: PathBuf,
+}
+
+impl Firmware {
+    fn load(&self) -> Result<dth30_core::vixs::Firmware, String> {
+        let Some(p) = dth30::firmware_path(self.explicit.as_deref(), &self.state_dir) else {
+            return Err(format!(
+                "the DT-H30/U2 family needs the vendor driver {} for its firmware: put it in {} or give --firmware",
+                dth30::FIRMWARE_FILE,
+                self.state_dir.display()
+            ));
+        };
+        dth30_core::vixs::Firmware::load(&p).map_err(|e| format!("firmware {}: {e}", p.display()))
     }
 }
 
@@ -698,7 +776,9 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     let state_dir = a.state_dir.clone().unwrap_or_else(default_state_dir);
     let keys = Arc::new(Keys { explicit: a.app_keys.clone(), state_dir: state_dir.clone(), loaded: Mutex::new(None) });
     if let Err(e) = keys.get() {
-        log::warn!("{e}; until then only raw terrestrial streams are served");
+        log::warn!(
+            "{e}; until then DTH10-series units serve only raw terrestrial streams (DT-H30/U2-family units need no key file)"
+        );
     }
     let recipient = match a.recipient {
         Some(RecipientArg::Device) => RecipientMode::Device,
@@ -706,7 +786,8 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
         None => RecipientMode::platform_default(),
     };
     let (lnb_voltage, lnb_power) = lnb_of(a.lnb);
-    let make_unit = |serial: &str| -> Arc<Unit> {
+    let firmware = Firmware { explicit: a.firmware.clone(), state_dir: state_dir.clone() };
+    let make_unit = |serial: &str, family: Family| -> Arc<Unit> {
         let cfg = TunerConfig {
             recipient,
             serial: serial.to_owned(),
@@ -729,6 +810,8 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
         };
         Arc::new(Unit {
             serial: serial.to_owned(),
+            family,
+            firmware: firmware.clone(),
             cfg,
             keys: keys.clone(),
             recipient,
@@ -747,7 +830,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     } else {
         let mut u = units.locked();
         for s in &a.serial {
-            u.push(make_unit(s));
+            u.push(make_unit(s, Family::of_name(s)));
         }
     }
     // Listen first: a second daemon for the same target ends here, before it

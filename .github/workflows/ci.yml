@@ -35,7 +35,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            packages: -p dth10-core -p dth10-usb -p dth10-tuner -p dth10-cli -p dth10-diag
+            packages: -p dth10-core -p dth10-usb -p dth10-tuner -p dth10-cli -p dth10-diag -p dth30-core -p dth30-usb -p dth30-diag
           - os: windows-latest
             packages: --workspace
     runs-on: ${{ matrix.os }}
@@ -70,22 +70,22 @@ jobs:
             packages: --workspace
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            packages: -p dth10-cli -p dth10-diag
+            packages: -p dth10-cli -p dth10-diag -p dth30-diag
           - target: i686-unknown-linux-musl
             os: ubuntu-latest
-            packages: -p dth10-cli -p dth10-diag
+            packages: -p dth10-cli -p dth10-diag -p dth30-diag
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            packages: -p dth10-cli -p dth10-diag
+            packages: -p dth10-cli -p dth10-diag -p dth30-diag
           - target: armv7-unknown-linux-musleabihf
             os: ubuntu-latest
-            packages: -p dth10-cli -p dth10-diag
+            packages: -p dth10-cli -p dth10-diag -p dth30-diag
           - target: x86_64-apple-darwin
             os: macos-latest
-            packages: -p dth10-cli -p dth10-diag
+            packages: -p dth10-cli -p dth10-diag -p dth30-diag
           - target: aarch64-apple-darwin
             os: macos-latest
-            packages: -p dth10-cli -p dth10-diag
+            packages: -p dth10-cli -p dth10-diag -p dth30-diag
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

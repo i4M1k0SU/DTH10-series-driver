@@ -1,0 +1,14 @@
+[package]
+name = "dth30-usb"
+description = "nusb (WinUSB / usbfs / IOKit) transport for dth30-core: the PLX NET2280 in PCI host mode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dth10-core.workspace = true
+dth30-core.workspace = true
+nusb.workspace = true
+log.workspace = true

@@ -34,9 +34,9 @@ class ReleaseTests(unittest.TestCase):
     def binaries(self, target):
         directory = self.root / "target" / target / "release"
         directory.mkdir(parents=True)
-        names = ("dth10", "dth10-diag")
+        names = ("dth10", "dth10-diag", "dth30-diag")
         if "windows" in target:
-            names = ("dth10.exe", "dth10-diag.exe", "BonDriver_DTH10.dll")
+            names = ("dth10.exe", "dth10-diag.exe", "dth30-diag.exe", "BonDriver_DTH10.dll")
         for name in (*names, "CoBDACom.dll", "unwanted.pdb"):
             (directory / name).write_bytes(b"binary")
         return directory
@@ -66,7 +66,15 @@ class ReleaseTests(unittest.TestCase):
             names = {Path(name).name for name in bundle.namelist()}
         self.assertEqual(
             names,
-            {"dth10.exe", "dth10-diag.exe", "BonDriver_DTH10.dll", "BonDriver_DTH10.ini", "README.md", "LICENSE"},
+            {
+                "dth10.exe",
+                "dth10-diag.exe",
+                "dth30-diag.exe",
+                "BonDriver_DTH10.dll",
+                "BonDriver_DTH10.ini",
+                "README.md",
+                "LICENSE",
+            },
         )
 
     def test_unix_tar_preserves_executable_modes(self):
@@ -75,7 +83,10 @@ class ReleaseTests(unittest.TestCase):
             archive = release.package(self.root, target, self.root / "dist")
             with tarfile.open(archive) as bundle:
                 modes = {Path(info.name).name: info.mode for info in bundle.getmembers()}
-            self.assertEqual(modes, {"dth10": 0o755, "dth10-diag": 0o755, "README.md": 0o644, "LICENSE": 0o644})
+            self.assertEqual(
+                modes,
+                {"dth10": 0o755, "dth10-diag": 0o755, "dth30-diag": 0o755, "README.md": 0o644, "LICENSE": 0o644},
+            )
 
     def test_missing_binary_prevents_archive(self):
         target = "x86_64-pc-windows-msvc"

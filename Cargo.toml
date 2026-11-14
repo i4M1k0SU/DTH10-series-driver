@@ -7,6 +7,9 @@ members = [
     "crates/dth10-tuner",
     "crates/dth10-cli",
     "crates/dth10-bondriver",
+    "crates/dth30-core",
+    "crates/dth30-usb",
+    "crates/dth30-diag",
 ]
 
 [workspace.package]
@@ -21,6 +24,8 @@ repository = "https://github.com/i4M1k0SU/DTH10-series-driver/"
 dth10-core = { path = "crates/dth10-core" }
 dth10-usb = { path = "crates/dth10-usb" }
 dth10-tuner = { path = "crates/dth10-tuner" }
+dth30-core = { path = "crates/dth30-core" }
+dth30-usb = { path = "crates/dth30-usb" }
 nusb = "0.2.9"
 log = "0.4.35"
 env_logger = "0.11.11"

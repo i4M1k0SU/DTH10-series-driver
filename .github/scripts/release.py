@@ -22,6 +22,8 @@ TARGETS = (
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 )
+# The command-line binaries every archive carries.
+BINARIES = ("dth10", "dth10-diag", "dth30-diag")
 
 
 def validate_tag(version, tag):
@@ -67,7 +69,7 @@ def package(root, target, output):
     windows = "windows" in target
     binary_dir = root / "target" / target / "release"
     extension = ".exe" if windows else ""
-    files = [(binary_dir / (name + extension), name + extension) for name in ("dth10", "dth10-diag")]
+    files = [(binary_dir / (name + extension), name + extension) for name in BINARIES]
     files += [(root / name, name) for name in ("README.md", "LICENSE")]
     if windows:
         files += [
@@ -88,7 +90,7 @@ def package(root, target, output):
         with tarfile.open(archive, "w:gz") as bundle:
             for source, destination in files:
                 info = bundle.gettarinfo(str(source), arcname=f"{folder}/{destination}")
-                info.mode = 0o755 if destination in ("dth10", "dth10-diag") else 0o644
+                info.mode = 0o755 if destination in BINARIES else 0o644
                 info.uid = info.gid = 0
                 info.uname = info.gname = ""
                 with source.open("rb") as file:

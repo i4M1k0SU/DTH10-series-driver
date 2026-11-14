@@ -1,0 +1,20 @@
+[package]
+name = "dth30-diag"
+description = "Hardware diagnostic tool for the BUFFALO DT-H30/U2 family of USB TV tuners (developer use: NET2280 and ViXS registers, firmware, I2C, front-end probes)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dth10-core.workspace = true
+dth30-core.workspace = true
+dth30-usb.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+
+[build-dependencies]
+jiff.workspace = true
+winresource.workspace = true
