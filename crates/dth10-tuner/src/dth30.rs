@@ -30,7 +30,8 @@ use dth30_core::device::{Config as DevConfig, Dth30, StreamInfo};
 use dth30_core::psi::{ProgramScanner, ProgramSpec};
 use dth30_core::vixs::stream::{card_state, is_cdxm_packet, parse_generic_block};
 use dth30_core::vixs::{Firmware, Options};
-use dth30_usb::{Found, Net2280Usb, StreamReader};
+pub use dth30_usb::Found;
+use dth30_usb::{Net2280Usb, StreamReader};
 
 use crate::session::Session;
 use crate::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue};
@@ -80,6 +81,39 @@ fn name_units(found: Vec<Found>) -> Vec<(String, Found)> {
         out.push((name, f));
     }
     out
+}
+
+/// The unit named `name` (a unit name from [`list`]), or the first one when
+/// `None`; `Ok(None)` when there is no such unit.
+pub fn find(name: Option<&str>) -> Result<Option<(String, Found)>> {
+    Ok(list()?.into_iter().find(|(n, _)| name.is_none_or(|w| w == n)))
+}
+
+/// What [`probe`] reads from a unit.
+#[derive(Debug, Clone)]
+pub struct UnitInfo {
+    /// The endpoints: (interface, address, type, max packet size).
+    pub endpoints: Vec<(u8, u8, String, usize)>,
+    /// The ViXS board-ID register.
+    pub board_id: u32,
+    /// The board's front-end kit.
+    pub kit: &'static str,
+}
+
+/// Open a unit, initialise its USB-to-PCI side and read the chip's board ID
+/// (no firmware; this resets the chip, so a unit in use elsewhere is not
+/// touched: opening it fails while another program holds it).
+pub fn probe(found: &Found) -> Result<UnitInfo> {
+    let t = found.open()?;
+    let pid = t.product_id();
+    let endpoints = t
+        .endpoints()
+        .iter()
+        .map(|e| (e.interface, e.address, format!("{:?}", e.transfer_type), e.max_packet_size))
+        .collect::<Vec<_>>();
+    let pipes: Vec<u8> = endpoints.iter().map(|e| e.1).collect();
+    let dev = Dth30::open(t, pid, &pipes, Options::default(), DevConfig::default())?;
+    Ok(UnitInfo { endpoints, board_id: dev.board_id(), kit: dev.kit().name() })
 }
 
 /// The firmware source: `explicit`, else `$DTH30_FIRMWARE`, else
