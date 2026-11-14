@@ -63,6 +63,8 @@ struct Raw {
     seen: u32,
     /// Bytes written and not yet sent.
     fill: u32,
+    /// Bytes still to drop after the open.
+    skip: u32,
 }
 
 pub struct Ts {
@@ -262,7 +264,9 @@ impl Ts {
         mmr_w(0x67B0, bit);
         mmr_w(0x6150, bit);
 
-        self.raw = Some(Raw { dest, rp: RAW_RING, seen: RAW_RING, fill: 0 });
+        // A channel that starts first delivers some packets it had kept
+        // from its last run; the first chunk is dropped.
+        self.raw = Some(Raw { dest, rp: RAW_RING + CHUNK, seen: RAW_RING, fill: 0, skip: CHUNK });
         fb_w(p + 0x18, RAW_HANDLE);
         fb_w(p + 0x1C, 0);
         OK
@@ -304,7 +308,9 @@ impl Ts {
         }
         let advance = if now >= r.seen { now - r.seen } else { now + RAW_LEN - r.seen };
         r.seen = now;
-        r.fill += advance;
+        let dropped = r.skip.min(advance);
+        r.skip -= dropped;
+        r.fill += advance - dropped;
         if r.fill > RAW_LEN - CHUNK {
             // The channel has lapped the reader: start again at the chunk
             // being written (chunks hold whole packets).
