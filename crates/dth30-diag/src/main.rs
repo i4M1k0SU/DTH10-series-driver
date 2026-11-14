@@ -333,7 +333,8 @@ fn fw(path: Option<PathBuf>, out: Option<&Path>) -> Res {
     let path = firmware_path(path)?;
     let f = Firmware::load(&path)?;
     let sha: String = f.sha256().iter().map(|b| format!("{b:02x}")).collect();
-    println!("firmware image: {} bytes, sha256 {sha} (known)", f.len());
+    let kind = if f.is_own() { "this project's own firmware" } else { "known" };
+    println!("firmware image: {} bytes, sha256 {sha} ({kind})", f.len());
     for (i, e) in f.vectors()?.iter().enumerate() {
         println!("vector {i}: dst 0x{:08x} words {:08x?}", e.dst, e.words);
     }

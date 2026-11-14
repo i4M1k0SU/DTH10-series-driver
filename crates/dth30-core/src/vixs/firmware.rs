@@ -93,7 +93,14 @@ pub const VECTOR_COUNT_OFFSET: u32 = 0x110;
 /// Offset of the first vector-table entry.
 pub const VECTOR_TABLE_OFFSET: u32 = 0x120;
 
-/// A verified firmware image.
+/// Offset in an image of the word that marks this project's own firmware.
+pub const OWN_MAGIC_OFFSET: u32 = 0x100;
+/// "DTH3": the image is this project's own firmware (`firmware/dth30-fw`),
+/// not the vendor's.
+pub const OWN_MAGIC: u32 = 0x3348_5444;
+
+/// A firmware image: the vendor's (verified by its hash) or this project's
+/// own.
 #[derive(Clone)]
 pub struct Firmware {
     image: Vec<u8>,
@@ -141,9 +148,26 @@ impl Firmware {
         Err(last.unwrap_or_else(|| Error::Unsupported("no known driver layout".into())))
     }
 
-    /// Accept a raw image whose hash is known.
+    /// Accept a raw image: this project's own firmware (marked at
+    /// [`OWN_MAGIC_OFFSET`]; it changes with every build, so only its
+    /// vector table is checked), or a vendor image whose hash is known.
     pub fn from_image(image: &[u8]) -> Result<Self> {
-        verify(image.to_vec(), KNOWN_IMAGES).map(|image| Self { image })
+        let own = Self { image: image.to_vec() };
+        if own.is_own() {
+            own.vectors()?;
+            log::info!(
+                "own firmware, version {:#x} ({} bytes)",
+                own.word(OWN_MAGIC_OFFSET + 4).unwrap_or(0),
+                own.len()
+            );
+            return Ok(own);
+        }
+        verify(own.image, KNOWN_IMAGES).map(|image| Self { image })
+    }
+
+    /// Whether this is the project's own firmware rather than the vendor's.
+    pub fn is_own(&self) -> bool {
+        self.word(OWN_MAGIC_OFFSET) == Some(OWN_MAGIC)
     }
 
     /// A firmware image that skips verification (tests only).
@@ -346,6 +370,23 @@ mod tests {
         std::assert_matches!(e, Error::Unsupported(ref m) if m.contains(&hex(&sha256(&img))), "{e:?}");
         assert!(Firmware::from_image(&img).is_err());
         assert!(Firmware::from_bytes(&img).is_err());
+    }
+
+    #[test]
+    fn own_firmware_is_accepted_by_its_mark() {
+        let mut img = vec![0u8; 0x200];
+        img[0x100..0x104].copy_from_slice(&OWN_MAGIC.to_le_bytes());
+        img[0x104..0x108].copy_from_slice(&1u32.to_le_bytes());
+        img[0x110..0x114].copy_from_slice(&1u32.to_le_bytes());
+        img[0x124..0x128].copy_from_slice(&0x3C1A_A010u32.to_le_bytes());
+        let f = Firmware::from_bytes(&img).unwrap();
+        assert!(f.is_own());
+        assert_eq!(f.vectors().unwrap()[0].words[0], 0x3C1A_A010);
+        // The mark does not excuse a broken vector table.
+        img[0x110..0x114].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        assert!(Firmware::from_bytes(&img).is_err());
+        // The vendor's image has no such mark.
+        assert!(!Firmware::unverified(test_image()).is_own());
     }
 
     #[test]
