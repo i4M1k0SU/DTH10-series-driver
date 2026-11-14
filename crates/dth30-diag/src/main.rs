@@ -460,6 +460,25 @@ impl TsCount {
     }
 }
 
+/// Open the CAS object (which resets the card) and wait up to 5 s for the
+/// card to report itself activated; the firmware descrambles only then.
+fn open_cas_and_wait(d: &mut Dth30<Net2280Usb>) -> Res<(StreamInfo, StreamReader)> {
+    let info = d.open_cas()?;
+    let mut r = reader(d, &info)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut card = 0;
+    while card & card_state::ACTIVATED == 0 && Instant::now() < deadline {
+        card = drain_cas(&mut r)?.unwrap_or(card);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if card & card_state::ACTIVATED != 0 {
+        println!("B-CAS card activated (state 0x{card:x})");
+    } else {
+        println!("B-CAS card not activated within 5 s (state 0x{card:x}); the TS will stay scrambled");
+    }
+    Ok((info, r))
+}
+
 fn record(
     serial: Option<&str>,
     a: &TuneArgs,
@@ -470,35 +489,26 @@ fn record(
     raw: bool,
 ) -> Res {
     let mut d = tune(serial, a, cas)?;
-    let cas_info = d.open_cas()?;
-    let mut cas_rd = reader(&mut d, &cas_info)?;
-    // The card was reset with the open; the firmware descrambles once it
-    // reports the card activated.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut card = 0;
-    while card & card_state::ACTIVATED == 0 && Instant::now() < deadline {
-        card = drain_cas(&mut cas_rd)?.unwrap_or(card);
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    if card & card_state::ACTIVATED != 0 {
-        println!("B-CAS card activated (state 0x{card:x})");
-    } else {
-        println!("B-CAS card not activated within 5 s (state 0x{card:x}); the TS will stay scrambled");
-    }
+    // The Raw stream is the broadcast TS as received and needs no card: the
+    // CAS object is only opened (and the card reset) for the Program stream.
+    let mut cas_rd = if raw { None } else { Some(open_cas_and_wait(&mut d)?) };
     let raw_info = d.open_raw()?;
     let mut raw_rd = reader(&mut d, &raw_info)?;
     let mut out = std::fs::File::create(output)?;
     let mut count = TsCount::default();
-    let result = record_loop(&mut d, &mut cas_rd, &mut raw_rd, &mut out, &mut count, seconds, sid, raw);
+    let result =
+        record_loop(&mut d, cas_rd.as_mut().map(|(_, r)| r), &mut raw_rd, &mut out, &mut count, seconds, sid, raw);
     // Close in the vendor's order whatever happened: Program (inside the
     // loop), Raw, CAS; each reader is cancelled after its close, then its
     // FIFO is emptied.
     let _ = d.close_raw();
     raw_rd.stop();
     let _ = d.flush_endpoint_fifo(raw_info.endpoint);
-    let _ = d.close_cas();
-    cas_rd.stop();
-    let _ = d.flush_endpoint_fifo(cas_info.endpoint);
+    if let Some((cas_info, mut r)) = cas_rd {
+        let _ = d.close_cas();
+        r.stop();
+        let _ = d.flush_endpoint_fifo(cas_info.endpoint);
+    }
     result?;
     println!("wrote {}: {} packets, {} scrambled", output.display(), count.packets, count.scrambled);
     Ok(())
@@ -507,7 +517,7 @@ fn record(
 #[allow(clippy::too_many_arguments)]
 fn record_loop(
     d: &mut Dth30<Net2280Usb>,
-    cas_rd: &mut StreamReader,
+    mut cas_rd: Option<&mut StreamReader>,
     raw_rd: &mut StreamReader,
     out: &mut std::fs::File,
     count: &mut TsCount,
@@ -522,7 +532,9 @@ fn record_loop(
         let mut scan = ProgramScanner::new(sid);
         let deadline = Instant::now() + Duration::from_secs(5);
         let spec = loop {
-            drain_cas(cas_rd)?;
+            if let Some(r) = cas_rd.as_deref_mut() {
+                drain_cas(r)?;
+            }
             if let Some(b) = raw_rd.next(Duration::from_millis(200))?
                 && let Some(spec) = scan.push(&b)
             {
@@ -547,7 +559,9 @@ fn record_loop(
     }
     let end = Instant::now() + Duration::from_secs(seconds);
     while Instant::now() < end {
-        drain_cas(cas_rd)?;
+        if let Some(r) = cas_rd.as_deref_mut() {
+            drain_cas(r)?;
+        }
         match prog_rd.as_mut() {
             Some(p) => {
                 if let Some(b) = p.next(Duration::from_millis(200))? {
