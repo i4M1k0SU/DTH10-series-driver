@@ -209,7 +209,7 @@ impl ProgramSpec {
     /// The streams as the Program open takes them: cut at the first PID 0
     /// and at 24 streams, each with the program-level ECM PID as the
     /// vendor's filter sends it, or the stream's own one when the program
-    /// has none, or 0.
+    /// has none, or [`stream::NO_ECM_PID`] (not scrambled).
     pub fn es_entries(&self) -> Vec<EsEntry> {
         let v: Vec<EsEntry> = self
             .es
@@ -217,7 +217,7 @@ impl ProgramSpec {
             .map(|e| EsEntry {
                 pid: e.pid,
                 stream_type: e.stream_type,
-                ecm_pid: self.ecm_pid.or(e.ecm_pid).unwrap_or(0),
+                ecm_pid: self.ecm_pid.or(e.ecm_pid).unwrap_or(stream::NO_ECM_PID),
             })
             .collect();
         let n = stream::limit_es(&v).len();
@@ -549,9 +549,9 @@ pub(crate) mod tests {
         let e = spec.es_entries();
         assert_eq!(e[0], EsEntry { pid: 0x100, stream_type: 2, ecm_pid: 0x1F01 });
         assert_eq!(e[1].ecm_pid, 0x1F01);
-        // Without one, the stream's own, else 0.
+        // Without one, the stream's own, else "not scrambled" (never 0).
         let s2 = ProgramSpec { ecm_pid: None, ..spec.clone() };
-        assert_eq!(s2.es_entries().iter().map(|e| e.ecm_pid).collect::<Vec<_>>(), [0, 0x1F02]);
+        assert_eq!(s2.es_entries().iter().map(|e| e.ecm_pid).collect::<Vec<_>>(), [stream::NO_ECM_PID, 0x1F02]);
         assert!(ProgramSpec::from_sections(&pat, &pmt, Some(0x409)).is_err());
         let other = super::tests::pmt(0x409, 0x1FF, None, &[]);
         assert!(ProgramSpec::from_sections(&pat, &other, None).is_err());
