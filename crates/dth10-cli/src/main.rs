@@ -288,9 +288,6 @@ fn recipient_mode(d: &DeviceArgs) -> RecipientMode {
     }
 }
 
-/// USB product ID of the DT-H50/U2W, the DT-H30/U2-family unit with two tuners.
-const DTH50U2W_PID: u16 = 0x012A;
-
 /// Which family the device the options select belongs to.
 enum Target {
     Dth10,
@@ -556,12 +553,9 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
     let queue = TsQueue::new();
     let (mut tuner, t0) = match target_of(&a.dev)? {
         Target::Dth10 => open_dth10(a, &ch, program, &state_dir, queue.clone())?,
-        // Terrestrial only, and a second tuner only on the DT-H50/U2W:
-        // refused before the firmware start.
+        // One terrestrial tuner: refused before the firmware start.
         Target::Dth30(..) if ch.system == System::IsdbS => return Err("this unit has no satellite tuner".into()),
-        Target::Dth30(_, f) if tuner_index != 0 && f.product_id != DTH50U2W_PID => {
-            return Err("this unit has one terrestrial tuner (tuner 0)".into());
-        }
+        Target::Dth30(..) if tuner_index != 0 => return Err("this unit has one terrestrial tuner (tuner 0)".into()),
         Target::Dth30(name, _) => open_dth30(a, &name, program, &state_dir, queue.clone())?,
     };
     tuner.set_channel_on(tuner_index, &ch)?;

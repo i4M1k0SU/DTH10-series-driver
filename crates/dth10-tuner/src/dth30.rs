@@ -2,11 +2,8 @@
 //! behind a PLX NET2280, `dth30-core`) behind [`Session`], for
 //! `dth10 serve`.
 //!
-//! The family has one terrestrial tuner, two on the DT-H50/U2W (board 0xC6),
-//! which stream one at a time like the vendor stack (one Raw and one
-//! Program stream per device): a tune on one stops the other's stream
-//! ([`Session::exclusive_tuners`]). The second one is unverified on
-//! hardware. The two TS outputs map to the stream modes:
+//! The family has one terrestrial tuner. Its two TS outputs map to the
+//! stream modes:
 //!
 //! * `raw` ([`StreamModeCfg::Raw`]): the Raw stream (EP 0x83), the
 //!   broadcast TS as received, scrambled; no card is involved.
@@ -139,8 +136,7 @@ pub fn firmware_path(explicit: Option<&Path>, state_dir: &Path) -> Option<std::p
 pub struct Dth30Tuner {
     name: String,
     dev: Dth30<Net2280Usb>,
-    /// Where each tuner's TS goes.
-    queues: [TsQueue; 2],
+    queue: TsQueue,
     mode: StreamModeCfg,
     program: DeviceProgram,
     lock_wait: Duration,
@@ -174,7 +170,7 @@ impl Dth30Tuner {
         Ok(Self {
             name: name.to_owned(),
             dev,
-            queues: [queue, TsQueue::new()],
+            queue,
             mode: StreamModeCfg::Device,
             program: DeviceProgram::First,
             lock_wait: Duration::from_millis(1200),
@@ -284,7 +280,7 @@ impl Dth30Tuner {
         let raw_info = self.dev.open_raw()?;
         let mut raw = self.reader(&raw_info)?;
         if self.mode == StreamModeCfg::Raw {
-            self.pump = Some(Pump::start(self.queue(), (raw_info, raw), None));
+            self.pump = Some(Pump::start(self.queue.clone(), (raw_info, raw), None));
             return Ok(());
         }
         let spec = match self.scan(&mut raw) {
@@ -303,7 +299,7 @@ impl Dth30Tuner {
             }
         };
         let prog = self.reader(&prog_info)?;
-        self.pump = Some(Pump::start(self.queue(), (raw_info, raw), Some((prog_info, prog))));
+        self.pump = Some(Pump::start(self.queue.clone(), (raw_info, raw), Some((prog_info, prog))));
         Ok(())
     }
 
@@ -373,16 +369,6 @@ impl Dth30Tuner {
 }
 
 impl Dth30Tuner {
-    /// The queue of the tuner in use.
-    fn queue(&self) -> TsQueue {
-        self.queues[self.dev.tuner()].clone()
-    }
-
-    /// Whether `tuner` is the one in use and tuned.
-    fn is_current(&self, tuner: usize) -> bool {
-        tuner == self.dev.tuner() && self.current.is_some()
-    }
-
     fn tune_and_start(&mut self, ch: &Channel) -> Result<()> {
         self.check_card();
         self.dev.tune(ch.frequency_hz)?;
@@ -400,8 +386,8 @@ impl Dth30Tuner {
 
 impl Session for Dth30Tuner {
     fn set_queue(&mut self, tuner: usize, queue: TsQueue) {
-        if let Some(q) = self.queues.get_mut(tuner) {
-            *q = queue;
+        if tuner == 0 {
+            self.queue = queue;
         }
     }
     /// The firmware descrambles with the card: no link decryption.
@@ -409,10 +395,7 @@ impl Session for Dth30Tuner {
         false
     }
     fn has_second_terrestrial(&self) -> bool {
-        self.dev.tuner_count() == 2
-    }
-    fn exclusive_tuners(&self) -> bool {
-        self.dev.tuner_count() == 2
+        false
     }
     fn set_stream_mode(&mut self, mode: StreamModeCfg) {
         self.mode = mode;
@@ -427,24 +410,21 @@ impl Session for Dth30Tuner {
     }
 
     fn set_channel_on(&mut self, tuner: usize, ch: &Channel) -> Result<()> {
-        match ch.system {
-            System::IsdbS => return Err(Error::Unsupported("this unit has no satellite tuner".into())),
-            System::IsdbT if tuner >= self.dev.tuner_count() => {
-                return Err(Error::Unsupported(format!("no terrestrial tuner #{tuner} on this unit")));
-            }
-            System::IsdbT => {}
+        match (ch.system, tuner) {
+            (System::IsdbT, 0) => {}
+            (System::IsdbS, _) => return Err(Error::Unsupported("this unit has no satellite tuner".into())),
+            _ => return Err(Error::Unsupported(format!("no terrestrial tuner #{tuner} on this unit"))),
         }
-        log::info!("unit {}: tune {} ({} Hz) on tuner #{tuner}, {:?}", self.name, ch.name, ch.frequency_hz, self.mode);
-        // One tuner streams at a time: whichever stream runs ends here.
+        log::info!("unit {}: tune {} ({} Hz), {:?}", self.name, ch.name, ch.frequency_hz, self.mode);
         self.stop_stream();
         self.current = None;
-        let started = self.dev.select_tuner(tuner).and_then(|()| self.tune_and_start(ch));
+        let started = self.tune_and_start(ch);
         self.lamps(started.is_ok());
         started
     }
 
     fn signal_level_of(&mut self, tuner: usize) -> f32 {
-        if tuner != self.dev.tuner() {
+        if tuner != 0 {
             return 0.0;
         }
         match self.dev.status() {
@@ -457,7 +437,7 @@ impl Session for Dth30Tuner {
     }
 
     fn release(&mut self, tuner: usize) {
-        if self.is_current(tuner) {
+        if tuner == 0 {
             self.stop_stream();
             self.current = None;
             self.lamps(false);
@@ -465,19 +445,16 @@ impl Session for Dth30Tuner {
     }
 
     fn stream_failed(&self, tuner: usize) -> bool {
-        tuner == self.dev.tuner() && self.pump.as_ref().is_some_and(|p| p.failed.load(Ordering::Relaxed))
+        tuner == 0 && self.pump.as_ref().is_some_and(|p| p.failed.load(Ordering::Relaxed))
     }
 
     fn poll_status(&mut self) -> [Option<f32>; 2] {
         self.check_card();
-        let t = self.dev.tuner();
-        let cnr = self.current.is_some().then(|| self.signal_level_of(t));
-        if let Some(c) = cnr {
-            log::debug!("unit {}: status: tuner #{t} C/N {c:.1} dB", self.name);
+        let ter = self.current.is_some().then(|| self.signal_level_of(0));
+        if let Some(c) = ter {
+            log::debug!("unit {}: status: C/N {c:.1} dB", self.name);
         }
-        let mut out = [None, None];
-        out[t] = cnr;
-        out
+        [ter, None]
     }
 
     fn close(&mut self) {

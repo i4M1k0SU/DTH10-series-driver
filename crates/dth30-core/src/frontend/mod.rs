@@ -133,22 +133,6 @@ impl<B: Bus> Frontend<B> {
         self.kind
     }
 
-    /// Point this front end at another kit of the same kind (the second
-    /// front end of a dual board): new 8-bit demodulator and tuner
-    /// addresses; the state starts over, so [`Frontend::init`] must follow.
-    pub fn set_addresses(&mut self, demod: u8, tuner: u8) {
-        self.demod = Demod { addr: demod };
-        self.tuner = tuner;
-        self.freq = None;
-        self.vhf_a8 = att::VHF_A8[0];
-        self.initialized = false;
-    }
-
-    /// The 8-bit (demodulator, tuner) addresses in use.
-    pub fn addresses(&self) -> (u8, u8) {
-        (self.demod.addr, self.tuner)
-    }
-
     pub fn bus(&mut self) -> &mut B {
         &mut self.bus
     }

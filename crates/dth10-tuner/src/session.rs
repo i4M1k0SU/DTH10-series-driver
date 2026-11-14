@@ -22,11 +22,6 @@ pub trait Session: Send {
     fn needs_app_keys(&self, raw: bool, system: System) -> bool;
     /// Whether tuner #1 is a second terrestrial tuner.
     fn has_second_terrestrial(&self) -> bool;
-    /// Whether the two tuners stream one at a time (a tune on one stops the
-    /// other's stream), as on the DT-H50/U2W.
-    fn exclusive_tuners(&self) -> bool {
-        false
-    }
     fn set_stream_mode(&mut self, mode: StreamModeCfg);
     fn set_device_program(&mut self, program: DeviceProgram);
     /// Antenna supply for BS/CS (units without one ignore it).
