@@ -142,6 +142,8 @@ impl Cas {
                 host.send(m);
             }
             Output::InitDone(ret) => self.event(EV_INIT, ret),
+            // ECM answers concern the Program stream only.
+            Output::Keys { .. } | Output::EcmRefused | Output::EcmLost => {}
         }
     }
 

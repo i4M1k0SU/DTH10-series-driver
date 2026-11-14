@@ -44,7 +44,17 @@ pub enum Output {
     /// The INIT response has been taken in (the keys are loaded): its
     /// return code, or `u32::MAX` when the response was unusable.
     InitDone(u32),
+    /// The card answered an ECM with the two control words.
+    Keys { odd: [u8; 8], even: [u8; 8] },
+    /// The card answered an ECM but does not let the service be viewed.
+    EcmRefused,
+    /// An ECM got no usable answer.
+    EcmLost,
 }
+
+/// The longest ECM body taken: with its command header the block still
+/// fits the transmit FIFO.
+pub const ECM_MAX: usize = 54;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Job {
@@ -54,6 +64,8 @@ enum Job {
     Ifs,
     /// The INIT command.
     Init,
+    /// The ECM command with the body in `Card::ecm`.
+    Ecm,
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +165,8 @@ pub struct Card {
     nr: u8,
     rx: [u8; 260],
     rx_len: usize,
+    ecm: [u8; ECM_MAX],
+    ecm_len: usize,
     out: [Option<Output>; 4],
 }
 
@@ -180,6 +194,8 @@ impl Card {
             nr: 0,
             rx: [0; 260],
             rx_len: 0,
+            ecm: [0; ECM_MAX],
+            ecm_len: 0,
             out: [None; 4],
         }
     }
@@ -310,6 +326,14 @@ impl Card {
             Job::Resync => self.send(0xC0, &[]),
             Job::Ifs => self.send(0xC1, &[0xFE]),
             Job::Init => self.send(self.ns << 6, &[0x90, 0x30, 0x00, 0x00, 0x00]),
+            Job::Ecm => {
+                // 90 34 00 00 Lc, the ECM body, Le.
+                let mut apdu = [0u8; ECM_MAX + 6];
+                let n = self.ecm_len;
+                apdu[..5].copy_from_slice(&[0x90, 0x34, 0x00, 0x00, n as u8]);
+                apdu[5..5 + n].copy_from_slice(&self.ecm[..n]);
+                self.send(self.ns << 6, &apdu[..n + 6]);
+            }
         }
     }
 
@@ -327,8 +351,10 @@ impl Card {
             self.phase = Phase::Gap { until: self.after(5) };
             return;
         }
-        if self.jobs[0] == Job::Init {
-            self.report(Output::InitDone(u32::MAX));
+        match self.jobs[0] {
+            Job::Init => self.report(Output::InitDone(u32::MAX)),
+            Job::Ecm => self.report(Output::EcmLost),
+            _ => {}
         }
         self.job_done();
     }
@@ -368,6 +394,10 @@ impl Card {
                 let ret = if ok && len >= 56 { self.init_response() } else { u32::MAX };
                 self.report(Output::InitDone(ret));
             }
+            if self.jobs[0] == Job::Ecm {
+                let out = if ok && len >= 22 { self.ecm_response() } else { Output::EcmLost };
+                self.report(out);
+            }
             self.job_done();
         }
     }
@@ -384,6 +414,45 @@ impl Card {
             keyram::write(SLOT_SYSTEM_KEY + n as u32, be32(&k[4..8]), be32(&k[0..4]));
         }
         u32::from(inf[4]) << 8 | u32::from(inf[5])
+    }
+
+    /// The ECM response: bytes 4..5 return code, 6..13 the odd control
+    /// word, 14..21 the even one.
+    fn ecm_response(&self) -> Output {
+        let inf = &self.rx[3..];
+        let ret = u32::from(inf[4]) << 8 | u32::from(inf[5]);
+        if !matches!(ret, 0x0200 | 0x0400 | 0x0800 | 0x4280 | 0x4480) {
+            return Output::EcmRefused;
+        }
+        let (mut odd, mut even) = ([0; 8], [0; 8]);
+        odd.copy_from_slice(&inf[6..14]);
+        even.copy_from_slice(&inf[14..22]);
+        Output::Keys { odd, even }
+    }
+
+    /// Give an ECM body to the card. False when it cannot be taken now
+    /// (no active card, or the previous ECM is still with the card).
+    pub fn submit_ecm(&mut self, body: &[u8]) -> bool {
+        if self.status & ACTIVE == 0 || body.is_empty() || body.len() > ECM_MAX {
+            return false;
+        }
+        match self.jobs[..self.njobs].iter().position(|j| *j == Job::Ecm) {
+            // Already on its way to the card.
+            Some(0) => return false,
+            // Waiting behind other blocks: the newer ECM replaces it.
+            Some(_) => {}
+            None if self.njobs == self.jobs.len() => return false,
+            None => {
+                self.jobs[self.njobs] = Job::Ecm;
+                self.njobs += 1;
+                if self.njobs == 1 {
+                    self.phase = Phase::Gap { until: self.after(2) };
+                }
+            }
+        }
+        self.ecm[..body.len()].copy_from_slice(body);
+        self.ecm_len = body.len();
+        true
     }
 
     fn atr_done(&mut self, ta1: Option<u8>, ta3: Option<u8>) {

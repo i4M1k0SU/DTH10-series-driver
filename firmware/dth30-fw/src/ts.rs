@@ -1,39 +1,27 @@
-//! TS input, the demultiplexer and the Raw stream.
+//! TS input set-up, the "every PID" channel and the Raw stream.
 //!
-//! The demultiplexer sorts the packets of an input port into channels
-//! through a table of 32 PID filter entries. Each channel writes its
-//! packets (188 bytes each) into a ring in SDRAM and keeps going whether
-//! or not anything reads it. The entries are tried in index order: an
-//! "every PID" entry takes a copy and the search goes on, an entry for one
-//! PID takes the packet and ends the search.
+//! Channel 14 with an "every PID" filter entry collects whatever no other
+//! entry takes. The Raw stream is that channel's ring, sent to the host's
+//! endpoint in chunks of the size the host asked for, straight from the
+//! ring (no copy). The Program stream reads the same ring for the packets
+//! that are not its service's.
 //!
-//! The Raw stream is channel 14 with an "every PID" entry (index 31). The
-//! firmware sends the ring to the host's endpoint in chunks of the size the
-//! host asked for, straight from the ring (no copy).
+//! TS input registers (offsets in the chip's block):
 //!
-//! Registers used (offsets in the chip's block):
-//!
-//! | reg             | meaning                                                        |
-//! |-----------------|----------------------------------------------------------------|
-//! | 0x6000          | input ports: bit i = 204-byte packets, bit 24+i = enable, ...  |
-//! | 0x6008          | bit 8+i = valid is active high, bit 24+i = falling clock edge  |
-//! | 0x600C          | bit 8+i = drop the null packets of port i                      |
-//! | 0x6030          | 0x503 (needed for reception)                                   |
-//! | 0x6040/44/48    | PID filter: index / match word / destination                   |
-//! | 0x6080/84       | descrambler setting of a channel: index / word                 |
-//! | 0x6150          | channel run bits; writing 1 toggles a bit                      |
-//! | 0x6400/04       | channel window: index (bit 16 = page window) / value           |
-//! | 0x6408 + 16 n   | channel n's write position: address of the last byte written   |
-//! | 0x6580 + 4(n/2) | channel event set-up, 9 bits per channel                       |
-//! | 0x65E8/EC       | channel set-up: index / word                                   |
-//! | 0x67D4, 0x67B0  | channel events, write 1 to clear                               |
-//! | 0x67DC, 0x67B8  | channel event enables towards the CPU (left off: polling)      |
+//! | reg    | meaning                                                         |
+//! |--------|-----------------------------------------------------------------|
+//! | 0x6000 | input ports: bit i = 204-byte packets, bit 24+i = enable, ...   |
+//! | 0x6008 | bit 8+i = valid is active high, bit 24+i = falling clock edge   |
+//! | 0x600C | bit 8+i = drop the null packets of port i                       |
+//! | 0x6030 | 0x503 (needed for reception)                                    |
 
+use crate::demux::{self, FILTER_ALL, FILTER_VALID, Ring};
 use crate::dma::{Dma, SRC_LOCAL};
 use crate::host::{FAILED, OK};
 use crate::hw::{fb_r, fb_w, mmr_r, mmr_rmw, mmr_w};
 
-/// The Raw stream's channel and filter entry.
+/// The "every PID" channel and its filter entry (the last one: entries
+/// for single PIDs come before it).
 const RAW_CHANNEL: u32 = 14;
 const RAW_FILTER: u32 = 31;
 /// The Raw ring: 40 chunks of 0xBC00 bytes (= 10240 packets), outside the
@@ -41,79 +29,26 @@ const RAW_FILTER: u32 = 31;
 const RAW_RING: u32 = 0x0080_0000;
 const RAW_LEN: u32 = 0x001D_6000;
 /// The only chunk size supported (256 packets, the host's transfer size).
-const CHUNK: u32 = 0xBC00;
+pub const CHUNK: u32 = 0xBC00;
 /// The handle returned for the Raw stream (the host passes it back).
 const RAW_HANDLE: u32 = 0xA006_2A00;
 /// Two pages that idle channels point at.
 const SINK: u32 = 0x0006_4000;
 
-const SEMAPHORE: u32 = 0x440;
-const SEM_DEMUX: u32 = 0x10;
-
 /// The stream types of an open (payload +0x58).
 pub const KIND_RAW: u32 = 1;
+pub const KIND_PROGRAM: u32 = 5;
 
 struct Raw {
     /// PCI address of the host's endpoint FIFO.
     dest: u32,
-    /// Next byte to send (physical).
-    rp: u32,
-    /// The position after the last byte the channel had written when last
-    /// looked at.
-    seen: u32,
-    /// Bytes written and not yet sent.
-    fill: u32,
-    /// Bytes still to drop after the open.
-    skip: u32,
+    ring: Ring,
 }
 
 pub struct Ts {
     raw: Option<Raw>,
-    /// Times the Raw ring was overrun because the host did not read.
-    pub overruns: u32,
-}
-
-/// The demultiplexer's tables are changed under hardware semaphore 16.
-fn lock() {
-    for _ in 0..1000 {
-        mmr_w(SEMAPHORE, SEM_DEMUX);
-        if mmr_r(SEMAPHORE) == 0x8000_0000 | SEM_DEMUX {
-            return;
-        }
-    }
-}
-
-fn unlock() {
-    if mmr_r(SEMAPHORE) == 0x8000_0000 | SEM_DEMUX {
-        mmr_w(SEMAPHORE, SEM_DEMUX);
-    }
-}
-
-/// Write an index register until it reads back.
-fn select(reg: u32, index: u32, mask: u32) {
-    for _ in 0..1000 {
-        mmr_w(reg, index);
-        if mmr_r(reg) & mask == index & mask {
-            return;
-        }
-    }
-}
-
-fn set_filter(index: u32, word: u32, dest: u32) {
-    select(0x6040, index, 0x7F);
-    mmr_w(0x6044, word);
-    mmr_w(0x6048, dest);
-}
-
-fn write_position(channel: u32) -> u32 {
-    if channel < 4 { 0x6420 + 4 * channel } else { 0x6408 + 16 * channel }
-}
-
-fn stop_channel(channel: u32) {
-    let bit = 1 << channel;
-    if mmr_r(0x6150) & bit != 0 {
-        mmr_w(0x6150, bit);
-    }
+    /// The Program stream reads the channel too.
+    shared: bool,
 }
 
 impl Ts {
@@ -124,13 +59,53 @@ impl Ts {
         mmr_w(0x67B8, 0);
         mmr_w(0x6150, mmr_r(0x6150));
         for i in 0..32 {
-            set_filter(i, 0, 0);
+            demux::set_filter(i, 0, 0);
         }
-        Self { raw: None, overruns: 0 }
+        Self { raw: None, shared: false }
+    }
+
+    /// Start the "every PID" channel on `port` unless it runs already.
+    /// Returns whether it ran.
+    fn start(&mut self, port: u32) -> bool {
+        if self.raw.is_some() || self.shared {
+            return true;
+        }
+        demux::stop_channel(RAW_CHANNEL);
+        demux::lock();
+        demux::set_filter(RAW_FILTER, FILTER_VALID | port << 13, RAW_CHANNEL | FILTER_ALL);
+        demux::descrambler(RAW_CHANNEL, |v| v & 0x80);
+        demux::unlock();
+        demux::start_channel(RAW_CHANNEL, RAW_RING, RAW_LEN);
+        false
+    }
+
+    /// Stop the channel when nothing reads it any more.
+    fn stop(&mut self) {
+        if self.raw.is_some() || self.shared {
+            return;
+        }
+        demux::stop_channel(RAW_CHANNEL);
+        demux::lock();
+        demux::set_filter(RAW_FILTER, 0, 0);
+        demux::unlock();
+    }
+
+    /// A reader of the "every PID" ring for the Program stream, starting
+    /// `skip` bytes after the next packet.
+    pub fn share(&mut self, port: u32, skip: u32) -> Ring {
+        self.start(port);
+        self.shared = true;
+        Ring::attach(RAW_CHANNEL, RAW_RING, RAW_LEN, demux::PACKET, skip)
+    }
+
+    pub fn unshare(&mut self) {
+        self.shared = false;
+        self.stop();
     }
 
     /// Command 24: set the TS input up from the words the host left in
-    /// FB 0x50..0x8C. Refused while a stream is open.
+    /// FB 0x50..0x8C. Refused while a stream is open (`busy`: another
+    /// module has one).
     ///
     /// | FB   | meaning (bit i = input port i)                          |
     /// |------|---------------------------------------------------------|
@@ -144,8 +119,8 @@ impl Ts {
     /// | 0x6C | keep null packets (ports 0, 1; clear -> 0x600C bit 8+i) |
     /// | 0x70 | 1 = the output set-up below is valid                    |
     /// | 0x74.. | parallel output: data mode, clock invert, increment disable, valid high, clock select, null packets, spacing |
-    pub fn configure(&mut self) -> u32 {
-        if self.raw.is_some() {
+    pub fn configure(&mut self, busy: bool) -> u32 {
+        if self.raw.is_some() || busy {
             return FAILED;
         }
         let w = |off: u32| fb_r(off);
@@ -182,16 +157,16 @@ impl Ts {
 
         let sink = SINK >> 12 | ((SINK >> 12) + 1) << 16;
         for i in 0..16 {
-            lock();
-            set_filter(i, 0, 0);
+            demux::lock();
+            demux::set_filter(i, 0, 0);
             mmr_w(0x6080, i);
             mmr_w(0x6084, 0);
-            select(0x6400, 0x1_0000 | i, 0x1_001F);
+            demux::select(0x6400, 0x1_0000 | i, 0x1_001F);
             mmr_w(0x6404, sink);
-            unlock();
+            demux::unlock();
         }
         for i in 16..32 {
-            set_filter(i, 0, 0);
+            demux::set_filter(i, 0, 0);
         }
         for k in 0..8 {
             mmr_w(0x6580 + 4 * k, 0);
@@ -240,56 +215,28 @@ impl Ts {
         if self.raw.is_some() || flags & 0x10_0000 == 0 || pid != 0xFFFF || chunk != CHUNK || port > 3 {
             return FAILED;
         }
-        let n = RAW_CHANNEL;
-        let bit = 1 << n;
-        stop_channel(n);
-        lock();
-        set_filter(RAW_FILTER, 0x8000_0000 | port << 13, n | 0x100);
-        mmr_w(0x6080, n);
-        mmr_w(0x6080, n);
-        mmr_rmw(0x6084, |v| v & 0x80);
-        unlock();
-        select(0x65E8, n, 0x1F);
-        mmr_w(0x65EC, 0x7_0015);
-        select(0x6400, 0x1_0000 | n, 0x1_001F);
-        mmr_w(0x6404, RAW_RING >> 12 | (RAW_RING + RAW_LEN - 1) >> 12 << 16);
-        mmr_w(write_position(n), RAW_RING);
-        select(0x6400, n, 0x1_001F);
-        mmr_w(0x6404, RAW_RING + RAW_LEN - 1);
-        // Events at packet ends, one per 2 KB written. Nothing waits for
-        // them (the ring is polled), but with this setting the write
-        // position always reads at a packet boundary.
-        mmr_rmw(0x6580 + 4 * (n >> 1), |v| (v & !0x1F7) | 0x006);
-        mmr_w(0x67D4, bit);
-        mmr_w(0x67B0, bit);
-        mmr_w(0x6150, bit);
-
         // A channel that starts first delivers some packets it had kept
-        // from its last run; the first chunk is dropped.
-        self.raw = Some(Raw { dest, rp: RAW_RING + CHUNK, seen: RAW_RING, fill: 0, skip: CHUNK });
+        // from its last run: the first chunk is dropped.
+        let ring = if self.start(port) {
+            Ring::attach(RAW_CHANNEL, RAW_RING, RAW_LEN, CHUNK, 0)
+        } else {
+            Ring::new(RAW_CHANNEL, RAW_RING, RAW_LEN, CHUNK, CHUNK)
+        };
+        self.raw = Some(Raw { dest, ring });
         fb_w(p + 0x18, RAW_HANDLE);
         fb_w(p + 0x1C, 0);
         OK
     }
 
-    /// Command 10: the flush before a close. Nothing is held back, so
-    /// there is nothing to do.
-    pub fn flush(&mut self, handle: u32) -> u32 {
-        if handle == RAW_HANDLE && self.raw.is_some() { OK } else { FAILED }
+    /// Whether `handle` is the open Raw stream's.
+    pub fn owns(&self, handle: u32) -> bool {
+        handle == RAW_HANDLE && self.raw.is_some()
     }
 
-    /// Command 9: close a stream.
-    pub fn close(&mut self, handle: u32) -> u32 {
-        if handle != RAW_HANDLE || self.raw.is_none() {
-            return FAILED;
-        }
-        stop_channel(RAW_CHANNEL);
-        lock();
-        set_filter(RAW_FILTER, 0, 0);
-        unlock();
-        mmr_w(0x67D4, 1 << RAW_CHANNEL);
-        mmr_w(0x67B0, 1 << RAW_CHANNEL);
+    /// Command 9: close the Raw stream.
+    pub fn close(&mut self) -> u32 {
         self.raw = None;
+        self.stop();
         OK
     }
 
@@ -297,35 +244,10 @@ impl Ts {
     /// DMA engine is free.
     pub fn poll(&mut self, dma: &mut Dma) {
         let Some(r) = self.raw.as_mut() else { return };
-        let last = mmr_r(write_position(RAW_CHANNEL));
-        if !(RAW_RING..RAW_RING + RAW_LEN).contains(&last) {
-            // Reads 0 until the first packet has been written.
-            return;
-        }
-        let mut now = last + 1;
-        if now == RAW_RING + RAW_LEN {
-            now = RAW_RING;
-        }
-        let advance = if now >= r.seen { now - r.seen } else { now + RAW_LEN - r.seen };
-        r.seen = now;
-        let dropped = r.skip.min(advance);
-        r.skip -= dropped;
-        r.fill += advance - dropped;
-        if r.fill > RAW_LEN - CHUNK {
-            // The channel has lapped the reader: start again at the chunk
-            // being written (chunks hold whole packets).
-            let offset = (now - RAW_RING) / CHUNK * CHUNK;
-            r.rp = RAW_RING + offset;
-            r.fill = now - r.rp;
-            self.overruns += 1;
-        }
-        if r.fill >= CHUNK && dma.idle() {
-            dma.start(r.rp, r.dest, CHUNK, SRC_LOCAL);
-            r.fill -= CHUNK;
-            r.rp += CHUNK;
-            if r.rp == RAW_RING + RAW_LEN {
-                r.rp = RAW_RING;
-            }
+        r.ring.follow();
+        if r.ring.ready() >= CHUNK && dma.idle() {
+            dma.start(r.ring.rp, r.dest, CHUNK, SRC_LOCAL);
+            r.ring.consume(CHUNK);
         }
     }
 }

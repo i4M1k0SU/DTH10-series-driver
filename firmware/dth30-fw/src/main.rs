@@ -12,11 +12,13 @@
 mod boot;
 mod card;
 mod cas;
+mod demux;
 mod dma;
 mod host;
 mod hw;
 mod keyram;
 mod otp;
+mod program;
 mod ts;
 
 use core::panic::PanicInfo;
@@ -26,6 +28,7 @@ use cas::Cas;
 use dma::Dma;
 use host::{Command, FAILED, Host, OK, UNSUPPORTED};
 use hw::{Clock, fb_r, fb_w};
+use program::Program;
 use ts::Ts;
 
 /// The same record as for an exception, with "PANC" for the place.
@@ -44,6 +47,7 @@ struct Firmware {
     ts: Ts,
     card: Card,
     cas: Cas,
+    program: Program,
 }
 
 impl Firmware {
@@ -61,12 +65,25 @@ impl Firmware {
             // Open a stream.
             8 => match fb_r(p + 0x58) {
                 ts::KIND_RAW => self.ts.open_raw(p),
+                ts::KIND_PROGRAM => self.program.open(p, self.clock.ticks(5), &mut self.ts),
                 _ => FAILED,
             },
-            9 => self.ts.close(fb_r(p)),
-            10 => self.ts.flush(fb_r(p)),
+            // Close a stream.
+            9 => {
+                let result = match fb_r(p) {
+                    h if self.ts.owns(h) => self.ts.close(),
+                    h if self.program.owns(h) => self.program.close(&mut self.ts),
+                    _ => FAILED,
+                };
+                self.dma.settle(self.clock.ticks(100));
+                result
+            }
+            // The flush before a close: nothing is held back, so there is
+            // nothing to do.
+            10 if self.ts.owns(fb_r(p)) || self.program.owns(fb_r(p)) => OK,
+            10 => FAILED,
             11 => self.cas.input(p, &mut self.card),
-            24 => self.ts.configure(),
+            24 => self.ts.configure(self.program.is_open()),
             25 => self.cas.open(p),
             26 => self.cas.close(fb_r(p)),
             _ => FAILED,
@@ -92,7 +109,9 @@ pub extern "C" fn fw_main() -> ! {
     let mut host = Host::new(&clock);
     host.handshake();
     let card = Card::new(&clock);
-    let mut fw = Firmware { clock, host, dma: Dma::new(), ts: Ts::new(), card, cas: Cas::new() };
+    let mut fw =
+        Firmware { clock, host, dma: Dma::new(), ts: Ts::new(), card, cas: Cas::new(), program: Program::new() };
+    let mut raw_first = false;
     fw.host.ready();
     loop {
         fw.host.poll_tick();
@@ -103,9 +122,16 @@ pub extern "C" fn fw_main() -> ! {
         fw.card.poll();
         while let Some(out) = fw.card.take_output() {
             fw.cas.card_output(out, &mut fw.host);
+            fw.program.card_output(out);
         }
         fw.dma.poll();
         fw.cas.poll(fw.card.status(), &mut fw.dma);
+        // The streams share the DMA engine: take turns at being first.
+        raw_first = !raw_first;
+        if raw_first {
+            fw.ts.poll(&mut fw.dma);
+        }
+        fw.program.poll(&mut fw.card, &mut fw.dma);
         fw.ts.poll(&mut fw.dma);
     }
 }

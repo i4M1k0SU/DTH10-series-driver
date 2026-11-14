@@ -9,7 +9,7 @@
 //! bit 1 when it is done (write 1 to clear). A transfer to a FIFO the host
 //! does not read simply stays busy.
 
-use crate::hw::{fb_r, fb_w, mmr_r, mmr_rmw, mmr_w};
+use crate::hw::{count, fb_r, fb_w, mmr_r, mmr_rmw, mmr_w};
 
 const LIST: u32 = 0xC04;
 const BUSY: u32 = 0xC34;
@@ -65,6 +65,16 @@ impl Dma {
         mmr_rmw(ENABLE, |v| v | DONE);
         mmr_w(LIST, DESC_BASE);
         self.busy = true;
+    }
+
+    /// Let the running transfer finish, for at most `ticks` of CP0 Count.
+    /// A stream is closed only after this, so that nothing of it reaches
+    /// the host's endpoint after the host has emptied it.
+    pub fn settle(&mut self, ticks: u32) {
+        let start = count();
+        while self.busy && count().wrapping_sub(start) < ticks {
+            self.poll();
+        }
     }
 
     /// True once when the running transfer has completed.
