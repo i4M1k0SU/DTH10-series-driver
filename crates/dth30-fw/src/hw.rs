@@ -8,10 +8,12 @@
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::boot::{JR_K0, LUI_K0, ORI_K0};
+
 /// The register block (MMR) as the MIPS sees it.
-const MMR_BASE: usize = 0xB004_0000;
+pub const MMR_BASE: usize = 0xB004_0000;
 /// SDRAM, uncached.
-const FB_BASE: usize = 0xA000_0000;
+pub const FB_BASE: usize = 0xA000_0000;
 /// Bound of the waits on a register (a stuck bit must not hang the firmware).
 pub const WAIT_READS: u32 = 1_000_000;
 
@@ -107,9 +109,9 @@ unsafe extern "C" {
 pub fn install_vectors() {
     let target = _exception as *const () as usize as u32;
     for v in [0x180, 0x200, 0x380, 0x400] {
-        fb_w(v, 0x3C1A_0000 | target >> 16); // lui k0, hi
-        fb_w(v + 4, 0x375A_0000 | target & 0xFFFF); // ori k0, k0, lo
-        fb_w(v + 8, 0x0340_0008); // jr k0
+        fb_w(v, LUI_K0 | target >> 16);
+        fb_w(v + 4, ORI_K0 | target & 0xFFFF);
+        fb_w(v + 8, JR_K0);
         fb_w(v + 12, 0);
     }
     set_status(0);

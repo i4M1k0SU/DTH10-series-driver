@@ -94,12 +94,11 @@ impl Firmware {
 
 /// Entered from the boot code with the caches on, `.bss` cleared and a
 /// stack.
-#[unsafe(no_mangle)]
-pub extern "C" fn fw_main() -> ! {
+fn fw_main() -> ! {
     hw::install_vectors();
     // The record of a fatal error (see `boot`): after power-on it holds
     // anything, later that of an earlier run.
-    for off in (0x520..0x580).step_by(4) {
+    for off in boot::FATAL_AREA.step_by(4) {
         fb_w(off, 0);
     }
     fb_w(0xC0, boot::MAGIC);
