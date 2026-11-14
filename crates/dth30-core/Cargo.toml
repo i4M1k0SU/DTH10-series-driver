@@ -8,8 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# Error type and the chip helpers shared with the DTH10 series (TC90517 BER, MxL13xRF tune word).
-dth10-core.workspace = true
+dth-common.workspace = true
 log.workspace = true
 sha2 = "0.11.1"
 

@@ -1,0 +1,10 @@
+[package]
+name = "dth-common"
+description = "Parts shared by the BUFFALO DTH10-series and DT-H30/U2-family drivers that depend on neither: the error type and small helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

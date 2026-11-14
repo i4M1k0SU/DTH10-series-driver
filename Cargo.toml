@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/dth-common",
     "crates/dth10-core",
     "crates/dth10-usb",
     "crates/dth10-diag",
@@ -21,6 +22,7 @@ license = "MIT"
 repository = "https://github.com/i4M1k0SU/DTH10-series-driver/"
 
 [workspace.dependencies]
+dth-common = { path = "crates/dth-common" }
 dth10-core = { path = "crates/dth10-core" }
 dth10-usb = { path = "crates/dth10-usb" }
 dth10-tuner = { path = "crates/dth10-tuner" }

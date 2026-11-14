@@ -12,7 +12,7 @@
 //!
 //! The analysis this follows is in the private notes (docs/26).
 //!
-//! Errors reuse [`dth10_core::error`].
+//! Errors are the shared [`dth_common::error`].
 
 pub mod bus;
 pub mod device;
@@ -24,4 +24,4 @@ pub mod psi;
 pub mod vixs;
 
 pub use device::Dth30;
-pub use dth10_core::error::{Error, Result};
+pub use dth_common::error::{Error, Result};

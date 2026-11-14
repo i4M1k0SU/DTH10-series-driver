@@ -8,7 +8,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-dth10-core.workspace = true
 dth30-core.workspace = true
 dth30-usb.workspace = true
 log.workspace = true

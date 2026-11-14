@@ -9,8 +9,6 @@
 //!
 //! Nothing here is verified on hardware.
 
-use dth10_core::mxl13xrf::rf_tune_word;
-
 use crate::Result;
 use crate::model::KitKind;
 
@@ -71,10 +69,10 @@ pub(super) const MJ110_SLEEP: &[(Dev, u8, u8)] = &[
 ];
 
 /// The tuner's frequency word: `(hz·64 + 500000) / 10⁶` (1/64 MHz,
-/// rounded). This is what `dth10_core::mxl13xrf::rf_tune_word` computes
-/// (checked by a test), so that function is used.
+/// rounded; the same value as the MxL13xRF's tune word of the DTH10
+/// series).
 pub fn tune_word(hz: u32) -> u16 {
-    rf_tune_word(hz)
+    ((u64::from(hz) * 64 + 500_000) / 1_000_000) as u16
 }
 
 /// The tune sequence (both kits).

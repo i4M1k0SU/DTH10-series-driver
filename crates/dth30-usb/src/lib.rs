@@ -51,7 +51,7 @@ use core::time::Duration;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use dth10_core::LockExt;
+use dth_common::LockExt;
 use dth30_core::bus::RemotePci;
 use dth30_core::{Error, Result, model};
 use nusb::MaybeFuture;
