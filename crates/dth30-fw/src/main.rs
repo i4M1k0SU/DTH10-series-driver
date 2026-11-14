@@ -109,6 +109,8 @@ pub extern "C" fn fw_main() -> ! {
     let clock = Clock::new(khz);
     let mut host = Host::new(&clock);
     host.handshake();
+    let before = hw::count();
+    stats::key_ram_cleared(keyram::clear(), hw::count().wrapping_sub(before), clock.ticks(1));
     let card = Card::new(&clock);
     let mut fw =
         Firmware { clock, host, dma: Dma::new(), ts: Ts::new(), card, cas: Cas::new(), program: Program::new() };

@@ -13,7 +13,9 @@ use core::arch::global_asm;
 /// "DTH3": tells this firmware from the vendor's (image +0x100, FB 0xC0).
 pub const MAGIC: u32 = 0x3348_5444;
 /// Firmware version (image +0x104, FB 0xC4): major << 16 | minor.
-pub const VERSION: u32 = 0x0000_0001;
+/// From version 2 the firmware clears the key RAM when it starts, and the
+/// host no longer does.
+pub const VERSION: u32 = 0x0000_0002;
 
 global_asm!(
     r#"

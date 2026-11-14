@@ -157,7 +157,7 @@ impl<B: RemotePci> Vixs<B> {
         self.mem = Some(mem);
         self.mips = Some(info);
 
-        dma::init(&mut self.chip)?;
+        dma::init(&mut self.chip, !fw.clears_key_ram())?;
         i2c::init(&mut self.chip)?;
         gpio::init(&mut self.chip)?;
         if self.opts.read_otp {

@@ -3,6 +3,8 @@
 //!
 //! | FB   | meaning                                                         |
 //! |------|-----------------------------------------------------------------|
+//! | 0xC8 | key RAM entries cleared at the start (128)                      |
+//! | 0xCC | the time that took, in microseconds                             |
 //! | 0xD0 | turns of the main loop in the last 5 ms                         |
 //! | 0xD4 | the longest turn of the main loop so far, in microseconds       |
 //! | 0xD8 | Program stream: ms from its open to the first ECM given to the card |
@@ -18,6 +20,13 @@ pub const ECM_SENT: u32 = 0xD8;
 pub const KEYS: u32 = 0xDC;
 pub const FIRST_ES: u32 = 0xE0;
 pub const FIRST_REST: u32 = 0xE4;
+
+/// The clearing of the key RAM at the start: `entries` written in `ticks`
+/// of Count, of which there are `per_ms` in a millisecond.
+pub fn key_ram_cleared(entries: u32, ticks: u32, per_ms: u32) {
+    fb_w(0xC8, entries);
+    fb_w(0xCC, ticks / (per_ms / 1000).max(1));
+}
 
 /// The main loop's turns.
 pub struct Turns {
