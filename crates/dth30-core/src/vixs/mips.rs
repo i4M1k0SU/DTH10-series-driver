@@ -149,13 +149,14 @@ pub fn start<B: RemotePci>(chip: &mut Chip<B>, layout: &Layout, fw: &Firmware, m
     chip.fb_write(fb::POWER_MODE, mem.power_mode)?;
 
     // 14. Release the MIPS: core 1 stays in reset first, then both run.
-    // 0x3000 is the SDRAM decode mask (64 MB on boards above 0x3F); 0x3008
+    // 0x3000 is the MIPS's SDRAM decode mask. The vendor writes 0x03FFFFFF
+    // on newer boards only on a path that does not wait for the firmware;
+    // with it the firmware's stack at the top of the 64 MB faults. 0x3008
     // opens the register space at MIPS phys 0x10040000 (mask 0x1FFF in the
     // high half, base >> 16 in the low half). Without it any MIPS load from
     // the registers hangs and the firmware stops at its first instruction
     // that reads one.
-    let sdram_mask = if chip.board_id > 0x3F { 0x03FF_FFFF } else { 0x0FFF_FFFF };
-    chip.mmr_write_checked(0x3000, sdram_mask)?;
+    chip.mmr_write_checked(0x3000, 0x0FFF_FFFF)?;
     chip.mmr_write_checked(0x3008, MIPS_MMR_WINDOW)?;
     chip.mmr_write_checked(0x3010, 0x110)?;
     chip.mmr_write_checked(0x3088, 0)?;
@@ -430,7 +431,7 @@ pub(crate) mod tests {
             FbW(0x4C, 1),
             FbR(0x44),
             FbW(0x40, 6),
-            W(0x3000, 0x03FF_FFFF),
+            W(0x3000, 0x0FFF_FFFF),
             W(0x3008, 0x1FFF_1004),
             W(0x3010, 0x110),
             W(0x3088, 0),

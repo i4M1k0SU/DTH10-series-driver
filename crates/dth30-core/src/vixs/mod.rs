@@ -327,7 +327,7 @@ pub(crate) mod tests {
         let pos = |a: Acc| acc.iter().position(|x| *x == a).unwrap_or_else(|| panic!("{a:?} missing"));
         let order = [
             pos(Acc::W(0x000, 0xFFFF_FDFF)),
-            pos(Acc::W(0x3000, 0x03FF_FFFF)),
+            pos(Acc::W(0x3000, 0x0FFF_FFFF)),
             pos(Acc::W(0x1A2C, 127)),
             pos(Acc::W(0x10A8, 0x67)),
             pos(Acc::W(0x108C, 0x3_0005)),
