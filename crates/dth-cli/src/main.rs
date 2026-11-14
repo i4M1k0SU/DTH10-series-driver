@@ -19,7 +19,7 @@
 //! independently, so a recorder can list the unit as two tuners (GR and
 //! BS/CS), or two TVTest windows can watch GR and BS at once.
 //!
-//! `list`, `info`, `tune` and `serve` also drive the DT-H30/U2 family
+//! `list`, `info`, `tune` and `serve` also drive the DTH30 series
 //! (`dth30_backend`): one terrestrial tuner, firmware from the vendor's
 //! `BufFsUSB.sys` (`--firmware`), device mode descrambled by the unit's own
 //! B-CAS card (no application keys). Such a unit is named by its unit name
@@ -45,11 +45,7 @@ use dth10_usb::{RecipientMode, UsbTransport};
 use dth30_backend::Dth30Backend;
 
 #[derive(Parser)]
-#[command(
-    name = "dth",
-    version,
-    about = "User-mode tuner command for the BUFFALO DTH10 series and DT-H30/U2 family of USB TV tuners"
-)]
+#[command(name = "dth", version, about = "User-mode tuner command for the BUFFALO DTH10/DTH30 series of USB TV tuners")]
 struct Cli {
     /// Log level: error, warn, info, debug or trace (RUST_LOG overrides it).
     #[arg(long, global = true, value_name = "LEVEL")]
@@ -80,7 +76,7 @@ enum Cmd {
 
 #[derive(Args, Clone, Default)]
 struct DeviceArgs {
-    /// Select the device by USB serial number, or a DT-H30/U2-family unit by the unit name `list`
+    /// Select the device by USB serial number, or a DTH30 series unit by the unit name `list`
     /// shows (default: the first one found, the DTH10 series first; `info` shows every one).
     #[arg(long, value_name = "SERIAL")]
     serial: Option<String>,
@@ -91,7 +87,7 @@ struct DeviceArgs {
     /// bmRequestType recipient of the vendor requests (default: device on Windows, interface elsewhere).
     #[arg(long, value_enum)]
     recipient: Option<RecipientArg>,
-    /// DT-H30/U2 family: the vendor driver BufFsUSB.sys the firmware is taken from. Default:
+    /// DTH30 series: the vendor driver BufFsUSB.sys the firmware is taken from. Default:
     /// $DTH30_FIRMWARE, else BufFsUSB.sys in the state directory, else next to this executable.
     #[arg(long, value_name = "FILE")]
     firmware: Option<PathBuf>,
@@ -259,7 +255,7 @@ fn init_logging(cli: &Cli) {
 
 /// The backends of the families, DTH10 series first (the order the command
 /// tries them in when no unit is named), with the options of `d`. `tune`
-/// passes its own DTH10-series settings in `template`, the handshake cache
+/// passes its own DTH10 series settings in `template`, the handshake cache
 /// directory (none with `--no-state`) and the key file.
 fn backends_with(
     d: &DeviceArgs,
@@ -547,7 +543,7 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The DTH10-series settings of `tune`.
+/// The DTH10 series settings of `tune`.
 fn tune_config(a: &TuneArgs, program: DeviceProgram) -> TunerConfig {
     let (lnb_voltage, lnb_power) = lnb_of(a.lnb);
     TunerConfig {

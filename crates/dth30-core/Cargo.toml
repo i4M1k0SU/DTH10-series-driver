@@ -1,6 +1,6 @@
 [package]
 name = "dth30-core"
-description = "Chip drivers for the BUFFALO DT-H30/U2 family of USB TV tuners (ViXS XCode2 behind a PLX NET2280), I/O-agnostic"
+description = "Chip drivers for the BUFFALO DTH30 series of USB TV tuners (ViXS XCode2 behind a PLX NET2280), I/O-agnostic"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

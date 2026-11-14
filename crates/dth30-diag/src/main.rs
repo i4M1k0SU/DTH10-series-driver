@@ -1,4 +1,4 @@
-//! Hardware diagnostics for the BUFFALO DT-H30/U2 family (DT-H30/U2,
+//! Hardware diagnostics for the BUFFALO DTH30 series (DT-H30/U2,
 //! DT-H50/U2, DT-H50/U2W): a ViXS XCode2 chip behind a PLX NET2280.
 //!
 //! A developer tool, checked on a DT-H50/U2 only. Every command that touches the
@@ -33,7 +33,7 @@ const FW_ENV: &str = "DTH30_FIRMWARE";
 #[command(
     name = "dth30-diag",
     version,
-    about = "Hardware diagnostics for the BUFFALO DT-H30/U2 family of USB TV tuners (developer tool, checked on a DT-H50/U2 only)"
+    about = "Hardware diagnostics for the BUFFALO DTH30 series of USB TV tuners (developer tool, checked on a DT-H50/U2 only)"
 )]
 struct Cli {
     /// Select the device by USB serial number (default: the first one found).

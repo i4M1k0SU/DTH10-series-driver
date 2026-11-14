@@ -1,6 +1,6 @@
 [package]
 name = "dth-bondriver"
-description = "BonDriver (IBonDriver2) DLL for the BUFFALO DTH10 series and DT-H30/U2 family of USB TV tuners: a client of `dth serve`, which it starts itself"
+description = "BonDriver (IBonDriver2) DLL for the BUFFALO DTH10/DTH30 series of USB TV tuners: a client of `dth serve`, which it starts itself"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

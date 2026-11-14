@@ -1,4 +1,4 @@
-//! Chip drivers for the BUFFALO DT-H30/U2 family of USB TV tuners
+//! Chip drivers for the BUFFALO DTH30 series of USB TV tuners
 //! (DT-H30/U2, DT-H50/U2, DT-H50/U2W), I/O-agnostic.
 //!
 //! The hardware is unrelated to the DTH10 series: a ViXS XCode2 ("Camino")

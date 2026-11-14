@@ -1,6 +1,6 @@
 //! Settings of a [`crate::Tuner`]: the DTH10 series' own ones, which the
 //! command and the daemon fill from their options (the stream settings shared
-//! with the DT-H30/U2 family are [`dth_common::stream`]).
+//! with the DTH30 series are [`dth_common::stream`]).
 
 use std::path::PathBuf;
 

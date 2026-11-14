@@ -28,7 +28,7 @@
 //! needs it; without it the daemon still serves raw terrestrial streams and
 //! refuses device-mode and BS/CS requests with the reason.
 //!
-//! Units of the DT-H30/U2 family (`dth30_backend`) are served the same
+//! Units of the DTH30 series (`dth30_backend`) are served the same
 //! way: one terrestrial tuner, `raw` = the scrambled TS as received,
 //! `device` = one service descrambled by the unit's own B-CAS card. They
 //! need no application key file but the firmware from the vendor's
@@ -78,7 +78,7 @@ pub struct ServeArgs {
     /// the state directory, else next to this executable.
     #[arg(long, value_name = "FILE")]
     app_keys: Option<PathBuf>,
-    /// DT-H30/U2 family: the vendor driver BufFsUSB.sys the firmware is taken from. Default:
+    /// DTH30 series: the vendor driver BufFsUSB.sys the firmware is taken from. Default:
     /// $DTH30_FIRMWARE, else BufFsUSB.sys in the state directory, else next to this executable.
     #[arg(long, value_name = "FILE")]
     firmware: Option<PathBuf>,
@@ -385,7 +385,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
     let what = describe(system_name(system));
 
     // What the unit's family needs for this request (the DTH10 series' key
-    // file for the link decryption, the DT-H30/U2 family's firmware file and
+    // file for the link decryption, the DTH30 series' firmware file and
     // its one terrestrial tuner): refused here, before the stream is claimed,
     // with a reason the client can act on.
     let asked = match req.tuner {
@@ -671,7 +671,7 @@ fn discover(units: &Units, backends: &[Arc<dyn Backend>], make_unit: MakeUnit<'_
 }
 
 /// The backend of a unit named on the command line: the family that has a
-/// unit of that name now, a DT-H30/U2-family name, else the DTH10 series.
+/// unit of that name now, a DTH30 series name, else the DTH10 series.
 fn backend_of(name: &str, backends: &[Arc<dyn Backend>]) -> Arc<dyn Backend> {
     if let Some(b) = backends.iter().find(|b| b.units().is_ok_and(|v| v.iter().any(|u| u.name == name))) {
         return b.clone();
@@ -684,7 +684,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     let keys = Arc::new(KeyStore::new(a.app_keys.clone(), state_dir.clone()));
     if let Err(e) = keys.get() {
         log::warn!(
-            "{e}; until then DTH10-series units serve only raw terrestrial streams (DT-H30/U2-family units need no key file)"
+            "{e}; until then DTH10 series units serve only raw terrestrial streams (DTH30 series units need no key file)"
         );
     }
     let recipient = match a.recipient {

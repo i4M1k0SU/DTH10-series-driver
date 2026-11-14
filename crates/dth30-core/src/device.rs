@@ -1,4 +1,4 @@
-//! One DT-H30/U2-family device: the ViXS chip, the front end of its board's
+//! One DTH30 series device: the ViXS chip, the front end of its board's
 //! kit and the three streams of the vendor's filter.
 //!
 //! [`Dth30::bring_up`] (or [`Dth30::start`] on a chip that is already up)
@@ -127,7 +127,7 @@ impl StreamInfo {
     }
 }
 
-/// A DT-H30/U2-family device (see the module documentation).
+/// A DTH30 series device (see the module documentation).
 pub struct Dth30<B: RemotePci> {
     fe: Frontend<FeBus<B>>,
     board_id: u32,

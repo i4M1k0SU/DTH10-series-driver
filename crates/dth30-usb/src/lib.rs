@@ -317,7 +317,7 @@ impl Found {
     }
 }
 
-/// An opened DT-H30/U2-family device (every interface claimed, register
+/// An opened DTH30 series device (every interface claimed, register
 /// endpoints open). Implements [`RemotePci`]; methods take `&self`, so one
 /// handle can be shared (e.g. in an `Arc`) by the control path and a reader.
 pub struct Net2280Usb {

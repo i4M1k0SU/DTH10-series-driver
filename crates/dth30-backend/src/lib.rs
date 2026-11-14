@@ -1,4 +1,4 @@
-//! The DT-H30/U2 family (DT-H30/U2, DT-H50/U2: a ViXS XCode2 behind a PLX
+//! The DTH30 series (DT-H30/U2, DT-H50/U2: a ViXS XCode2 behind a PLX
 //! NET2280, `dth30-core`) behind [`dth_common`]'s [`Backend`]
 //! ([`Dth30Backend`]) and [`Session`] ([`Dth30Tuner`]).
 //!
@@ -151,7 +151,7 @@ impl Dth30Backend {
     fn firmware(&self) -> std::result::Result<PathBuf, String> {
         firmware_path(self.firmware.as_deref(), &self.state_dir).ok_or_else(|| {
             format!(
-                "the DT-H30/U2 family needs the vendor driver {FIRMWARE_FILE} for its firmware: put it in {} or give --firmware",
+                "the DTH30 series needs the vendor driver {FIRMWARE_FILE} for its firmware: put it in {} or give --firmware",
                 self.state_dir.display()
             )
         })
@@ -160,7 +160,7 @@ impl Dth30Backend {
 
 impl Backend for Dth30Backend {
     fn family(&self) -> &'static str {
-        "DT-H30/U2 family"
+        "DTH30 series"
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
@@ -195,7 +195,7 @@ impl Backend for Dth30Backend {
 
     /// The firmware source and what [`probe`] reads (which resets the chip).
     fn info(&self, name: &str) -> Result<String> {
-        let (name, f) = find(Some(name))?.ok_or_else(|| Error::Usb(format!("no DT-H30/U2-family unit {name}")))?;
+        let (name, f) = find(Some(name))?.ok_or_else(|| Error::Usb(format!("no DTH30 series unit {name}")))?;
         let mut s = String::new();
         let _ = writeln!(s, "model: {} ({:04x})", f.product_label(), f.product_id);
         let _ = writeln!(s, "unit: {name} (serial {})", f.serial.as_deref().filter(|v| !v.is_empty()).unwrap_or("-"));
@@ -244,7 +244,7 @@ impl Dth30Tuner {
             .into_iter()
             .find(|(n, _)| n == name)
             .map(|(_, f)| f)
-            .ok_or_else(|| Error::Usb(format!("no DT-H30/U2-family unit {name}")))?;
+            .ok_or_else(|| Error::Usb(format!("no DTH30 series unit {name}")))?;
         let t = found.open()?;
         let pid = t.product_id();
         let pipes: Vec<u8> = t.endpoints().iter().map(|e| e.address).collect();

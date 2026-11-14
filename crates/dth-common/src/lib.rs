@@ -1,4 +1,4 @@
-//! Parts shared by the BUFFALO DTH10-series (`dth10-*`) and DT-H30/U2-family
+//! Parts shared by the BUFFALO DTH10 series (`dth10-*`) and DTH30 series
 //! (`dth30-*`) crates that belong to neither family:
 //!
 //! * [`error`]    – [`Error`] / [`Result`], used by both families' protocol layers

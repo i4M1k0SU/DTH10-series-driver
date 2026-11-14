@@ -3,7 +3,7 @@
 //! The tuner-related keys map onto [`Tuning`], what the DLL asks the server
 //! for with each stream request (docs/30).
 //!
-//! Some of the server's DTH10-series settings are deliberately not in the
+//! Some of the server's DTH10 series settings are deliberately not in the
 //! ini: each has one working value on every unit of the series, so the
 //! server the DLL starts always uses it (the `dth` command keeps options
 //! for most of them, for diagnostics):

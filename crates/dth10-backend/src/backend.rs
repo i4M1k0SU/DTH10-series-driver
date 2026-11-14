@@ -222,7 +222,7 @@ impl Backend for Dth10Backend {
     }
 }
 
-/// An open DTH10-series unit: the [`Tuner`] and the credentials it is given
+/// An open DTH10 series unit: the [`Tuner`] and the credentials it is given
 /// before a tune that decrypts the link.
 struct Dth10Session {
     tuner: Tuner,
