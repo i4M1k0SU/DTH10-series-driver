@@ -7,17 +7,22 @@
 //! * [`tuner`]    – [`Tuner`]: USB open, kit init, tuning, the TS reader thread with CEPM decryption, [`TsQueue`]
 //! * [`proto`]    – the request/reply lines between `dth10 serve` and its clients (`dth10 stream`, the BonDriver)
 //! * [`ipc`]      – the socket those lines travel on (Unix socket on Linux, loopback TCP everywhere)
+//! * [`session`]  – [`Session`], what `dth10 serve` asks of a unit of either family
+//! * [`dth30`]    – [`dth30::Dth30Tuner`]: the DT-H30/U2 family (`dth30-core`) behind [`Session`]
 //!
-//! The crate is platform independent (it only depends on `dth10-core` and the
-//! `nusb` transport of `dth10-usb`).
+//! The crate is platform independent (it depends on `dth10-core` / `dth30-core`
+//! and the `nusb` transports of `dth10-usb` / `dth30-usb`).
 
 pub mod channels;
 pub mod config;
+pub mod dth30;
 pub mod ipc;
 pub mod proto;
 pub mod psi;
+pub mod session;
 pub mod tuner;
 
 pub use channels::{Channel, System};
 pub use config::{DeviceProgram, StreamModeCfg, TunerConfig};
+pub use session::Session;
 pub use tuner::{Aligner, TsQueue, Tuner, default_tuner};

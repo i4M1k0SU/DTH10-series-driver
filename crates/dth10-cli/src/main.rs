@@ -244,7 +244,12 @@ fn init_logging(cli: &Cli) {
 
 fn list() -> Result<(), Box<dyn Error>> {
     let found = UsbTransport::list_all()?;
-    if found.is_empty() {
+    // The DT-H30/U2 family is served by `dth10 serve` only (its diagnostics are `dth30-diag`).
+    let dth30 = dth10_tuner::dth30::list().unwrap_or_else(|e| {
+        log::debug!("DT-H30/U2-family device list: {e}");
+        Vec::new()
+    });
+    if found.is_empty() && dth30.is_empty() {
         println!("no supported device found (VID 0411)");
     }
     for d in found {
@@ -254,6 +259,15 @@ fn list() -> Result<(), Box<dyn Error>> {
             d.product_id,
             dth10_core::product_label(d.product_id),
             d.serial.as_deref().unwrap_or("-"),
+            d.location
+        );
+    }
+    for (unit, d) in dth30 {
+        println!(
+            "{:04x}:{:04x} {} unit {unit} ({}; dth10 serve only)",
+            d.vendor_id,
+            d.product_id,
+            d.product_label(),
             d.location
         );
     }

@@ -1,6 +1,6 @@
 [package]
 name = "dth10-tuner"
-description = "Tuner session logic shared by the BonDriver and the dth10 command: channel tables, device-mode PID learning, CEPM decryption, TS reader thread"
+description = "Tuner session logic shared by the BonDriver and the dth10 command: channel tables, device-mode PID learning, CEPM decryption, TS reader thread; the DT-H30/U2 family through dth30-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,5 +10,7 @@ repository.workspace = true
 [dependencies]
 dth10-core.workspace = true
 dth10-usb.workspace = true
+dth30-core.workspace = true
+dth30-usb.workspace = true
 log.workspace = true
 socket2 = "0.6.5"
