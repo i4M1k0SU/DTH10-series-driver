@@ -68,6 +68,9 @@ pub const DMA_DESC_SIZE: u32 = 0x840;
 pub const COM_LIST_SIZE: u32 = 0x8_F000;
 
 /// The vendor's handshake bounds: 5 idle reads per tick, 100 ticks.
+/// MMR 0x3008 at release: the MIPS's window onto the register space.
+pub const MIPS_MMR_WINDOW: u32 = 0x1FFF_1004;
+
 const IDLE_READS_PER_TICK: u32 = 5;
 const TICK_LIMIT: u32 = 100;
 
@@ -146,8 +149,14 @@ pub fn start<B: RemotePci>(chip: &mut Chip<B>, layout: &Layout, fw: &Firmware, m
     chip.fb_write(fb::POWER_MODE, mem.power_mode)?;
 
     // 14. Release the MIPS: core 1 stays in reset first, then both run.
-    chip.mmr_write_checked(0x3000, 0x0FFF_FFFF)?;
-    chip.mmr_write_checked(0x3008, 0x1FFF_0004)?;
+    // 0x3000 is the SDRAM decode mask (64 MB on boards above 0x3F); 0x3008
+    // opens the register space at MIPS phys 0x10040000 (mask 0x1FFF in the
+    // high half, base >> 16 in the low half). Without it any MIPS load from
+    // the registers hangs and the firmware stops at its first instruction
+    // that reads one.
+    let sdram_mask = if chip.board_id > 0x3F { 0x03FF_FFFF } else { 0x0FFF_FFFF };
+    chip.mmr_write_checked(0x3000, sdram_mask)?;
+    chip.mmr_write_checked(0x3008, MIPS_MMR_WINDOW)?;
     chip.mmr_write_checked(0x3010, 0x110)?;
     chip.mmr_write_checked(0x3088, 0)?;
     let ctrl = chip.mmr_read_checked(MIPS_CTRL[0])? & !2;
@@ -324,8 +333,8 @@ pub(crate) mod tests {
             }
         }
         // MIPS register address: one zero, then stable; one more read after.
-        m.queue(Space::Mem, FB + 0x20, &[0, 0x1FFF_0004, 0x1FFF_0004, 0x1FFF_0004, 0x1FFF_0004]);
-        m.queue(Space::Mem, FB + 0x20, &[0x1FFF_0004, 0x1FFF_0004, 0x1FFF_0004]);
+        m.queue(Space::Mem, FB + 0x20, &[0, 0x1FFF_1004, 0x1FFF_1004, 0x1FFF_1004, 0x1FFF_1004]);
+        m.queue(Space::Mem, FB + 0x20, &[0x1FFF_1004, 0x1FFF_1004, 0x1FFF_1004]);
         // ALLOC_FB three times, then OK three times, then the ack read.
         m.queue(Space::Mem, MMR + 0x3028, &[0, 5, 5, 5, 0, 0, 0, 0]);
         m.set(Space::Mem, MMR + 0x3040, 0x0010_0000);
@@ -342,7 +351,7 @@ pub(crate) mod tests {
         assert_eq!(
             info,
             MipsInfo {
-                mips_mmr: 0x1FFF_0004,
+                mips_mmr: 0x1FFF_1004,
                 pool_offset: 0x10_0000,
                 pool_size: 0x80_0000,
                 dma_desc_fb: 0x10_0000,
@@ -421,8 +430,8 @@ pub(crate) mod tests {
             FbW(0x4C, 1),
             FbR(0x44),
             FbW(0x40, 6),
-            W(0x3000, 0x0FFF_FFFF),
-            W(0x3008, 0x1FFF_0004),
+            W(0x3000, 0x03FF_FFFF),
+            W(0x3008, 0x1FFF_1004),
             W(0x3010, 0x110),
             W(0x3088, 0),
             R(0x30F8),
@@ -441,7 +450,7 @@ pub(crate) mod tests {
             FbR(0x20),
             // Exchange.
             FbR(0x20),
-            W(0x3008, 0x1FFF_0004),
+            W(0x3008, 0x1FFF_1004),
             FbW(0x28, MMR),
         ]);
         for _ in 0..4 {
