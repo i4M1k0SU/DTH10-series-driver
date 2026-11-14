@@ -302,7 +302,7 @@ mod tests {
     /// platform (Linux and Windows alike).
     #[test]
     fn unix_socket_round_trip() {
-        let path = std::env::temp_dir().join(format!("dth10-ipc-test-{}.sock", std::process::id()));
+        let path = std::env::temp_dir().join(format!("dth-ipc-test-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let target = Target::Unix(path.clone());
         let listener = Listener::bind(&target).expect("bind");

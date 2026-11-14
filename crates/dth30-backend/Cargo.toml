@@ -1,6 +1,6 @@
 [package]
 name = "dth30-backend"
-description = "The BUFFALO DT-H30/U2 family behind dth-common's Session and Backend"
+description = "The BUFFALO DT-H30/U2 family behind dth-common's Session and Backend: firmware lookup, B-CAS card watch, the Raw / Program stream readers, the lamps"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

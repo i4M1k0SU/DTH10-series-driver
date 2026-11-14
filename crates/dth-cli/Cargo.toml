@@ -1,6 +1,6 @@
 [package]
 name = "dth-cli"
-description = "Stand-alone tuner command and daemon for the BUFFALO DTH10 series and DT-H30/U2 family of USB TV tuners: tune and stream the TS (Linux usbfs / Windows WinUSB)"
+description = "Stand-alone tuner command and daemon for the BUFFALO DTH10 series and DT-H30/U2 family of USB TV tuners: tune and stream the TS (Linux usbfs / Windows WinUSB / macOS IOKit)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

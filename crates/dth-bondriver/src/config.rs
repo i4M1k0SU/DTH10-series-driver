@@ -284,7 +284,7 @@ mod tests {
     /// The DLL `BonDriver_Test.dll` in a folder of its own, with `ini` (if
     /// any) as its ini: the settings it loads and that folder.
     fn load_with(name: &str, ini: Option<&str>) -> (Config, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("dth10-bondriver-config-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dth-bondriver-config-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let dll = dir.join("BonDriver_Test.dll");

@@ -601,7 +601,7 @@ mod tests {
 
     /// A folder standing in for the DLL's, emptied afterwards.
     fn dll_folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dth10-client-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dth-client-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir

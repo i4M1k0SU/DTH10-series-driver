@@ -1,7 +1,7 @@
 //! `dth10-diag`: hardware diagnostics for the BUFFALO DTH10 series of USB TV
 //! tuners (Cobalt EVA01 bridge), for the developer debugging the hardware.
-//! Watching and recording are the `dth10` command (`dth10 tune -c 27`,
-//! `dth10 tune -c BS15_0`) and the BonDriver, not this tool.
+//! Watching and recording are the `dth` command (`dth tune -c 27`,
+//! `dth tune -c BS15_0`) and the BonDriver, not this tool.
 //!
 //! Commands:
 //!
@@ -22,7 +22,7 @@
 //! Raw vendor commands, CEPM handshakes (an interrupted one locks the device's
 //! handshake, docs/22 §6b), a raw-mode capture on stream #0 (it stops the
 //! satellite stream, docs/40) and hub-power can leave the device unusable until
-//! it is power-cycled. That is why they are here and not in `dth10`.
+//! it is power-cycled. That is why they are here and not in `dth`.
 
 use std::error::Error;
 use std::io::Write;
@@ -47,7 +47,7 @@ type Res<T = ()> = Result<T, Box<dyn Error>>;
 #[command(
     name = "dth10-diag",
     version,
-    about = "Hardware diagnostics for the BUFFALO DTH10 series of USB TV tuners (developer tool; recording is `dth10 tune`)"
+    about = "Hardware diagnostics for the BUFFALO DTH10 series of USB TV tuners (developer tool; recording is `dth tune`)"
 )]
 struct Cli {
     /// Select the device by USB serial number (default: the first one found; `info` shows every one).
@@ -150,22 +150,22 @@ enum Cmd {
     /// With --file, stream #0 (EP 0x81) is captured after lock, in raw mode (enable byte0 = 1,
     /// the full TS as broadcast) unless --enable-bytes gives another payload. Raw mode on stream
     /// #0 stops the satellite stream until the device is power-cycled (docs/40): BS/CS channels
-    /// do not work again before that. Recording a channel is `dth10 tune -c 27` (device mode with
+    /// do not work again before that. Recording a channel is `dth tune -c 27` (device mode with
     /// link decryption), not this command.
     Tune(TuneArgs),
     /// ISDB-S probe: tune a BS/CS110 transponder, wait for lock and print the signal status with
     /// the TMCC TS-ID table, then select the TS.
     ///
     /// Same shape as `tune`: initialises the terrestrial kit and the satellite kit (the order of
-    /// the original driver and of `dth10`), sends the device start, opens the satellite kit,
+    /// the original driver and of `dth`), sends the device start, opens the satellite kit,
     /// tunes, then prints the signal status (lock, C/N, BER, TS-ID table) every 250 ms until it
     /// locks with a TS-ID table or --lock-wait passes. The TS is then selected: the table entry of
     /// the channel's relative TS number (BS15_1 = entry 1), else the channel's own TSID, or --tsid.
     /// Exits with an error without lock.
     ///
     /// No stream is started: the device outputs the satellite stream only in its own mode with
-    /// link decryption (docs/40), which is what `dth10` does. Recording a satellite channel is
-    /// `dth10 tune -c BS15_0` (device mode).
+    /// link decryption (docs/40), which is what `dth` does. Recording a satellite channel is
+    /// `dth tune -c BS15_0` (device mode).
     TuneSat(TuneSatArgs),
     /// ISDB-T: tune a range of UHF channels on tuner #0 and print lock / C/N for each.
     Scan {
@@ -183,7 +183,7 @@ enum Cmd {
     /// certificate, nonces, shared secret and session identity.
     ///
     /// The six steps run in one go: a handshake interrupted half way locks the device's handshake
-    /// until it is power-cycled (docs/22 §6b). `dth10` runs and caches its handshakes itself.
+    /// until it is power-cycled (docs/22 §6b). `dth` runs and caches its handshakes itself.
     Cepm {
         /// The vendor application's CoBDACom.dll (PCastTV3) holding the application credentials.
         /// Default: $DTH10_APP_KEYS, else ./CoBDACom.dll.
@@ -193,7 +193,7 @@ enum Cmd {
         /// 0x80 = tuner #1 path. Default: the path of --tuner.
         #[arg(long, value_name = "FLAGS", value_parser = parse_u8_auto)]
         flags: Option<u8>,
-        /// Save the handshake to this file in the `DTH10_<serial>.cepm` format of `dth10` (one record per
+        /// Save the handshake to this file in the `DTH10_<serial>.cepm` format of `dth` (one record per
         /// path; the record of this path is replaced, others in the file are kept).
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
@@ -247,7 +247,7 @@ struct TuneArgs {
 
 #[derive(Args)]
 struct TuneSatArgs {
-    /// BS/CS110 channel as in `dth10`: BS15 or BS15_1 (BS transponder and relative TS number,
+    /// BS/CS110 channel as in `dth`: BS15 or BS15_1 (BS transponder and relative TS number,
     /// default 0), ND02 (CS110 transponder), or the IF frequency in Hz (satellite RF - 10678 MHz,
     /// e.g. 1318000000 for BS15; selects relative TS 0).
     #[arg(value_parser = sat_channel)]
@@ -286,7 +286,7 @@ fn parse_hex16(s: &str) -> Result<u16, String> {
 }
 
 /// A byte as decimal, or hexadecimal with `0x`: `0x19` = 25, `19` = 19, `ff`
-/// is an error. Unlike the hex options of `dth10` (and `parse_hex16` here),
+/// is an error. Unlike the hex options of `dth` (and `parse_hex16` here),
 /// bare digits are decimal (docs/40 relies on this).
 fn parse_u8_auto(s: &str) -> Result<u8, String> {
     let n = parse_num(s).ok_or_else(|| format!("{s:?}: decimal, or hex with 0x (e.g. 0x19), expected"))?;
@@ -852,7 +852,7 @@ impl PacketStats {
 
 /// The TSID to select: the TMCC table entry of the channel's relative TS
 /// number when the table has it, else the channel's own TSID (the rule of
-/// `dth10`). 0 = nothing to select.
+/// `dth`). 0 = nothing to select.
 fn pick_tsid(ch: &Channel, ids: &[u16]) -> u16 {
     if let Some(slot) = ch.slot
         && let Some(&id) = ids.get(slot as usize)
@@ -878,7 +878,7 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
     }
     let info1 = Device::new(t.clone()).with_tuner_index(1).read_device_information()?;
     print_desc(1, &info1.desc);
-    // The original driver and `dth10` initialise both kits, then send the
+    // The original driver and `dth` initialise both kits, then send the
     // device start; the terrestrial kit stays in standby here.
     match TerrestrialKit::new(dev0, info0.desc.clone(), t.product_id()) {
         Ok(mut ter) => {
@@ -894,7 +894,7 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
     println!("satellite kit ({}): I2C/GPIO via the tuner #{} path", kit.kind(), a.i2c_tuner);
     kit.init()?;
     if !a.no_start {
-        Device::new(t).start()?; // wValue 0 / wIndex 0x10 on the tuner #0 path, as `dth10` sends it
+        Device::new(t).start()?; // wValue 0 / wIndex 0x10 on the tuner #0 path, as `dth` sends it
     }
     kit.open()?;
     let r = sat_probe(&mut kit, &ch, a);
