@@ -79,7 +79,9 @@ pub struct ServeArgs {
     #[arg(long, value_name = "FILE")]
     app_keys: Option<PathBuf>,
     /// DTH30 series: use the firmware in this file (the vendor driver BufFsUSB.sys, or a
-    /// firmware image) instead of this project's own firmware built into the program.
+    /// firmware image) instead of this project's own firmware built into the program. (A
+    /// program built without that firmware looks for dth30-fw.bin, then BufFsUSB.sys, in
+    /// the state directory and next to this executable.)
     #[arg(long, value_name = "FILE")]
     firmware: Option<PathBuf>,
     /// Antenna (LNB) supply for BS/CS: 0 (off), 110 (11 V) or 150 (15 V). The DT-H70/U2
@@ -713,7 +715,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
     };
     let backends: Vec<Arc<dyn Backend>> = vec![
         Arc::new(Dth10Backend::new(template, Some(state_dir.clone()), keys)),
-        Arc::new(Dth30Backend::new(a.firmware.clone(), read_depth)),
+        Arc::new(Dth30Backend::new(a.firmware.clone(), state_dir.clone(), read_depth)),
     ];
     let defaults = Arc::new(Defaults {
         lnb_voltage,

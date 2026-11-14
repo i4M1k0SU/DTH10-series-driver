@@ -9,8 +9,9 @@
 //! with `RUSTC_BOOTSTRAP=1`: set here, for the nested build alone.
 //!
 //! With `DTH30_NO_OWN_FIRMWARE` set in the environment the firmware is
-//! not built and `Firmware::own` gives `None` (for a Rust installation
-//! without `rust-src`).
+//! not built and `Firmware::own` gives `None`; the programs then look for
+//! a firmware file (`Firmware::select`). This is for a Rust installation
+//! without `rust-src`.
 
 use std::env;
 use std::fs;

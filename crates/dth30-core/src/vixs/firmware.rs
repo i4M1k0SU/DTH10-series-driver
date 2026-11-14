@@ -16,7 +16,7 @@
 //! after the download ([`super::mips`]). [`Firmware::vectors`] parses the
 //! same table from the image, for diagnostics.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -99,6 +99,10 @@ pub const OWN_MAGIC_OFFSET: u32 = 0x100;
 /// not the vendor's.
 pub const OWN_MAGIC: u32 = 0x3348_5444;
 
+/// The file names a program built without a firmware of its own looks for,
+/// in this order: an image of this project's firmware, the vendor's driver.
+pub const FIRMWARE_FILES: [&str; 2] = ["dth30-fw.bin", "BufFsUSB.sys"];
+
 /// A firmware image: the vendor's (verified by its hash) or this project's
 /// own.
 #[derive(Clone)]
@@ -170,6 +174,41 @@ impl Firmware {
     pub fn own() -> Option<Self> {
         static IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dth30-fw.bin"));
         if IMAGE.is_empty() { None } else { Self::from_image(IMAGE).ok() }
+    }
+
+    /// The firmware to run: the one in `file` when given, else the built-in
+    /// one ([`Firmware::own`]). A program built without it looks in `dirs`
+    /// for [`FIRMWARE_FILES`] instead. With the path, if the firmware came
+    /// from a file.
+    pub fn select(file: Option<&Path>, dirs: &[PathBuf]) -> Result<(Self, Option<PathBuf>)> {
+        Self::select_from(file, Self::own(), dirs)
+    }
+
+    fn select_from(file: Option<&Path>, own: Option<Self>, dirs: &[PathBuf]) -> Result<(Self, Option<PathBuf>)> {
+        if let Some(p) = file {
+            return Ok((Self::load(p)?, Some(p.to_path_buf())));
+        }
+        if let Some(fw) = own {
+            return Ok((fw, None));
+        }
+        match Self::find_file(dirs) {
+            Some(p) => Ok((Self::load(&p)?, Some(p))),
+            None => {
+                let places: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+                Err(Error::Unsupported(format!(
+                    "this build has no firmware of its own: give one with --firmware, or put {} or {} in {}",
+                    FIRMWARE_FILES[0],
+                    FIRMWARE_FILES[1],
+                    places.join(" or ")
+                )))
+            }
+        }
+    }
+
+    /// The first of [`FIRMWARE_FILES`] that exists in one of `dirs`: each
+    /// name is tried in every directory before the next name.
+    pub fn find_file(dirs: &[PathBuf]) -> Option<PathBuf> {
+        FIRMWARE_FILES.iter().flat_map(|name| dirs.iter().map(move |d| d.join(name))).find(|p| p.is_file())
     }
 
     /// Whether this is the project's own firmware rather than the vendor's.
@@ -394,6 +433,43 @@ mod tests {
         assert!(Firmware::from_bytes(&img).is_err());
         // The vendor's image has no such mark.
         assert!(!Firmware::unverified(test_image()).is_own());
+    }
+
+    /// An own image for the file tests: the mark and a one-entry vector table.
+    fn own_image() -> Vec<u8> {
+        let mut img = vec![0u8; 0x200];
+        img[0x100..0x104].copy_from_slice(&OWN_MAGIC.to_le_bytes());
+        img[0x110..0x114].copy_from_slice(&1u32.to_le_bytes());
+        img
+    }
+
+    #[test]
+    fn selection_order() {
+        let base = std::env::temp_dir().join(format!("dth30-fw-select-{}", std::process::id()));
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let dirs = [a.clone(), b.clone()];
+        let built_in = || Some(Firmware::unverified(own_image()));
+
+        // Nothing to find: only a build with its own firmware has one.
+        assert_eq!(Firmware::find_file(&dirs), None);
+        std::assert_matches!(Firmware::select_from(None, None, &dirs), Err(Error::Unsupported(ref m)) if m.contains("dth30-fw.bin"));
+        assert_eq!(Firmware::select_from(None, built_in(), &dirs).unwrap().1, None);
+
+        // The vendor driver's name in the first directory, the image's name
+        // in the second: the image's name wins.
+        std::fs::write(a.join(FIRMWARE_FILES[1]), own_image()).unwrap();
+        assert_eq!(Firmware::find_file(&dirs), Some(a.join(FIRMWARE_FILES[1])));
+        std::fs::write(b.join(FIRMWARE_FILES[0]), own_image()).unwrap();
+        assert_eq!(Firmware::find_file(&dirs), Some(b.join(FIRMWARE_FILES[0])));
+        assert_eq!(Firmware::select_from(None, None, &dirs).unwrap().1, Some(b.join(FIRMWARE_FILES[0])));
+        // Files are not looked for when the program has its own firmware,
+        // and a file given by name comes before everything.
+        assert_eq!(Firmware::select_from(None, built_in(), &dirs).unwrap().1, None);
+        let given = a.join(FIRMWARE_FILES[1]);
+        assert_eq!(Firmware::select_from(Some(&given), built_in(), &dirs).unwrap().1, Some(given));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// The image the build script made: marked, with the reset vector first.

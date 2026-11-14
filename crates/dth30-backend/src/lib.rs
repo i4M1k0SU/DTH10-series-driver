@@ -114,35 +114,39 @@ pub fn probe(found: &Found) -> Result<UnitInfo> {
     Ok(UnitInfo { endpoints, board_id: dev.board_id(), kit: dev.kit().name() })
 }
 
-/// The firmware for a unit: the one in `file` when given (the vendor
-/// driver `BufFsUSB.sys` or a firmware image), else this project's own one
-/// built into the program.
-pub fn firmware(file: Option<&Path>) -> std::result::Result<Firmware, String> {
-    match file {
-        Some(p) => Firmware::load(p).map_err(|e| format!("firmware {}: {e}", p.display())),
-        None => Firmware::own().ok_or_else(|| {
-            "this build has no firmware of its own: give the vendor driver BufFsUSB.sys with --firmware".to_string()
-        }),
-    }
+/// The firmware for a unit ([`Firmware::select`]): the one in `file` when
+/// given (the vendor driver `BufFsUSB.sys` or a firmware image), else this
+/// project's own one built into the program. A program built without it
+/// looks for a firmware file in `state_dir`, then next to the executable.
+/// With the path, if the firmware came from a file.
+pub fn firmware(file: Option<&Path>, state_dir: &Path) -> std::result::Result<(Firmware, Option<PathBuf>), String> {
+    let mut dirs = vec![state_dir.to_path_buf()];
+    dirs.extend(std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)));
+    Firmware::select(file, &dirs).map_err(|e| match file {
+        Some(p) => format!("firmware {}: {e}", p.display()),
+        None => e.to_string(),
+    })
 }
 
 /// The family as a [`Backend`]: units by [`list`], the firmware taken on
 /// each open ([`firmware`]).
 pub struct Dth30Backend {
     firmware: Option<PathBuf>,
+    state_dir: PathBuf,
     read_depth: usize,
 }
 
 impl Dth30Backend {
     /// `firmware`: the firmware file given on the command line, if any
-    /// (else the built-in firmware is used); `read_depth`: bulk reads in
-    /// flight per stream.
-    pub fn new(firmware: Option<PathBuf>, read_depth: usize) -> Self {
-        Self { firmware, read_depth }
+    /// (else the built-in firmware is used); `state_dir`: where a program
+    /// built without that firmware looks for a file first; `read_depth`:
+    /// bulk reads in flight per stream.
+    pub fn new(firmware: Option<PathBuf>, state_dir: PathBuf, read_depth: usize) -> Self {
+        Self { firmware, state_dir, read_depth }
     }
 
-    fn firmware(&self) -> std::result::Result<Firmware, String> {
-        firmware(self.firmware.as_deref())
+    fn firmware(&self) -> std::result::Result<(Firmware, Option<PathBuf>), String> {
+        firmware(self.firmware.as_deref(), &self.state_dir)
     }
 }
 
@@ -176,7 +180,7 @@ impl Backend for Dth30Backend {
     }
 
     fn open(&self, name: &str, queue: TsQueue) -> Result<Box<dyn Session>> {
-        let fw = self.firmware().map_err(Error::Unsupported)?;
+        let (fw, _) = self.firmware().map_err(Error::Unsupported)?;
         Ok(Box::new(Dth30Tuner::open(name, &fw, self.read_depth, queue)?))
     }
 
@@ -186,15 +190,15 @@ impl Backend for Dth30Backend {
         let mut s = String::new();
         let _ = writeln!(s, "model: {} ({:04x})", f.product_label(), f.product_id);
         let _ = writeln!(s, "unit: {name} (serial {})", f.serial.as_deref().filter(|v| !v.is_empty()).unwrap_or("-"));
-        match (self.firmware(), &self.firmware) {
-            (Ok(fw), Some(p)) => {
+        match self.firmware() {
+            Ok((fw, Some(p))) => {
                 let kind = if fw.is_own() { "this project's own" } else { "the vendor's, verified" };
                 let _ = writeln!(s, "firmware: {} ({kind}, {} bytes)", p.display(), fw.len());
             }
-            (Ok(fw), None) => {
+            Ok((fw, None)) => {
                 let _ = writeln!(s, "firmware: built in (this project's own, {} bytes)", fw.len());
             }
-            (Err(e), _) => {
+            Err(e) => {
                 let _ = writeln!(s, "firmware: {e}");
             }
         }

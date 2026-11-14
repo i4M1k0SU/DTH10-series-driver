@@ -88,7 +88,9 @@ struct DeviceArgs {
     #[arg(long, value_enum)]
     recipient: Option<RecipientArg>,
     /// DTH30 series: use the firmware in this file (the vendor driver BufFsUSB.sys, or a
-    /// firmware image) instead of this project's own firmware built into the program.
+    /// firmware image) instead of this project's own firmware built into the program. (A
+    /// program built without that firmware looks for dth30-fw.bin, then BufFsUSB.sys, in
+    /// the state directory and next to this executable.)
     #[arg(long, value_name = "FILE")]
     firmware: Option<PathBuf>,
 }
@@ -270,7 +272,7 @@ fn backends_with(
     template.recipient = recipient_mode(d);
     vec![
         Arc::new(Dth10Backend::new(template, cepm_dir, keys)),
-        Arc::new(Dth30Backend::new(d.firmware.clone(), read_depth)),
+        Arc::new(Dth30Backend::new(d.firmware.clone(), state_dir, read_depth)),
     ]
 }
 

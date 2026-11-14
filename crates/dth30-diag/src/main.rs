@@ -47,7 +47,8 @@ struct Cli {
 struct FwArgs {
     /// Use the firmware in this file (the vendor driver BufFsUSB.sys, or a firmware image
     /// such as one written by `fw --out`) instead of this project's own firmware built into
-    /// the program.
+    /// the program. (A program built without that firmware looks for dth30-fw.bin, then
+    /// BufFsUSB.sys, next to this executable.)
     #[arg(long, value_name = "PATH")]
     firmware: Option<PathBuf>,
 }
@@ -322,14 +323,12 @@ fn report_board(reg: u32) {
     }
 }
 
-/// The firmware: the file given, else the one built into the program.
+/// The firmware: the file given, else the one built into the program (a
+/// program built without it looks for a firmware file next to itself).
 fn firmware(arg: Option<PathBuf>) -> Res<Firmware> {
-    match arg {
-        Some(path) => Ok(Firmware::load(path)?),
-        None => Firmware::own().ok_or_else(|| {
-            "this build has no firmware of its own: give the vendor driver file BufFsUSB.sys with --firmware".into()
-        }),
-    }
+    let dirs: Vec<PathBuf> =
+        std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).into_iter().collect();
+    Ok(Firmware::select(arg.as_deref(), &dirs)?.0)
 }
 
 fn fw(path: Option<PathBuf>, out: Option<&Path>) -> Res {
