@@ -26,6 +26,13 @@ const ETU_DEFAULT: u32 = 372 * 44;
 
 const PIN_RST: u32 = 1 << 12;
 const PIN_OFF: u32 = 1 << 13;
+/// The card's two outputs, and their levels with the card switched off.
+const PINS: u32 = PIN_RST | PIN_OFF;
+const PINS_OFF: u32 = PIN_RST | PIN_OFF;
+
+/// How often a reset is started over because the outputs had been written
+/// over ([`Card::guard`]), until the host asks for the next reset.
+const AGAIN_MAX: u8 = 3;
 
 /// Status bits as the host sees them.
 pub const PRESENT: u8 = 1;
@@ -157,6 +164,11 @@ pub struct Card {
     phase: Phase,
     /// A reset request is in progress (its end is reported).
     resetting: bool,
+    /// The levels the card's two outputs are meant to have.
+    levels: u32,
+    next_guard: u32,
+    /// Resets started over since the host last asked for one.
+    again: u8,
     jobs: [Job; 4],
     njobs: usize,
     retries: u8,
@@ -177,7 +189,7 @@ impl Card {
         mmr_w(0x1020, 0xF_0000 | ETU_DEFAULT);
         mmr_w(0x1024, 3007);
         Self::pins();
-        mmr_rmw(0x1088, |v| v | PIN_RST | PIN_OFF);
+        mmr_rmw(0x1088, |v| v | PINS_OFF);
         mmr_w(0x1094, 0xF_FF00);
         mmr_w(0x1030, 0);
         Self {
@@ -187,6 +199,9 @@ impl Card {
             next_detect: count(),
             phase: Phase::Idle,
             resetting: false,
+            levels: PINS_OFF,
+            next_guard: count(),
+            again: 0,
             jobs: [Job::Resync; 4],
             njobs: 0,
             retries: 0,
@@ -231,35 +246,94 @@ impl Card {
         count().wrapping_sub(t) < 0x8000_0000
     }
 
-    /// The host asks for a card reset. The card is powered down and up
-    /// again; its ATR, the protocol set-up and INIT follow in [`Card::poll`].
+    /// Set the card's two outputs.
+    fn drive(&mut self, levels: u32) {
+        self.levels = levels;
+        mmr_rmw(0x1088, |v| (v & !PINS) | levels);
+    }
+
+    /// The output register is not the firmware's alone: the host has its
+    /// lamp and tuner bits in it and changes them by reading the register
+    /// and writing it back, which undoes a change made here in between; and
+    /// its GPIO set-up writes the whole register once after the firmware
+    /// has started. So the two outputs are compared every millisecond with
+    /// what they are meant to be, and put right.
+    ///
+    /// The wrong levels switch the card off or hold it in reset, so a card
+    /// in use or being reset is started again. (And an empty slot whose
+    /// supply is asked for goes on reporting "no card" after one has been
+    /// put in.)
+    fn guard(&mut self) {
+        if !Self::passed(self.next_guard) {
+            return;
+        }
+        self.next_guard = self.after(1);
+        if mmr_r(0x1088) & PINS == self.levels {
+            return;
+        }
+        if self.status & ACTIVE == 0 && matches!(self.phase, Phase::Idle) {
+            self.drive(self.levels);
+        } else if self.again < AGAIN_MAX {
+            self.again += 1;
+            self.power_cycle();
+        } else {
+            self.forget();
+        }
+    }
+
+    /// Power the card down, and up again after 10 ms; its ATR, the protocol
+    /// set-up and INIT follow in [`Card::poll`].
+    fn power_cycle(&mut self) {
+        self.njobs = 0;
+        self.status &= !ACTIVE;
+        Self::pins();
+        mmr_rmw(0x1020, |v| (v & !0xFFFF) | ETU_DEFAULT);
+        mmr_w(0x1030, 0);
+        self.drive(PINS_OFF);
+        self.phase = Phase::PowerOff { until: self.after(10) };
+    }
+
+    /// The host asks for a card reset.
     pub fn request_reset(&mut self) {
         if self.resetting {
             self.report(Output::ResetDone(1));
         }
-        self.njobs = 0;
-        self.status &= !ACTIVE;
         if self.status & PRESENT == 0 {
             self.resetting = false;
-            self.phase = Phase::Idle;
             self.report(Output::ResetDone(1));
             return;
         }
         self.resetting = true;
-        Self::pins();
-        mmr_rmw(0x1020, |v| (v & !0xFFFF) | ETU_DEFAULT);
-        mmr_w(0x1030, 0);
-        mmr_rmw(0x1088, |v| v | PIN_RST | PIN_OFF);
-        self.phase = Phase::PowerOff { until: self.after(10) };
+        self.again = 0;
+        self.power_cycle();
     }
 
-    fn reset_failed(&mut self) {
+    /// The card is gone, or of no use as it is: power the contacts down and
+    /// forget the session. A card that is still in the slot is found again
+    /// by [`Card::detect`]; the host, told of a removal and an insertion,
+    /// then asks for its reset.
+    fn forget(&mut self) {
+        self.status = 0;
+        self.njobs = 0;
+        self.drive(PINS_OFF);
         mmr_w(0x1030, 0);
         self.phase = Phase::Idle;
         if self.resetting {
             self.resetting = false;
             self.report(Output::ResetDone(1));
         }
+    }
+
+    fn reset_failed(&mut self) {
+        if !self.resetting {
+            // Not a reset the host asked for ([`Card::guard`]): it would
+            // not learn that the card it takes for activated is not.
+            return self.forget();
+        }
+        mmr_w(0x1030, 0);
+        self.phase = Phase::Idle;
+        self.resetting = false;
+        self.report(Output::ResetDone(1));
     }
 
     /// Look at the slot every 50 ms; a change counts when seen twice.
@@ -270,17 +344,6 @@ impl Card {
         self.next_detect = self.after(50);
         let now = mmr_r(0x1090) & 1 << 14 != 0;
         let was = self.status & PRESENT != 0;
-        if !now && !was {
-            // An empty slot is kept switched off. The host's GPIO set-up
-            // writes the output register as a whole after the firmware has
-            // started, which asks for the supply; and while the supply is
-            // asked for with no card in the slot, the slot goes on
-            // reporting "no card" after one has been put in.
-            let off = PIN_RST | PIN_OFF;
-            if mmr_r(0x1088) & off != off {
-                mmr_rmw(0x1088, |v| v | off);
-            }
-        }
         if now == was || now != self.seen {
             self.seen = now;
             return;
@@ -288,11 +351,7 @@ impl Card {
         if now {
             self.status |= PRESENT;
         } else {
-            // Removed: power the contacts down and forget the session.
-            self.status = 0;
-            self.njobs = 0;
-            mmr_rmw(0x1088, |v| v | PIN_RST | PIN_OFF);
-            self.reset_failed();
+            self.forget();
         }
     }
 
@@ -482,8 +541,10 @@ impl Card {
         self.status |= ACTIVE;
         self.ns = 0;
         self.nr = 0;
-        self.resetting = false;
-        self.report(Output::ResetDone(0));
+        if self.resetting {
+            self.resetting = false;
+            self.report(Output::ResetDone(0));
+        }
         self.jobs[..3].copy_from_slice(&[Job::Resync, Job::Ifs, Job::Init]);
         self.njobs = 3;
         self.retries = 0;
@@ -491,20 +552,23 @@ impl Card {
     }
 
     pub fn poll(&mut self) {
+        // In this order: a card given up by `guard` is seen as gone for at
+        // least one turn before `detect` finds it again.
         self.detect();
+        self.guard();
         match self.phase {
             Phase::Idle => {}
             Phase::PowerOff { until } => {
                 if Self::passed(until) {
                     mmr_w(0x1030, 0x8100);
                     Self::drain();
-                    mmr_rmw(0x1088, |v| v & !(PIN_RST | PIN_OFF));
+                    self.drive(0);
                     self.phase = Phase::PowerOn { until: self.after(5) };
                 }
             }
             Phase::PowerOn { until } => {
                 if Self::passed(until) {
-                    mmr_rmw(0x1088, |v| v | PIN_RST);
+                    self.drive(PIN_RST);
                     self.rx_len = 0;
                     self.phase = Phase::Atr { deadline: self.after(1000) };
                 }
