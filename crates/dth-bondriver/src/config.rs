@@ -29,8 +29,8 @@
 //!   that started the server; `dth serve --read-depth` remains for tests.
 //!
 //! The DLL always works through the server `dth.exe` in its own folder, at
-//! the socket file `dth.sock` there (loopback TCP when a Unix socket cannot
-//! be used), so the former `[Helper] Use` / `Exe` / `Socket` / `Address` keys
+//! the socket file of that folder in `%TEMP%` (loopback TCP when a Unix
+//! socket cannot be used), so the former `[Helper] Use` / `Exe` / `Socket` / `Address` keys
 //! are gone too (the section is now `[Server]`), and so are `[Stream] CepmState` (the server keeps its
 //! handshake cache `DTH10_<serial>.cepm` in the DLL's folder) and
 //! `[Stream] AppKeys` (the key file is always `CoBDACom.dll` in the DLL's folder).

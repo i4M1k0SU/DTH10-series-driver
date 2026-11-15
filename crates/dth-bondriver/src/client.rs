@@ -9,11 +9,13 @@
 //! the server ends by itself after `[Server] IdleExitSec` seconds without a
 //! client.
 //!
-//! Where they meet is not configurable: the socket file `dth.sock` in the
-//! DLL's folder (AF_UNIX, Windows 10 1803 or later). Where that cannot be
-//! used (an older Windows, a folder path too long for a socket address) the
-//! DLL falls back by itself to a loopback TCP port derived from the folder,
-//! and starts the server with `--listen` accordingly.
+//! Where they meet is not configurable: a socket file named by the DLL's
+//! folder, `%TEMP%\dth-<hash>.sock` (AF_UNIX, Windows 10 1803 or later;
+//! [`ipc::folder_socket`]), so that every DLL of one folder meets the same
+//! server and nothing is left in the folder. Where that cannot be used (an
+//! older Windows, a temp folder path too long for a socket address) the DLL
+//! falls back by itself to a loopback TCP port derived from the folder, and
+//! starts the server with `--listen` accordingly.
 //!
 //! A supervisor thread per DLL instance asks the server for the signal level
 //! once a second (so `GetSignalLevel` never waits) and brings the stream
@@ -66,9 +68,8 @@ impl Default for ServerConfig {
     }
 }
 
-/// The server executable and its socket file, both in the DLL's folder.
+/// The server executable, in the DLL's folder.
 const SERVER_EXE: &str = "dth.exe";
-const SERVER_SOCKET: &str = "dth.sock";
 /// The loopback ports of the TCP fallback: one of a hundred, picked by the
 /// DLL's folder.
 const FALLBACK_PORT_BASE: u16 = 40780;
@@ -185,18 +186,13 @@ fn program_text(p: DeviceProgram) -> String {
 /// folder's path, case-folded): fixed per folder, so every DLL instance of
 /// that folder meets the same server, and two installs seldom collide.
 fn fallback_port(dll_dir: &Path) -> u16 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in dll_dir.to_string_lossy().to_lowercase().bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    FALLBACK_PORT_BASE + (h % 100) as u16
+    FALLBACK_PORT_BASE + (ipc::folder_hash(dll_dir) % 100) as u16
 }
 
-/// Where the server listens: the socket file in the DLL's folder, or, where
+/// Where the server listens: the folder's socket file in `%TEMP%`, or, where
 /// a Unix domain socket cannot be used there, the folder's loopback port.
 fn server_target(dll_dir: &Path) -> Target {
-    let path = dll_dir.join(SERVER_SOCKET);
+    let path = ipc::folder_socket(dll_dir);
     if ipc::unix_socket_usable(&path) {
         return Target::Unix(path);
     }
@@ -634,12 +630,14 @@ mod tests {
     }
 
     #[test]
-    fn target_is_the_socket_next_to_the_dll_or_a_fixed_port() {
+    fn target_is_the_folders_socket_in_temp_or_a_fixed_port() {
         let dir = dll_folder("target");
-        assert_eq!(server_target(&dir), Target::Unix(dir.join(SERVER_SOCKET)));
-        // a folder path too long for a socket address falls back to TCP
-        let long = dir.join("x".repeat(120));
-        std::assert_matches!(server_target(&long), Target::Tcp(_));
+        let socket = ipc::folder_socket(&dir);
+        assert_eq!(server_target(&dir), Target::Unix(socket.clone()));
+        assert_eq!(socket.parent(), Some(std::env::temp_dir().as_path()), "nothing is left in the DLL's folder");
+        // a deep DLL folder no longer matters: the socket is in the temp folder
+        let deep = dir.join("x".repeat(120));
+        assert_eq!(server_target(&deep), Target::Unix(ipc::folder_socket(&deep)));
         // the fallback port is fixed per folder and within the range
         let p = fallback_port(&dir);
         assert_eq!(p, fallback_port(&dir));
@@ -649,11 +647,11 @@ mod tests {
         let mut cfg = Config::default();
         cfg.tuner.ter_lock_wait_ms = 2000;
         cfg.tuner.serial = "SN1".into();
-        let l = launch_spec(&cfg, &dir, &Target::Unix(dir.join(SERVER_SOCKET)));
+        let l = launch_spec(&cfg, &dir, &Target::Unix(socket.clone()));
         assert_eq!(l.exe, dir.join(SERVER_EXE));
         let args: Vec<String> = l.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(&args[..2], &["serve", "-v"]);
-        assert!(args.array_windows().any(|[k, v]| k == "--socket" && *v == dir.join(SERVER_SOCKET).to_string_lossy()));
+        assert!(args.array_windows().any(|[k, v]| k == "--socket" && *v == socket.to_string_lossy()));
         // per-request settings are not on the server's command line
         assert!(!args.iter().any(|a| a == "--lnb" || a.ends_with("-lock-wait")), "{args:?}");
         // one server for every unit: the DLL's Serial goes into its requests, not
