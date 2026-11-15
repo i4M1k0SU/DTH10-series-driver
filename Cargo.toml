@@ -14,6 +14,9 @@ members = [
     "crates/dth30-diag",
     "crates/dth30-backend",
 ]
+# The DTH30 series firmware: built for the chip's MIPS core only, by dth30-core's build
+# script.
+exclude = ["crates/dth30-fw"]
 
 [workspace.package]
 version = "1.1.0"

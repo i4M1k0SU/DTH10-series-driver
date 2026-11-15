@@ -1,0 +1,28 @@
+[package]
+name = "dth30-fw"
+description = "Firmware for the ViXS XCode2 chip of the BUFFALO DTH30 series of USB TV tuners, written from scratch"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/i4M1k0SU/DTH10-series-driver/"
+publish = false
+
+[[bin]]
+name = "dth30-fw"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev]
+panic = "abort"
+opt-level = "s"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = true
+
+# Not a member of the host workspace: it builds for the chip's MIPS core only.
+[workspace]

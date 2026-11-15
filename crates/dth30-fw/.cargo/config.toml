@@ -1,0 +1,14 @@
+# The chip's CPU is a MIPS 4Km (MIPS32 release 1, little endian, no FPU), for
+# which Rust has no prebuilt target: `core` is built from source. That needs
+# a nightly toolchain, or the stable one with RUSTC_BOOTSTRAP=1 in the
+# environment (see README.md; dth30-core's build script sets it for its own build of this).
+[build]
+target = "mipsel-xcode2.json"
+
+[unstable]
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
+
+[target.mipsel-xcode2]
+rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--gc-sections"]

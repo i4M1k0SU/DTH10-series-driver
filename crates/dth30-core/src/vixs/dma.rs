@@ -25,34 +25,40 @@ pub const TABLE_ENTRIES: u32 = 128;
 /// Per-entry bound of status reads.
 pub const READ_LIMIT: u32 = 10_000;
 
-pub fn init<B: RemotePci>(chip: &mut Chip<B>) -> Result<()> {
+/// `clear_table`: zero the 128-entry table from here, as the vendor's host
+/// does after its firmware has started (about a second of register
+/// accesses over USB). A firmware that clears the table itself makes this
+/// unnecessary (the project's own does, [`super::Firmware::is_own`]).
+pub fn init<B: RemotePci>(chip: &mut Chip<B>, clear_table: bool) -> Result<()> {
     let v = chip.mmr_read_checked(0x000)? | 0x402;
     chip.mmr_write_checked(0x000, v)?;
     chip.mmr_write_checked(0x000, v & !0x402)?;
 
-    let mut budget = 0u32;
-    for idx in 0..TABLE_ENTRIES {
-        chip.mmr_write_checked(TABLE[0], 0)?;
-        chip.mmr_write_checked(TABLE[1], 0)?;
-        chip.mmr_write_checked(TABLE[2], idx)?;
-        let mut n = 0;
-        let mut reads = 0;
-        loop {
-            reads += 1;
-            if reads > READ_LIMIT {
-                return Err(Error::Timeout);
-            }
-            if chip.mmr_read_checked(TABLE[2])? & 0x80 == 0 {
-                budget = 100;
-                continue;
-            }
-            n += 1;
-            if n == 30 {
-                if budget >= 10 {
-                    break;
+    if clear_table {
+        let mut budget = 0u32;
+        for idx in 0..TABLE_ENTRIES {
+            chip.mmr_write_checked(TABLE[0], 0)?;
+            chip.mmr_write_checked(TABLE[1], 0)?;
+            chip.mmr_write_checked(TABLE[2], idx)?;
+            let mut n = 0;
+            let mut reads = 0;
+            loop {
+                reads += 1;
+                if reads > READ_LIMIT {
+                    return Err(Error::Timeout);
                 }
-                budget += 2;
-                n = 0;
+                if chip.mmr_read_checked(TABLE[2])? & 0x80 == 0 {
+                    budget = 100;
+                    continue;
+                }
+                n += 1;
+                if n == 30 {
+                    if budget >= 10 {
+                        break;
+                    }
+                    budget += 2;
+                    n = 0;
+                }
             }
         }
     }
@@ -86,7 +92,7 @@ mod tests {
         c.bus().set(Space::Mem, MMR, 0x8000_0000);
         c.bus().queue(Space::Mem, MMR + 0x1A2C, &vec![0x80; ALWAYS_SET_READS]);
         c.bus().set(Space::Mem, MMR + 0xC50, 0x10);
-        init(&mut c).unwrap();
+        init(&mut c, true).unwrap();
         let acc = accesses(&c.bus().ops());
         use Acc::*;
         assert_eq!(&acc[..3], &[R(0), W(0, 0x8000_0402), W(0, 0x8000_0000)]);
@@ -106,15 +112,25 @@ mod tests {
         let mut q = vec![0u32, 0];
         q.extend(std::iter::repeat_n(0x80, 128 * 30));
         c.bus().queue(Space::Mem, MMR + 0x1A2C, &q);
-        init(&mut c).unwrap();
+        init(&mut c, true).unwrap();
         let polls = accesses(&c.bus().ops()).iter().filter(|a| **a == Acc::R(0x1A2C)).count();
         assert_eq!(polls, 2 + 128 * 30);
+    }
+
+    #[test]
+    fn a_firmware_that_clears_the_table_is_not_helped() {
+        let mut c = chip(0x0300_00B2);
+        init(&mut c, false).unwrap();
+        let acc = accesses(&c.bus().ops());
+        assert!(!acc.iter().any(|a| matches!(a, Acc::W(0x1A24..=0x1A2C, _) | Acc::R(0x1A24..=0x1A2C))));
+        assert_eq!(&acc[..3], &[Acc::R(0), Acc::W(0, 0x402), Acc::W(0, 0)]);
+        assert_eq!(acc.len(), 3 + 6);
     }
 
     #[test]
     fn stuck_status_times_out() {
         let mut c = chip(0x0300_00B2);
         // The index written back reads with bit 7 clear forever.
-        std::assert_matches!(init(&mut c), Err(Error::Timeout));
+        std::assert_matches!(init(&mut c, true), Err(Error::Timeout));
     }
 }
