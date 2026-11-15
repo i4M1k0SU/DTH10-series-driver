@@ -1,0 +1,23 @@
+[package]
+name = "dth-log"
+description = "The log line format of the BUFFALO DTH10/DTH30 series tools: env_logger's layout with the local time and its offset from UTC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+env_logger.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# localtime_r(3) for the local offset from UTC.
+libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+# GetTimeZoneInformation for the local offset from UTC.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Time"] }
+
+[dev-dependencies]
+# The tests check the date arithmetic against it.
+jiff.workspace = true
