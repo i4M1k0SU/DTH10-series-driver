@@ -270,6 +270,17 @@ impl Card {
         self.next_detect = self.after(50);
         let now = mmr_r(0x1090) & 1 << 14 != 0;
         let was = self.status & PRESENT != 0;
+        if !now && !was {
+            // An empty slot is kept switched off. The host's GPIO set-up
+            // writes the output register as a whole after the firmware has
+            // started, which asks for the supply; and while the supply is
+            // asked for with no card in the slot, the slot goes on
+            // reporting "no card" after one has been put in.
+            let off = PIN_RST | PIN_OFF;
+            if mmr_r(0x1088) & off != off {
+                mmr_rmw(0x1088, |v| v | off);
+            }
+        }
         if now == was || now != self.seen {
             self.seen = now;
             return;
