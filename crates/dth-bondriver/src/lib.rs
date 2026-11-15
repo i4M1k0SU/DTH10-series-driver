@@ -229,6 +229,7 @@ fn init_logging(cfg: &Config) {
     {
         b.target(env_logger::Target::Pipe(Box::new(f)));
     }
+    dth_log::local_time(&mut b);
     let _ = b.try_init();
 }
 

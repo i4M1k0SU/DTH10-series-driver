@@ -22,6 +22,7 @@ dth10-backend.workspace = true
 dth30-backend.workspace = true
 log.workspace = true
 env_logger.workspace = true
+dth-log.workspace = true
 clap.workspace = true
 
 [target.'cfg(unix)'.dependencies]

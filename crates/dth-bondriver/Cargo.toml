@@ -16,6 +16,7 @@ dth-common.workspace = true
 dth-proto.workspace = true
 log.workspace = true
 env_logger.workspace = true
+dth-log.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_WindowsProgramming"] }

@@ -12,6 +12,7 @@ dth30-core.workspace = true
 dth30-usb.workspace = true
 log.workspace = true
 env_logger.workspace = true
+dth-log.workspace = true
 clap.workspace = true
 
 [build-dependencies]

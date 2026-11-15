@@ -18,6 +18,28 @@ use socket2::{Domain, SockAddr, Socket, Type};
 #[cfg(unix)]
 pub const DEFAULT_SOCKET: &str = "/run/dth/dth.sock";
 
+/// A number for the folder `dir`, the same for every spelling Windows takes
+/// as that folder's (FNV-1a of the path, case-folded). It names the server
+/// of the programs in that folder, so that they meet without being told
+/// where, and the servers of two folders are apart.
+pub fn folder_hash(dir: &Path) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in dir.to_string_lossy().to_lowercase().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The socket file of the server of the folder `dir` (on Windows, the folder
+/// of `dth.exe` and the BonDriver DLL): `dth-<hash>.sock` in the user's
+/// temporary folder (`%TEMP%`), not in `dir` itself, so that nothing is left
+/// in that folder and a folder where a socket cannot be made (a network
+/// drive) still works.
+pub fn folder_socket(dir: &Path) -> PathBuf {
+    std::env::temp_dir().join(format!("dth-{:016x}.sock", folder_hash(dir)))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// A Unix domain socket (a path).
@@ -39,8 +61,9 @@ impl Target {
     /// `--socket PATH` / `--listen ADDR` (or `--connect ADDR`) of the command line,
     /// else `$DTH_SOCKET` / `$DTH_LISTEN` (or the former `$DTH10_SOCKET` /
     /// `$DTH10_LISTEN`), else the platform default: the socket
-    /// `/run/dth/dth.sock` on Linux, `dth.sock` next to the executable on
-    /// Windows.
+    /// `/run/dth/dth.sock` on Linux, on Windows the [`folder_socket`] of the
+    /// executable's folder (where the BonDriver DLL's server listens when
+    /// `dth.exe` is the one next to the DLL).
     pub fn resolve(socket: Option<&Path>, addr: Option<&str>) -> Target {
         if let Some(p) = socket {
             return Target::Unix(p.to_path_buf());
@@ -60,11 +83,10 @@ impl Target {
         }
         #[cfg(not(unix))]
         {
-            let dir = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(Path::to_path_buf))
-                .unwrap_or_else(std::env::temp_dir);
-            Target::Unix(dir.join("dth.sock"))
+            match std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+                Some(dir) => Target::Unix(folder_socket(&dir)),
+                None => Target::Unix(std::env::temp_dir().join("dth.sock")),
+            }
         }
     }
 }
@@ -297,6 +319,19 @@ impl Write for &Conn {
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
+
+    #[test]
+    fn the_folder_socket_is_in_the_temp_folder_and_named_by_the_folder() {
+        let a = folder_socket(Path::new("C:\\TVTest"));
+        assert_eq!(a.parent(), Some(std::env::temp_dir().as_path()));
+        let name = a.file_name().and_then(|n| n.to_str()).expect("a name");
+        assert!(name.starts_with("dth-") && name.ends_with(".sock") && name.len() == 4 + 16 + 5, "{name}");
+        // the same folder however it is spelt, another folder elsewhere
+        assert_eq!(a, folder_socket(Path::new("c:\\tvtest")));
+        assert_ne!(a, folder_socket(Path::new("C:\\TVTest2")));
+        // short enough for a socket address in a usual temp folder
+        assert!(unix_socket_usable(&a), "{}", a.display());
+    }
 
     /// A socket file in the temp directory, served and connected to on this
     /// platform (Linux and Windows alike).

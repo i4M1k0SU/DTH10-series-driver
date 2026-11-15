@@ -57,7 +57,7 @@ use crate::{RecipientArg, default_state_dir, lnb_of, stop};
 #[derive(Args)]
 pub struct ServeArgs {
     /// Listen on this socket file (default: $DTH_SOCKET, else /run/dth/dth.sock on Linux,
-    /// dth.sock next to this executable on Windows).
+    /// %TEMP%\dth-<hash of this executable's folder>.sock on Windows).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Listen on this TCP address instead (e.g. 127.0.0.1:40780; $DTH_LISTEN).

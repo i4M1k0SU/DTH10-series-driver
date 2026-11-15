@@ -122,7 +122,7 @@ dth stream --socket /run/dth/dth.sock -c BS15_0 --program 101 # クライアン�
 
 以下の層に分かれる。
 
-- 機種に依存しない共通層 (`dth-common`, `dth-proto`)
+- 機種に依存しない共通層 (`dth-common`, `dth-proto`, `dth-log`)
 - 機種ごとの層 (`dth10-*`, `dth30-*`)
 - DTH30 series の互換ファームウェア (`dth30-fw`)
 - アプリケーション (`dth-cli`, `dth-bondriver`)
@@ -133,6 +133,7 @@ dth stream --socket /run/dth/dth.sock -c BS15_0 --program 101 # クライアン�
 |---|---|
 | `crates/dth-common` | 機種に依存しない共通部品 (`std` のみに依存): エラー型 (`error`), チャンネル表・チャンネル名の解釈 (`channels`), ストリーム設定 (raw / device モード、復号する番組。`stream`), TS の受け渡し (`TsQueue`, `queue`), 開いたユニットへの操作 (`Session`, `session`), 機種ファミリーごとのユニットの列挙・事前確認・オープン・情報表示 (`Backend`, `backend`) |
 | `crates/dth-proto` | `dth serve` とクライアント (`dth stream`, BonDriver) の間の要求・応答行 (`proto`) と、それを運ぶソケット (Unix ドメインソケット / TCP。`ipc`) |
+| `crates/dth-log` | `dth`・BonDriver・診断ツールのログの行の書式。時刻を UTC ではなく、UTC との時差付きのローカル時刻 (ミリ秒まで) で書く。時差は OS から得る (Windows: `GetTimeZoneInformation`, Linux / macOS: `localtime_r`) |
 | `crates/dth10-core` | USB 非依存のプロトコル層: 制御転送エンコード (`protocol`), デバイス情報 TLV (`tlv`), GPIO/I2C/ストリーム制御/PID フィルタ (`device`), 全キット共通の型 (`kit`), TC90517 + MxL13xRF の地デジキット (`tc90517`), MxL13xRF (`mxl13xrf`), キット名による地デジ側キットの選択 (`terrestrial`), PN2031 / BQ200X (ISDB-T) と LGDT3305 (ATSC) のキット (`pn2031`, `bq200x`, `lgdt3305`。実機未検証), BS/CS キット (`lj101`), 割り込みイベント (`events`), リンク暗号の復号 (`cepm`) |
 | `crates/dth10-usb` | `nusb` によるトランスポート (Windows: WinUSB / Linux: usbfs / macOS: IOKit) とバルク連続リーダ |
 | `crates/dth10-diag` | 開発者向けのハードウェア診断ツール `dth10-diag`: `info [--raw]`, `gpio-read`, `raw`, `events`, `i2c-read`, `i2c-write`, `tune` (ISDB-T の同調・ロック・信号状態。`--file` で raw モード記録), `tune-sat` (ISDB-S の同調・ロック・信号状態・TMCC の TS-ID 表), `scan`, `cepm`, `reset`, `hub-power` (Linux)。共通オプション `--serial`, `--recipient`, `--tuner`, `--drain-events`, `-v`。生のベンダーコマンド・単独の CEPM ハンドシェイク・hub-power は電源を入れ直すまでデバイスをフリーズさせることがあるため、診断用として提供。記録・視聴は `dth` |

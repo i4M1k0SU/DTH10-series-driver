@@ -373,7 +373,7 @@ fn init_logging(verbose: u8) {
     if let Ok(env) = std::env::var("RUST_LOG") {
         b.parse_filters(&env);
     }
-    b.format_timestamp_millis();
+    dth_log::local_time(&mut b);
     let _ = b.try_init();
 }
 

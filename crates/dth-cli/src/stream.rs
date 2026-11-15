@@ -45,7 +45,7 @@ pub struct StreamArgs {
     #[arg(long)]
     if_free: bool,
     /// The socket file of `dth serve` (default: $DTH_SOCKET, else /run/dth/dth.sock on Linux,
-    /// dth.sock next to this executable on Windows).
+    /// %TEMP%\dth-<hash of this executable's folder>.sock on Windows).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// The TCP address of `dth serve` instead (e.g. 127.0.0.1:40780; $DTH_LISTEN).
@@ -134,7 +134,7 @@ pub struct StatusArgs {
     #[arg(long, value_name = "SERIAL")]
     serial: Option<String>,
     /// The socket file of `dth serve` (default: $DTH_SOCKET, else /run/dth/dth.sock on Linux,
-    /// dth.sock next to this executable on Windows).
+    /// %TEMP%\dth-<hash of this executable's folder>.sock on Windows).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// The TCP address of `dth serve` instead (e.g. 127.0.0.1:40780; $DTH_LISTEN).
