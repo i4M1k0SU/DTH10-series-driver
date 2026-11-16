@@ -1,5 +1,6 @@
-//! The B-CAS card: detection, reset, ATR, the T=1 protocol and the INIT
-//! command that yields the descrambler's system key.
+//! The B-CAS card: detection, reset, ATR, the choice of the transmission
+//! rate, the T=1 protocol and the INIT command that yields the descrambler's
+//! system key.
 //!
 //! The chip's smart card interface (offsets in the register block):
 //!
@@ -49,7 +50,7 @@ pub enum Output {
     /// A reset request has ended: 0 = the card answered its reset, 1 = not.
     ResetDone(u32),
     /// The INIT response has been taken in (the keys are loaded): its
-    /// return code, or `u32::MAX` when the response was unusable.
+    /// return code.
     InitDone(u32),
     /// The card answered an ECM with the two control words.
     Keys { odd: [u8; 8], even: [u8; 8] },
@@ -90,6 +91,16 @@ enum Phase {
     Atr {
         deadline: u32,
     },
+    /// Guard time before the PPS request for the rate `ta1` goes out.
+    PpsGap {
+        until: u32,
+        ta1: u8,
+    },
+    /// The PPS request is out; the answer is coming in.
+    Pps {
+        deadline: u32,
+        ta1: u8,
+    },
     /// Guard time before the next block goes out.
     Gap {
         until: u32,
@@ -104,10 +115,14 @@ enum Phase {
 enum Atr {
     More,
     Bad,
-    /// The ATR is complete: TA1 and TA3 (the card's block size), if given.
+    /// The ATR is complete: TA1 (the fastest rate the card offers), TA2
+    /// (given by a card that needs no PPS) and TA3 (the card's block size),
+    /// if given, and the protocol the card names first.
     Done {
         ta1: Option<u8>,
+        ta2: Option<u8>,
         ta3: Option<u8>,
+        protocol: u8,
     },
 }
 
@@ -124,11 +139,12 @@ fn parse_atr(b: &[u8]) -> Atr {
     }
     let historical = usize::from(b[1] & 0x0F);
     let (mut y, mut i, mut level, mut tck) = (b[1] >> 4, 2, 1, false);
-    let (mut ta1, mut ta3) = (None, None);
+    let (mut ta1, mut ta2, mut ta3, mut protocol) = (None, None, None, 0);
     loop {
         if y & 1 != 0 {
             match level {
                 1 => ta1 = b.get(i).copied(),
+                2 => ta2 = b.get(i).copied(),
                 3 => ta3 = b.get(i).copied(),
                 _ => {}
             }
@@ -140,6 +156,9 @@ fn parse_atr(b: &[u8]) -> Atr {
         }
         let Some(&td) = b.get(i) else { return Atr::More };
         tck |= td & 0x0F != 0;
+        if level == 1 {
+            protocol = td & 0x0F;
+        }
         y = td >> 4;
         i += 1;
         level += 1;
@@ -147,7 +166,43 @@ fn parse_atr(b: &[u8]) -> Atr {
             return Atr::Bad;
         }
     }
-    if b.len() < i + historical + usize::from(tck) { Atr::More } else { Atr::Done { ta1, ta3 } }
+    if b.len() < i + historical + usize::from(tck) { Atr::More } else { Atr::Done { ta1, ta2, ta3, protocol } }
+}
+
+/// The rate TA1 names, as the divisor D of the ETU. Only F = 372 is
+/// supported.
+fn rate(ta1: u8) -> Option<u32> {
+    match (ta1 >> 4, ta1 & 0x0F) {
+        (0 | 1, 1) => Some(1),
+        (0 | 1, 2) => Some(2),
+        (0 | 1, 3) => Some(4),
+        (0 | 1, 4) => Some(8),
+        _ => None,
+    }
+}
+
+/// The PPS request for T=1 at the rate `ta1`: PPSS, PPS0 (PPS1 follows,
+/// T=1), PPS1, and the check byte that makes the XOR of all of them zero.
+fn pps_request(ta1: u8) -> [u8; 4] {
+    [0xFF, 0x11, ta1, 0xFF ^ 0x11 ^ ta1]
+}
+
+/// The length of a PPS answer, once its PPS0 is in.
+fn pps_len(b: &[u8]) -> Option<usize> {
+    Some(3 + (b.get(1)? & 0x70).count_ones() as usize)
+}
+
+/// What a complete PPS answer to the request for `ta1` says: the rate the
+/// card works at from now on (the request repeated: the one asked for; no
+/// PPS1: the default one), or `None` when it is neither.
+fn pps_answer(b: &[u8], ta1: u8) -> Option<u32> {
+    if b == pps_request(ta1) {
+        rate(ta1)
+    } else if b == [0xFF, 0x01, 0xFE] {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn be32(b: &[u8]) -> u32 {
@@ -169,6 +224,9 @@ pub struct Card {
     next_guard: u32,
     /// Resets started over since the host last asked for one.
     again: u8,
+    /// The card in the slot did not accept the PPS: it is used at the
+    /// default rate.
+    no_pps: bool,
     jobs: [Job; 4],
     njobs: usize,
     retries: u8,
@@ -202,6 +260,7 @@ impl Card {
             levels: PINS_OFF,
             next_guard: count(),
             again: 0,
+            no_pps: false,
             jobs: [Job::Resync; 4],
             njobs: 0,
             retries: 0,
@@ -287,7 +346,6 @@ impl Card {
         self.njobs = 0;
         self.status &= !ACTIVE;
         Self::pins();
-        mmr_rmw(0x1020, |v| (v & !0xFFFF) | ETU_DEFAULT);
         mmr_w(0x1030, 0);
         self.drive(PINS_OFF);
         self.phase = Phase::PowerOff { until: self.after(10) };
@@ -315,6 +373,7 @@ impl Card {
     fn forget(&mut self) {
         self.status = 0;
         self.njobs = 0;
+        self.no_pps = false;
         self.drive(PINS_OFF);
         mmr_w(0x1030, 0);
         self.phase = Phase::Idle;
@@ -391,6 +450,26 @@ impl Card {
         self.phase = Phase::Wait { sent: n, deadline: self.after(1500) };
     }
 
+    /// Send the PPS request for the rate `ta1`.
+    fn send_pps(&mut self, ta1: u8) {
+        Self::drain();
+        let request = pps_request(ta1);
+        for b in request {
+            mmr_w(0x1028, u32::from(b));
+        }
+        mmr_w(0x1030, 0x0080_0001 | (request.len() as u32) << 16);
+        self.rx_len = 0;
+        // The card has 9600 ETU for its answer, which is 0.87 s.
+        self.phase = Phase::Pps { deadline: self.after(1000), ta1 };
+    }
+
+    /// The card did not accept the PPS (or did not answer): reset it once
+    /// more and use it at the default rate.
+    fn pps_failed(&mut self) {
+        self.no_pps = true;
+        self.power_cycle();
+    }
+
     fn send_job(&mut self) {
         match self.jobs[0] {
             Job::Resync => self.send(0xC0, &[]),
@@ -422,7 +501,8 @@ impl Card {
             return;
         }
         match self.jobs[0] {
-            Job::Init => self.report(Output::InitDone(u32::MAX)),
+            // Without the keys of INIT the card is of no use.
+            Job::Init => return self.forget(),
             Job::Ecm => self.report(Output::EcmLost),
             _ => {}
         }
@@ -461,7 +541,11 @@ impl Card {
             // unnecessary for this card).
             let ok = pcb & 0x20 == 0;
             if self.jobs[0] == Job::Init {
-                let ret = if ok && len >= 56 { self.init_response() } else { u32::MAX };
+                if !ok || len < 56 {
+                    // Not the answer of a B-CAS card.
+                    return self.forget();
+                }
+                let ret = self.init_response();
                 self.report(Output::InitDone(ret));
             }
             if self.jobs[0] == Job::Ecm {
@@ -525,18 +609,36 @@ impl Card {
         true
     }
 
-    fn atr_done(&mut self, ta1: Option<u8>, ta3: Option<u8>) {
-        // Only F = 372 is supported; D from TA1's low nibble.
-        let d = match ta1.map(|t| (t >> 4, t & 0x0F)) {
-            Some((0 | 1, 1)) => 1,
-            Some((0 | 1, 2)) => 2,
-            Some((0 | 1, 3)) => 4,
-            Some((0 | 1, 4)) => 8,
-            _ => 0,
-        };
-        if d == 0 || ta3.is_none() {
+    /// The ATR is in: choose the transmission rate.
+    ///
+    /// A card that gives TA2 ("specific mode", as B-CAS cards do) already
+    /// works at the rate of its TA1. Any other card ("negotiable mode")
+    /// stays at the default rate until it has accepted a PPS request, so
+    /// TA1's rate is asked for when it is faster.
+    fn atr_done(&mut self, ta1: Option<u8>, ta2: Option<u8>, ta3: Option<u8>, protocol: u8) {
+        // Only T=1 is spoken, and the card has to say how long a block it
+        // takes (the default of 32 bytes is too short for an ECM).
+        if protocol != 1 || ta2.is_some_and(|t| t & 0x0F != 1) || ta3.is_none() {
             return self.reset_failed();
         }
+        // No TA1 means the default rate.
+        let offered = ta1.map_or(Some(1), rate);
+        match (ta2, offered, ta1) {
+            // TA2 bit 4: not TA1's rate but one of the card's own choice,
+            // which is taken to be the default.
+            (Some(t), _, _) if t & 0x10 != 0 => self.activate(1),
+            (Some(_), Some(d), _) => self.activate(d),
+            (Some(_), None, _) => self.reset_failed(),
+            (None, Some(d), Some(ta1)) if d > 1 && !self.no_pps => {
+                self.phase = Phase::PpsGap { until: self.after(5), ta1 };
+            }
+            (None, _, _) => self.activate(1),
+        }
+    }
+
+    /// The card answers at the rate `d` (the divisor of the ETU): it is
+    /// active, and the protocol set-up and INIT follow.
+    fn activate(&mut self, d: u32) {
         mmr_rmw(0x1020, |v| (v & !0xFFFF) | (ETU_DEFAULT / d));
         self.status |= ACTIVE;
         self.ns = 0;
@@ -559,7 +661,20 @@ impl Card {
         match self.phase {
             Phase::Idle => {}
             Phase::PowerOff { until } => {
-                if Self::passed(until) {
+                if !Self::passed(until) {
+                    // Wait.
+                } else if mmr_r(0x1034) & 0x7F != 0 {
+                    // The card was switched off while a block was going
+                    // out. Stopping the command does not stop the
+                    // transmitter: it goes on at the rate it had (a byte
+                    // every 2 ms at the default one) until its count of
+                    // bytes comes round to 128, and what it counts would be
+                    // taken for the start of the ATR. Start the count again
+                    // and wait until nothing has moved.
+                    mmr_w(0x1030, 0);
+                    self.phase = Phase::PowerOff { until: self.after(5) };
+                } else {
+                    mmr_rmw(0x1020, |v| (v & !0xFFFF) | ETU_DEFAULT);
                     mmr_w(0x1030, 0x8100);
                     Self::drain();
                     self.drive(0);
@@ -576,10 +691,27 @@ impl Card {
             Phase::Atr { deadline } => {
                 self.pull(0);
                 match parse_atr(&self.rx[..self.rx_len]) {
-                    Atr::Done { ta1, ta3 } => self.atr_done(ta1, ta3),
+                    Atr::Done { ta1, ta2, ta3, protocol } => self.atr_done(ta1, ta2, ta3, protocol),
                     Atr::Bad => self.reset_failed(),
                     Atr::More if Self::passed(deadline) => self.reset_failed(),
                     Atr::More => {}
+                }
+            }
+            Phase::PpsGap { until, ta1 } => {
+                if Self::passed(until) {
+                    self.send_pps(ta1);
+                }
+            }
+            Phase::Pps { deadline, ta1 } => {
+                self.pull(pps_request(ta1).len());
+                let answer = &self.rx[..self.rx_len];
+                match pps_len(answer).filter(|&n| answer.len() >= n) {
+                    Some(n) => match pps_answer(&answer[..n], ta1) {
+                        Some(d) => self.activate(d),
+                        None => self.pps_failed(),
+                    },
+                    None if Self::passed(deadline) => self.pps_failed(),
+                    None => {}
                 }
             }
             Phase::Gap { until } => {
