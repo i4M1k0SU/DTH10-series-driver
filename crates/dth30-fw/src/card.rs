@@ -49,7 +49,7 @@ pub enum Output {
     /// A reset request has ended: 0 = the card answered its reset, 1 = not.
     ResetDone(u32),
     /// The INIT response has been taken in (the keys are loaded): its
-    /// return code, or `u32::MAX` when the response was unusable.
+    /// return code.
     InitDone(u32),
     /// The card answered an ECM with the two control words.
     Keys { odd: [u8; 8], even: [u8; 8] },
@@ -421,7 +421,8 @@ impl Card {
             return;
         }
         match self.jobs[0] {
-            Job::Init => self.report(Output::InitDone(u32::MAX)),
+            // Without the keys of INIT the card is of no use.
+            Job::Init => return self.forget(),
             Job::Ecm => self.report(Output::EcmLost),
             _ => {}
         }
@@ -460,7 +461,11 @@ impl Card {
             // unnecessary for this card).
             let ok = pcb & 0x20 == 0;
             if self.jobs[0] == Job::Init {
-                let ret = if ok && len >= 56 { self.init_response() } else { u32::MAX };
+                if !ok || len < 56 {
+                    // Not the answer of a B-CAS card.
+                    return self.forget();
+                }
+                let ret = self.init_response();
                 self.report(Output::InitDone(ret));
             }
             if self.jobs[0] == Job::Ecm {
