@@ -274,7 +274,7 @@ bon_abi!(
 
 bon_abi!(
     fn get_signal_level(this: *mut Obj) -> f32 {
-        with_state(this, "GetSignalLevel", 0.0, |st| st.backend.as_mut().map_or(0.0, |b| b.signal_level()))
+        with_state(this, "GetSignalLevel", 0.0, |st| st.backend.as_mut().map_or_default(|b| b.signal_level()))
     }
 );
 

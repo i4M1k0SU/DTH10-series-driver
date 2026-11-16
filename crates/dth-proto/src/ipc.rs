@@ -77,16 +77,12 @@ impl Target {
         if let Ok(a) = std::env::var("DTH_LISTEN").or_else(|_| std::env::var("DTH10_LISTEN")) {
             return Target::Tcp(a);
         }
-        #[cfg(unix)]
-        {
-            Target::Unix(PathBuf::from(DEFAULT_SOCKET))
-        }
-        #[cfg(not(unix))]
-        {
-            match std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+        cfg_select! {
+            unix => Target::Unix(PathBuf::from(DEFAULT_SOCKET)),
+            _ => match std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
                 Some(dir) => Target::Unix(folder_socket(&dir)),
                 None => Target::Unix(std::env::temp_dir().join("dth.sock")),
-            }
+            },
         }
     }
 }

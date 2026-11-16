@@ -202,7 +202,7 @@ fn stream_enable_error(mode: StreamMode, e: Error) -> Error {
 }
 
 /// How often a running stream logs its counters.
-const STATS_INTERVAL: Duration = Duration::from_secs(60);
+const STATS_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Counters of one stream's reader thread, logged every [`STATS_INTERVAL`]
 /// and when the stream ends: what came in over USB, what went out, and how
@@ -221,20 +221,12 @@ struct StreamStats {
 
 impl StreamStats {
     fn log(&self, label: &str, elapsed: Duration, cepm: Option<&cepm::Stats>) {
-        let c = cepm
-            .map(|c| {
-                format!(
-                    ", cepm: decrypted {} clear {} no-key {} key-pkts {} unwraps {}/{} errors {}",
-                    c.decrypted,
-                    c.clear,
-                    c.dropped_no_key,
-                    c.key_packets,
-                    c.session_unwraps,
-                    c.content_unwraps,
-                    c.errors
-                )
-            })
-            .unwrap_or_default();
+        let c = cepm.map_or_default(|c| {
+            format!(
+                ", cepm: decrypted {} clear {} no-key {} key-pkts {} unwraps {}/{} errors {}",
+                c.decrypted, c.clear, c.dropped_no_key, c.key_packets, c.session_unwraps, c.content_unwraps, c.errors
+            )
+        });
         log::info!(
             "{label} stats t+{:.0}s: in {} pkts ({:.1} MB) cc-err {}, out {} pkts cc-err {}, read errors {}{c}",
             elapsed.as_secs_f64(),
@@ -728,7 +720,7 @@ impl Tuner {
                                         std::thread::sleep(Duration::from_millis(500));
                                     }
                                 }
-                                if window.elapsed() >= Duration::from_secs(60) {
+                                if window.elapsed() >= Duration::from_mins(1) {
                                     if suppressed > 0 {
                                         log::warn!("events: {in_window} in the last minute ({suppressed} not shown): the device keeps raising card events");
                                     }

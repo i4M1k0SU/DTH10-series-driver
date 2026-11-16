@@ -389,7 +389,7 @@ impl Inner {
         // TVTest gets the failure without any waiting.
         let conn =
             Conn::connect(&self.target).map_err(|e| format!("cannot reach the server at {}: {e}", self.target))?;
-        conn.set_read_timeout(Some(Duration::from_secs(60))).map_err(|e| e.to_string())?;
+        conn.set_read_timeout(Some(Duration::from_mins(1))).map_err(|e| e.to_string())?;
         let mut c = &conn;
         c.write_all(format!("{}\n", req.to_line()).as_bytes()).map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(conn);
