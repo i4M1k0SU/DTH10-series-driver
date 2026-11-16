@@ -570,7 +570,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
                     break;
                 }
             }
-            if reported.elapsed() >= Duration::from_secs(60) {
+            if reported.elapsed() >= Duration::from_mins(1) {
                 reported = Instant::now();
                 let d = queue.dropped_bytes() - dropped0;
                 if d > dropped {

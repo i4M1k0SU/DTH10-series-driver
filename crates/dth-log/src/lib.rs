@@ -70,46 +70,41 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 /// The local offset from UTC in seconds (east positive) now, the moment of
 /// a log line.
-#[cfg(unix)]
 fn local_offset_secs() -> i32 {
-    // SAFETY: time(NULL) only returns the time; localtime_r only writes the
-    // `tm` it is given, and an all-zero `tm` is a valid value of the plain C
-    // struct.
-    let t = unsafe { libc::time(std::ptr::null_mut()) };
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
-        return 0;
+    cfg_select! {
+        unix => {
+            // SAFETY: time(NULL) only returns the time; localtime_r only
+            // writes the `tm` it is given, and an all-zero `tm` is a valid
+            // value of the plain C struct.
+            let t = unsafe { libc::time(std::ptr::null_mut()) };
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+                return 0;
+            }
+            // Less than a day either way, so it fits.
+            tm.tm_gmtoff as i32
+        }
+        windows => {
+            use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+            // What GetTimeZoneInformation returns: no summer time in this
+            // zone, standard time now, summer time now.
+            const UNKNOWN: u32 = 0;
+            const STANDARD: u32 = 1;
+            const DAYLIGHT: u32 = 2;
+            // SAFETY: the call only fills the struct it is given; an all-zero
+            // TIME_ZONE_INFORMATION is a valid value of the plain C struct.
+            let mut tzi: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+            // The bias is in minutes, UTC = local + bias.
+            let bias = match unsafe { GetTimeZoneInformation(&mut tzi) } {
+                UNKNOWN => tzi.Bias,
+                STANDARD => tzi.Bias + tzi.StandardBias,
+                DAYLIGHT => tzi.Bias + tzi.DaylightBias,
+                _ => return 0,
+            };
+            -bias * 60
+        }
+        _ => 0,
     }
-    // Less than a day either way, so it fits.
-    tm.tm_gmtoff as i32
-}
-
-/// The local offset from UTC in seconds (east positive) now, the moment of
-/// a log line.
-#[cfg(windows)]
-fn local_offset_secs() -> i32 {
-    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
-    // What GetTimeZoneInformation returns: no summer time in this zone,
-    // standard time now, summer time now.
-    const UNKNOWN: u32 = 0;
-    const STANDARD: u32 = 1;
-    const DAYLIGHT: u32 = 2;
-    // SAFETY: the call only fills the struct it is given; an all-zero
-    // TIME_ZONE_INFORMATION is a valid value of the plain C struct.
-    let mut tzi: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
-    // The bias is in minutes, UTC = local + bias.
-    let bias = match unsafe { GetTimeZoneInformation(&mut tzi) } {
-        UNKNOWN => tzi.Bias,
-        STANDARD => tzi.Bias + tzi.StandardBias,
-        DAYLIGHT => tzi.Bias + tzi.DaylightBias,
-        _ => return 0,
-    };
-    -bias * 60
-}
-
-#[cfg(not(any(unix, windows)))]
-fn local_offset_secs() -> i32 {
-    0
 }
 
 #[cfg(test)]

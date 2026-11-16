@@ -82,7 +82,7 @@ pub fn run(a: &StreamArgs) -> Result<(), Box<dyn Error>> {
     let conn = Conn::connect(&target).map_err(|e| format!("cannot reach dth serve at {target}: {e}"))?;
     (&conn).write_all(format!("{}\n", req.to_line()).as_bytes())?;
     // Tuning can take a few seconds (handshake, PSI learn) before the reply.
-    conn.set_read_timeout(Some(Duration::from_secs(60)))?;
+    conn.set_read_timeout(Some(Duration::from_mins(1)))?;
     let mut r = BufReader::new(&conn);
     let mut line = String::new();
     (&mut r).take(MAX_LINE as u64).read_line(&mut line).map_err(|e| format!("no reply from dth serve: {e}"))?;
