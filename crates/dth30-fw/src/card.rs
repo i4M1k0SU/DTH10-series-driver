@@ -287,7 +287,6 @@ impl Card {
         self.njobs = 0;
         self.status &= !ACTIVE;
         Self::pins();
-        mmr_rmw(0x1020, |v| (v & !0xFFFF) | ETU_DEFAULT);
         mmr_w(0x1030, 0);
         self.drive(PINS_OFF);
         self.phase = Phase::PowerOff { until: self.after(10) };
@@ -559,7 +558,20 @@ impl Card {
         match self.phase {
             Phase::Idle => {}
             Phase::PowerOff { until } => {
-                if Self::passed(until) {
+                if !Self::passed(until) {
+                    // Wait.
+                } else if mmr_r(0x1034) & 0x7F != 0 {
+                    // The card was switched off while a block was going
+                    // out. Stopping the command does not stop the
+                    // transmitter: it goes on at the rate it had (a byte
+                    // every 2 ms at the default one) until its count of
+                    // bytes comes round to 128, and what it counts would be
+                    // taken for the start of the ATR. Start the count again
+                    // and wait until nothing has moved.
+                    mmr_w(0x1030, 0);
+                    self.phase = Phase::PowerOff { until: self.after(5) };
+                } else {
+                    mmr_rmw(0x1020, |v| (v & !0xFFFF) | ETU_DEFAULT);
                     mmr_w(0x1030, 0x8100);
                     Self::drain();
                     self.drive(0);
