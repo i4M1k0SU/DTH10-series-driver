@@ -97,6 +97,40 @@ pub fn unix_socket_usable(path: &std::path::Path) -> bool {
     SockAddr::unix(path).is_ok() && unix_socket().is_ok()
 }
 
+/// Whether the file at `path` (not followed) is a Unix domain socket's: on
+/// Unix by its type, on Windows by its reparse tag (a symbolic link, a
+/// junction or a cloud file is a reparse point too, and connecting to any
+/// file that is not a live socket fails the same way).
+#[cfg(unix)]
+fn is_socket_file(path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::FileTypeExt;
+    Ok(std::fs::symlink_metadata(path)?.file_type().is_socket())
+}
+
+#[cfg(windows)]
+fn is_socket_file(path: &Path) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FindClose, FindFirstFileW, WIN32_FIND_DATAW,
+    };
+    /// The reparse tag of an AF_UNIX socket's file.
+    const IO_REPARSE_TAG_AF_UNIX: u32 = 0x8000_0023;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: plain data, for which all zeroes is a valid value.
+    let mut found: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and a writable WIN32_FIND_DATAW.
+    let h = unsafe { FindFirstFileW(wide.as_ptr(), &mut found) };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the search handle FindFirstFileW returned, closed once.
+    unsafe { FindClose(h) };
+    // For a reparse point, dwReserved0 holds its reparse tag.
+    Ok(found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && found.dwReserved0 == IO_REPARSE_TAG_AF_UNIX)
+}
+
 /// The daemon's listening socket.
 pub enum Listener {
     Unix(Socket),
@@ -105,7 +139,7 @@ pub enum Listener {
 
 impl Listener {
     /// Listen on `target`. A socket file left behind by a daemon that is gone
-    /// is removed; a live daemon (one that answers, or a TCP port in use) is an
+    /// is removed (any other file at the path is an error and stays); a live daemon (one that answers, or a TCP port in use) is an
     /// error, so that only one daemon serves a target.
     pub fn bind(target: &Target) -> io::Result<Listener> {
         match target {
@@ -116,7 +150,15 @@ impl Listener {
                     std::fs::create_dir_all(dir)?;
                 }
                 let addr = SockAddr::unix(path)?;
-                if path.exists() {
+                if std::fs::symlink_metadata(path).is_ok() {
+                    // Only a socket file is ever replaced: a path given by mistake
+                    // that names another file must not cost that file.
+                    if !is_socket_file(path)? {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!("{} exists and is not a socket", path.display()),
+                        ));
+                    }
                     let probe = unix_socket()?;
                     match probe.connect(&addr) {
                         Ok(()) => {
@@ -360,5 +402,29 @@ mod tests {
         assert!(Listener::bind(&target).is_err(), "a live daemon is not replaced");
         listener.cleanup(&target);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_socket_is_kept() {
+        let path = std::env::temp_dir().join(format!("dth-ipc-test-file-{}.sock", std::process::id()));
+        std::fs::write(&path, b"keep me").unwrap();
+        let err = Listener::bind(&Target::Unix(path.clone())).err().expect("bind over a plain file");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_socket_left_behind_is_replaced() {
+        let path = std::env::temp_dir().join(format!("dth-ipc-test-stale-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let target = Target::Unix(path.clone());
+        // A daemon that is gone without cleaning up leaves its socket file.
+        drop(Listener::bind(&target).expect("bind"));
+        assert!(std::fs::symlink_metadata(&path).is_ok(), "the socket file stays");
+        assert!(is_socket_file(&path).unwrap());
+        let listener = Listener::bind(&target).expect("bind over the stale socket");
+        listener.cleanup(&target);
+        assert!(std::fs::symlink_metadata(&path).is_err());
     }
 }
