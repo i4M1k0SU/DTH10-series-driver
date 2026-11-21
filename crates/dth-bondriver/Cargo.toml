@@ -29,5 +29,5 @@ rtti-check = []
 
 [build-dependencies]
 jiff.workspace = true
-cc = "1.11.1"
+cc = "1.11.2"
 winresource.workspace = true
