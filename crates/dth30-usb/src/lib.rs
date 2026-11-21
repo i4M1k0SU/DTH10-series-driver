@@ -283,6 +283,28 @@ fn read_packet(out: &mut Pipe<Out>, inp: &mut Pipe<In>, pkt: &[u8], timeout: Dur
     packet::decode_reply(&c.buffer[..c.actual_len.min(c.buffer.len())])
 }
 
+/// Prefix of the name of a unit without a USB serial number.
+pub const UNIT_PREFIX: &str = "DTH30-";
+
+/// Name the units: a unit with a USB serial number is named by it; one
+/// without (the DT-H50/U2 has none) is named `DTH30-<product ID>`, with
+/// `-2`, `-3`, ... for further units of the same product in `found` order.
+pub fn name_units(found: Vec<Found>) -> Vec<(String, Found)> {
+    let mut out: Vec<(String, Found)> = Vec::new();
+    for f in found {
+        let name = match f.serial.as_deref().filter(|s| !s.is_empty()) {
+            Some(s) => s.to_owned(),
+            None => {
+                let base = format!("{UNIT_PREFIX}{:04X}", f.product_id);
+                let n = out.iter().filter(|(n, _)| *n == base || n.starts_with(&format!("{base}-"))).count();
+                if n == 0 { base } else { format!("{base}-{}", n + 1) }
+            }
+        };
+        out.push((name, f));
+    }
+    out
+}
+
 /// A supported device found by [`Net2280Usb::list_all`]: through the OS
 /// enumeration (`info`) or, on Linux without sysfs, by its usbfs node (`path`).
 #[derive(Debug, Clone)]
@@ -399,18 +421,30 @@ impl Net2280Usb {
         Self::open_matching(None)
     }
 
-    /// Open the supported device whose USB serial number equals `serial`
-    /// (the first device when `serial` is `None`).
-    pub fn open_matching(serial: Option<&str>) -> Result<Self> {
-        let list = Self::list_all()?;
-        let found = match serial {
-            Some(sn) => list
-                .iter()
-                .find(|d| d.serial.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(sn)))
-                .ok_or_else(|| Error::Usb(format!("no supported device with serial {sn}")))?,
-            None => list.first().ok_or_else(|| Error::Usb("no supported device found".into()))?,
-        };
-        found.open()
+    /// The supported devices in USB location order, each with its unit name
+    /// ([`name_units`]).
+    pub fn list_units() -> Result<Vec<(String, Found)>> {
+        let mut found = Self::list_all()?;
+        found.sort_by(|a, b| a.location.cmp(&b.location));
+        Ok(name_units(found))
+    }
+
+    /// The unit named `name` (a unit name from [`Self::list_units`], case
+    /// ignored), or the first one when `None`.
+    pub fn find_unit(name: Option<&str>) -> Result<(String, Found)> {
+        let units = Self::list_units()?;
+        match name {
+            Some(w) => units
+                .into_iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(w))
+                .ok_or_else(|| Error::Usb(format!("no supported device with unit name {w}"))),
+            None => units.into_iter().next().ok_or_else(|| Error::Usb("no supported device found".into())),
+        }
+    }
+
+    /// Open the unit named `name` ([`Self::find_unit`]).
+    pub fn open_matching(name: Option<&str>) -> Result<Self> {
+        Self::find_unit(name)?.1.open()
     }
 
     fn from_device(device: nusb::Device, serial: Option<String>) -> Result<Self> {
@@ -852,6 +886,25 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn units_without_serial_are_named_by_product() {
+        let f = |pid: u16, serial: Option<&str>| Found {
+            vendor_id: 0x0411,
+            product_id: pid,
+            serial: serial.map(str::to_owned),
+            location: String::new(),
+            info: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            path: None,
+        };
+        let names: Vec<String> =
+            name_units(vec![f(0x129, None), f(0x129, Some("")), f(0x128, Some("ABC")), f(0x128, None)])
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+        assert_eq!(names, ["DTH30-0129", "DTH30-0129-2", "ABC", "DTH30-0128"]);
+    }
 
     #[test]
     fn supported_ids() {

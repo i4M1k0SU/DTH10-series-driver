@@ -116,6 +116,16 @@ dth serve --socket /run/dth/dth.sock    # サーバー起動。ソケットで�
 dth stream --socket /run/dth/dth.sock -c BS15_0 --program 101 # クライアント動作。ソケット経由で指定した TS を取得する
 ```
 
+Linux のソケットのファイルは権限 0660 で作られ、所有者と同じグループのユーザーだけが接続できる。ファイルのグループは `dth serve` を動かすユーザーのグループ (ソケットのディレクトリに setgid ビットがあれば、そのディレクトリのグループ) になる。Mirakurun / mirakc を `dth serve` と別のユーザーで動かすときは、共通のグループを用意して、録画ソフトのユーザーをそのグループに入れる。
+
+```
+sudo groupadd dth
+sudo usermod -aG dth mirakc                # 録画ソフトのユーザー (例: mirakc) をグループに入れる
+sudo install -d -g dth -m 2775 /run/dth    # ソケットのディレクトリ。setgid でソケットのグループが dth になる (/run は再起動で消えるため、起動のたびに作る)
+```
+
+systemd で `dth serve` を動かす場合は、ユニットに `Group=dth` と `RuntimeDirectory=dth` を指定すれば、ディレクトリの作成も任せられる。
+
 ## 開発者向け
 
 ### crates
