@@ -33,8 +33,9 @@ type Res<T = ()> = Result<T, Box<dyn Error>>;
     about = "Hardware diagnostics for the BUFFALO DTH30 series of USB TV tuners (developer tool, checked on a DT-H50/U2 only)"
 )]
 struct Cli {
-    /// Select the device by USB serial number (default: the first one found).
-    #[arg(long, global = true, help_heading = "Global options", value_name = "SERIAL")]
+    /// Select the device by its unit name as `list` shows it (the USB serial number of a device
+    /// that has one, else DTH30-<product ID>; default: the first one found).
+    #[arg(long, global = true, help_heading = "Global options", value_name = "UNIT")]
     serial: Option<String>,
     /// -v = info, -vv = debug, -vvv = trace (default: warn; RUST_LOG overrides). Logs go to stderr.
     #[arg(short, long, global = true, help_heading = "Global options", action = clap::ArgAction::Count)]
@@ -244,26 +245,20 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn list() -> Res {
-    let found = Net2280Usb::list_all()?;
-    if found.is_empty() {
+    let units = Net2280Usb::list_units()?;
+    if units.is_empty() {
         println!("no device of the family found (VID 0411, PID 0128/0129/012A/0144)");
     }
-    for d in found {
-        println!(
-            "{:04x}:{:04x} {} serial {} ({})",
-            d.vendor_id,
-            d.product_id,
-            d.product_label(),
-            d.serial.as_deref().unwrap_or("-"),
-            d.location
-        );
+    for (name, d) in units {
+        println!("{:04x}:{:04x} {} unit {} ({})", d.vendor_id, d.product_id, d.product_label(), name, d.location);
     }
     Ok(())
 }
 
 fn open(serial: Option<&str>) -> Res<Net2280Usb> {
-    let t = Net2280Usb::open_matching(serial)?;
-    eprintln!("device {} serial {}", t.product_label(), t.serial().unwrap_or("-"));
+    let (name, found) = Net2280Usb::find_unit(serial)?;
+    let t = found.open()?;
+    eprintln!("device {} unit {name}", t.product_label());
     Ok(t)
 }
 

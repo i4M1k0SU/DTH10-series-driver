@@ -17,7 +17,8 @@
 //!
 //! A unit is named by its USB serial number; the DT-H50/U2 has none, so it
 //! is named `DTH30-<product ID>` instead (`-2`, `-3`, ... for further units
-//! of the same product, in USB location order) ([`list`]).
+//! of the same product, in USB location order) ([`list`],
+//! [`dth30_usb::name_units`]).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -33,11 +34,8 @@ use dth30_core::device::{Config as DevConfig, Dth30, StreamInfo};
 use dth30_core::psi::{ProgramScanner, ProgramSpec};
 use dth30_core::vixs::stream::{card_state, is_cdxm_packet, parse_generic_block};
 use dth30_core::vixs::{Firmware, Options};
-pub use dth30_usb::Found;
+pub use dth30_usb::{Found, UNIT_PREFIX};
 use dth30_usb::{Net2280Usb, StreamReader};
-
-/// Prefix of the name of a unit without a USB serial number.
-pub const UNIT_PREFIX: &str = "DTH30-";
 
 /// How long the card may take to report itself activated after the CAS
 /// open (it takes about a second).
@@ -60,25 +58,7 @@ const PACKET: usize = 188;
 
 /// The family's devices present now, with their unit names.
 pub fn list() -> Result<Vec<(String, Found)>> {
-    let mut found = Net2280Usb::list_all()?;
-    found.sort_by(|a, b| a.location.cmp(&b.location));
-    Ok(name_units(found))
-}
-
-fn name_units(found: Vec<Found>) -> Vec<(String, Found)> {
-    let mut out: Vec<(String, Found)> = Vec::new();
-    for f in found {
-        let name = match f.serial.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => s.to_owned(),
-            None => {
-                let base = format!("{UNIT_PREFIX}{:04X}", f.product_id);
-                let n = out.iter().filter(|(n, _)| *n == base || n.starts_with(&format!("{base}-"))).count();
-                if n == 0 { base } else { format!("{base}-{}", n + 1) }
-            }
-        };
-        out.push((name, f));
-    }
-    out
+    Net2280Usb::list_units()
 }
 
 /// The unit named `name` (a unit name from [`list`]), or the first one when
@@ -769,24 +749,5 @@ mod tests {
         let mut out = m.push(a);
         out.extend(m.push(b));
         assert_eq!(out.chunks(PACKET).map(pid_of).collect::<Vec<_>>(), [0x100, 0x110]);
-    }
-
-    #[test]
-    fn units_without_serial_are_named_by_product() {
-        let f = |pid: u16, serial: Option<&str>| Found {
-            vendor_id: 0x0411,
-            product_id: pid,
-            serial: serial.map(str::to_owned),
-            location: String::new(),
-            info: None,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            path: None,
-        };
-        let names: Vec<String> =
-            name_units(vec![f(0x129, None), f(0x129, Some("")), f(0x128, Some("ABC")), f(0x128, None)])
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect();
-        assert_eq!(names, ["DTH30-0129", "DTH30-0129-2", "ABC", "DTH30-0128"]);
     }
 }

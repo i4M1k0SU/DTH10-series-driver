@@ -76,9 +76,10 @@ enum Cmd {
 
 #[derive(Args, Clone, Default)]
 struct DeviceArgs {
-    /// Select the device by USB serial number, or a DTH30 series unit by the unit name `list`
-    /// shows (default: the first one found, the DTH10 series first; `info` shows every one).
-    #[arg(long, value_name = "SERIAL")]
+    /// Select the device by its unit name as `list` shows it (the USB serial number of a device
+    /// that has one, else DTH30-<product ID>; default: the first one found, the DTH10 series
+    /// first; `info` shows every one).
+    #[arg(long, value_name = "UNIT")]
     serial: Option<String>,
     /// Open this usbfs node (/dev/bus/usb/BBB/DDD) instead of searching.
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -320,7 +321,7 @@ fn pick(backends: &[Arc<dyn Backend>], serial: Option<&str>) -> Result<(Arc<dyn 
         .find(|(_, u)| serial.is_none_or(|s| s == u.name))
         .map(|(b, u)| (b, u.name))
         .ok_or_else(|| match serial {
-            Some(s) => format!("no supported device with serial or unit name {s}").into(),
+            Some(s) => format!("no supported device with unit name {s}").into(),
             None => "no supported device found".into(),
         })
 }
