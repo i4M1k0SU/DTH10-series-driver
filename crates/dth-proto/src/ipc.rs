@@ -108,34 +108,36 @@ pub fn unix_socket_usable(path: &std::path::Path) -> bool {
 /// Unix by its type, on Windows by its reparse tag (a symbolic link, a
 /// junction or a cloud file is a reparse point too, and connecting to any
 /// file that is not a live socket fails the same way).
-#[cfg(unix)]
 fn is_socket_file(path: &Path) -> io::Result<bool> {
-    use std::os::unix::fs::FileTypeExt;
-    Ok(std::fs::symlink_metadata(path)?.file_type().is_socket())
-}
+    cfg_select! {
+        unix => {
+            use std::os::unix::fs::FileTypeExt;
+            Ok(std::fs::symlink_metadata(path)?.file_type().is_socket())
+        }
+        windows => {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_REPARSE_POINT, FindClose, FindFirstFileW, WIN32_FIND_DATAW,
+            };
+            /// The reparse tag of an AF_UNIX socket's file.
+            const IO_REPARSE_TAG_AF_UNIX: u32 = 0x8000_0023;
 
-#[cfg(windows)]
-fn is_socket_file(path: &Path) -> io::Result<bool> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FindClose, FindFirstFileW, WIN32_FIND_DATAW,
-    };
-    /// The reparse tag of an AF_UNIX socket's file.
-    const IO_REPARSE_TAG_AF_UNIX: u32 = 0x8000_0023;
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    // SAFETY: plain data, for which all zeroes is a valid value.
-    let mut found: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
-    // SAFETY: a NUL-terminated path and a writable WIN32_FIND_DATAW.
-    let h = unsafe { FindFirstFileW(wide.as_ptr(), &mut found) };
-    if h == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            // SAFETY: plain data, for which all zeroes is a valid value.
+            let mut found: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+            // SAFETY: a NUL-terminated path and a writable WIN32_FIND_DATAW.
+            let h = unsafe { FindFirstFileW(wide.as_ptr(), &mut found) };
+            if h == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: the search handle FindFirstFileW returned, closed once.
+            unsafe { FindClose(h) };
+            // For a reparse point, dwReserved0 holds its reparse tag.
+            Ok(found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                && found.dwReserved0 == IO_REPARSE_TAG_AF_UNIX)
+        }
     }
-    // SAFETY: the search handle FindFirstFileW returned, closed once.
-    unsafe { FindClose(h) };
-    // For a reparse point, dwReserved0 holds its reparse tag.
-    Ok(found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && found.dwReserved0 == IO_REPARSE_TAG_AF_UNIX)
 }
 
 /// The daemon's listening socket.
