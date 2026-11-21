@@ -18,6 +18,13 @@ use socket2::{Domain, SockAddr, Socket, Type};
 #[cfg(unix)]
 pub const DEFAULT_SOCKET: &str = "/run/dth/dth.sock";
 
+/// The permissions of the socket file on Unix: connecting needs write
+/// permission, so owner and group may connect and others may not. A client
+/// running as another user (a recorder) connects as a member of the socket
+/// file's group (the daemon's group, or the folder's with its setgid bit).
+#[cfg(unix)]
+pub const SOCKET_MODE: u32 = 0o660;
+
 /// A number for the folder `dir`, the same for every spelling Windows takes
 /// as that folder's (FNV-1a of the path, case-folded). It names the server
 /// of the programs in that folder, so that they meet without being told
@@ -139,8 +146,10 @@ pub enum Listener {
 
 impl Listener {
     /// Listen on `target`. A socket file left behind by a daemon that is gone
-    /// is removed (any other file at the path is an error and stays); a live daemon (one that answers, or a TCP port in use) is an
-    /// error, so that only one daemon serves a target.
+    /// is removed (any other file at the path is an error and stays), and on
+    /// Unix the new one gets `SOCKET_MODE` (0660); a live daemon (one that
+    /// answers, or a TCP port in use) is an error, so that only one daemon
+    /// serves a target.
     pub fn bind(target: &Target) -> io::Result<Listener> {
         match target {
             Target::Unix(path) => {
@@ -172,6 +181,12 @@ impl Listener {
                 }
                 let l = unix_socket()?;
                 l.bind(&addr)?;
+                // Not left to the umask (022 makes 0755: only the owner can connect).
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
+                }
                 l.listen(8)?;
                 l.set_nonblocking(true)?;
                 Ok(Listener::Unix(l))
@@ -379,6 +394,11 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let target = Target::Unix(path.clone());
         let listener = Listener::bind(&target).expect("bind");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, SOCKET_MODE);
+        }
         let client = Conn::connect(&target).expect("connect");
         (&client).write_all(b"hello\n").unwrap();
         let server = loop {
