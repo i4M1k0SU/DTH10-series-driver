@@ -76,10 +76,9 @@ enum Cmd {
 
 #[derive(Args, Clone, Default)]
 struct DeviceArgs {
-    /// Select the device by its unit name as `list` shows it (the USB serial number of a device
-    /// that has one, else DTH30-<product ID>; default: the first one found, the DTH10 series
-    /// first; `info` shows every one).
-    #[arg(long, value_name = "UNIT")]
+    /// Select the device by USB serial number, or a DTH30 series unit by the unit name `list`
+    /// shows (default: the first one found, the DTH10 series first; `info` shows every one).
+    #[arg(long, value_name = "SERIAL")]
     serial: Option<String>,
     /// Open this usbfs node (/dev/bus/usb/BBB/DDD) instead of searching.
     #[cfg(any(target_os = "linux", target_os = "android"))]
