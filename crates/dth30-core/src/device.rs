@@ -27,7 +27,8 @@
 //!
 //! With [`CasMode::Bcas`] (the default) the Program stream comes out in the
 //! clear once the card is activated. Checked on a DT-H50/U2 (board 0xB4,
-//! TOSHIBA kit); the other boards are unverified.
+//! TOSHIBA kit) and a DT-H30/U2 (board 0xB3, MJ100 kit); the other boards
+//! are unverified.
 
 use core::time::Duration;
 

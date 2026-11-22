@@ -10,7 +10,10 @@
 //! reads as BER 0. TMCC is never read; the BER of all three layers is
 //! reported whether a layer is in use or not.
 //!
-//! Nothing here is verified on hardware.
+//! Lock, C/N and BER are checked on hardware with the TOSHIBA (DT-H50/U2)
+//! and MJ100 (DT-H30/U2) kits. For 2–3 s after the lock, layer A (at times B
+//! as well) reads as many errors as its period, until the layer is decoded
+//! (the one-seg PIDs show up in the TS about then); then 0.
 
 use crate::Result;
 

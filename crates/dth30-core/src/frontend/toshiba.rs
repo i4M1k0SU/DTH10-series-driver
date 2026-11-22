@@ -6,11 +6,11 @@
 //! LO1 = RF + (1092 + E) MHz rounded up to the next 250 kHz step, LO2 =
 //! LO1 − RF − 57 MHz rounded up to the next 62.5 kHz step, so the second IF
 //! is about 57 MHz. Both dividers and the band go out in one 5-byte write to
-//! registers 0x01–0x05. The demodulator sends 204-byte packets (inferred).
+//! registers 0x01–0x05. The demodulator sends 204-byte packets.
 //!
-//! Nothing here is verified on hardware; the worked examples in the tests
-//! come from re-deriving the formulas (docs/26 `tune_ref.py`), not from
-//! vendor output.
+//! Checked on hardware with a DT-H50/U2 (board 0xB4): it tunes, locks and
+//! streams. The worked examples in the tests come from re-deriving the
+//! formulas (docs/26 `tune_ref.py`), not from vendor output.
 
 use crate::Result;
 
