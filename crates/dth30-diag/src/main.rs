@@ -1,7 +1,7 @@
 //! Hardware diagnostics for the BUFFALO DTH30 series (DT-H30/U2,
 //! DT-H50/U2, DT-H50/U2W): a ViXS XCode2 chip behind a PLX NET2280.
 //!
-//! A developer tool, checked on a DT-H50/U2 only. Every command that touches the
+//! A developer tool, checked on a DT-H30/U2 and a DT-H50/U2. Every command that touches the
 //! device opens it afresh: `probe` only resets the NET2280 side and reads
 //! the chip's identity (no firmware), the others first bring the chip up
 //! with the firmware from the user's own vendor driver file.
@@ -30,11 +30,11 @@ type Res<T = ()> = Result<T, Box<dyn Error>>;
 #[command(
     name = "dth30-diag",
     version,
-    about = "Hardware diagnostics for the BUFFALO DTH30 series of USB TV tuners (developer tool, checked on a DT-H50/U2 only)"
+    about = "Hardware diagnostics for the BUFFALO DTH30 series of USB TV tuners (developer tool, checked on a DT-H30/U2 and a DT-H50/U2)"
 )]
 struct Cli {
     /// Select the device by its unit name as `list` shows it (the USB serial number of a device
-    /// that has one, else DTH30-<product ID>; default: the first one found).
+    /// that has one, else DTH30-<product ID>-<bus>-<ports>; default: the first one found).
     #[arg(long, global = true, help_heading = "Global options", value_name = "UNIT")]
     serial: Option<String>,
     /// -v = info, -vv = debug, -vvv = trace (default: warn; RUST_LOG overrides). Logs go to stderr.

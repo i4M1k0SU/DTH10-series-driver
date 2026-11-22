@@ -286,23 +286,33 @@ fn read_packet(out: &mut Pipe<Out>, inp: &mut Pipe<In>, pkt: &[u8], timeout: Dur
 /// Prefix of the name of a unit without a USB serial number.
 pub const UNIT_PREFIX: &str = "DTH30-";
 
-/// Name the units: a unit with a USB serial number is named by it; one
-/// without (the DT-H50/U2 has none) is named `DTH30-<product ID>`, with
-/// `-2`, `-3`, ... for further units of the same product in `found` order.
-pub fn name_units(found: Vec<Found>) -> Vec<(String, Found)> {
-    let mut out: Vec<(String, Found)> = Vec::new();
-    for f in found {
-        let name = match f.serial.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => s.to_owned(),
-            None => {
-                let base = format!("{UNIT_PREFIX}{:04X}", f.product_id);
-                let n = out.iter().filter(|(n, _)| *n == base || n.starts_with(&format!("{base}-"))).count();
-                if n == 0 { base } else { format!("{base}-{}", n + 1) }
-            }
-        };
-        out.push((name, f));
+/// The unit name of a device: its USB serial number when it has one, else
+/// `DTH30-<product ID>-<place>` ([`Found::place`]). A name never depends on
+/// the other devices connected, so plugging or unplugging one does not rename
+/// another.
+pub fn unit_name(f: &Found) -> String {
+    match f.serial.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => s.to_owned(),
+        None => format!("{UNIT_PREFIX}{:04X}-{}", f.product_id, f.place),
     }
-    out
+}
+
+/// Each device with its unit name ([`unit_name`]).
+pub fn name_units(found: Vec<Found>) -> Vec<(String, Found)> {
+    found.into_iter().map(|f| (unit_name(&f), f)).collect()
+}
+
+/// Where a device is plugged in, for its unit name: `<bus>-<port>[.<port>...]`
+/// (the bus number, then the hub ports from the root hub down, as Linux names
+/// devices), the same while the device stays in that port; `<bus>-addr<address>`
+/// when the ports are not known, which changes when the device is plugged in
+/// again.
+fn place(bus: u32, ports: &[u8], address: u8) -> String {
+    if ports.is_empty() {
+        return format!("{bus}-addr{address}");
+    }
+    let ports: Vec<String> = ports.iter().map(u8::to_string).collect();
+    format!("{bus}-{}", ports.join("."))
 }
 
 /// A supported device found by [`Net2280Usb::list_all`]: through the OS
@@ -315,6 +325,10 @@ pub struct Found {
     pub serial: Option<String>,
     /// Where it is: `bus B addr D`, or the device node path.
     pub location: String,
+    /// Where it is plugged in, for the unit name ([`unit_name`]):
+    /// `<bus>-<ports>`, or `<bus>-addr<address>` for a device node found
+    /// without sysfs (whose ports are not known).
+    pub place: String,
     pub info: Option<nusb::DeviceInfo>,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub path: Option<std::path::PathBuf>,
@@ -369,6 +383,20 @@ impl Net2280Usb {
     /// nothing (no sysfs, e.g. inside a chroot), scan `/dev/bus/usb` instead.
     pub fn list_all() -> Result<Vec<Found>> {
         let mut out = Vec::new();
+        // The bus number of a bus ID: Linux numbers its buses, macOS gives the
+        // number in hex, and Windows names a bus by its root hub's location
+        // path, so there it is the bus's position among them (1, 2, ...).
+        let bus_number = cfg_select! {
+            windows => {{
+                let mut buses: Vec<String> = nusb::list_buses()
+                    .wait()
+                    .map_or_default(|it| it.map(|b| b.bus_id().to_owned()).collect());
+                buses.sort();
+                move |id: &str| buses.iter().position(|b| b == id).map_or(0, |i| i as u32 + 1)
+            }}
+            target_os = "macos" => |id: &str| u32::from_str_radix(id, 16).unwrap_or(0),
+            _ => |id: &str| id.parse::<u32>().unwrap_or(0),
+        };
         match Self::list() {
             Ok(list) => {
                 for d in list {
@@ -377,6 +405,7 @@ impl Net2280Usb {
                         product_id: d.product_id(),
                         serial: d.serial_number().map(str::to_owned),
                         location: format!("bus {} addr {}", d.bus_id(), d.device_address()),
+                        place: place(bus_number(d.bus_id()), d.port_chain(), d.device_address()),
                         info: Some(d),
                         #[cfg(any(target_os = "linux", target_os = "android"))]
                         path: None,
@@ -421,12 +450,12 @@ impl Net2280Usb {
         Self::open_matching(None)
     }
 
-    /// The supported devices in USB location order, each with its unit name
-    /// ([`name_units`]).
+    /// The supported devices in unit name order, each with its unit name
+    /// ([`unit_name`]).
     pub fn list_units() -> Result<Vec<(String, Found)>> {
-        let mut found = Self::list_all()?;
-        found.sort_by(|a, b| a.location.cmp(&b.location));
-        Ok(name_units(found))
+        let mut units = name_units(Self::list_all()?);
+        units.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(units)
     }
 
     /// The unit named `name` (a unit name from [`Self::list_units`], case
@@ -870,11 +899,15 @@ mod linux {
             if !model::is_supported(desc.vendor_id(), desc.product_id()) {
                 continue;
             }
+            // `/dev/bus/usb/BBB/DDD`: the bus number and the device address.
+            let number = |p: Option<&std::ffi::OsStr>| p.and_then(|n| n.to_str()?.parse::<u32>().ok()).unwrap_or(0);
+            let (bus, address) = (number(path.parent().and_then(Path::file_name)), number(path.file_name()));
             out.push(Found {
                 vendor_id: desc.vendor_id(),
                 product_id: desc.product_id(),
                 serial: read_serial(&dev),
                 location: path.display().to_string(),
+                place: super::place(bus, &[], address as u8),
                 info: None,
                 path: Some(path),
             });
@@ -888,22 +921,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn units_without_serial_are_named_by_product() {
-        let f = |pid: u16, serial: Option<&str>| Found {
+    fn units_without_serial_are_named_by_product_and_port() {
+        let f = |pid: u16, serial: Option<&str>, place: &str| Found {
             vendor_id: 0x0411,
             product_id: pid,
             serial: serial.map(str::to_owned),
             location: String::new(),
+            place: place.to_owned(),
             info: None,
             #[cfg(any(target_os = "linux", target_os = "android"))]
             path: None,
         };
-        let names: Vec<String> =
-            name_units(vec![f(0x129, None), f(0x129, Some("")), f(0x128, Some("ABC")), f(0x128, None)])
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect();
-        assert_eq!(names, ["DTH30-0129", "DTH30-0129-2", "ABC", "DTH30-0128"]);
+        let names: Vec<String> = name_units(vec![
+            f(0x128, None, "2-1"),
+            f(0x128, None, "2-3.4"),
+            f(0x128, Some(""), "1-addr7"),
+            f(0x129, Some("ABC"), "2-2"),
+        ])
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+        assert_eq!(names, ["DTH30-0128-2-1", "DTH30-0128-2-3.4", "DTH30-0128-1-addr7", "ABC"]);
+        // a unit's name does not depend on the others
+        assert_eq!(unit_name(&f(0x128, None, "2-3.4")), "DTH30-0128-2-3.4");
+    }
+
+    #[test]
+    fn places() {
+        assert_eq!(place(2, &[1], 6), "2-1");
+        assert_eq!(place(1, &[3, 4, 1], 9), "1-3.4.1");
+        assert_eq!(place(1, &[], 9), "1-addr9");
     }
 
     #[test]

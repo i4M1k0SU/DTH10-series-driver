@@ -7,8 +7,8 @@
 //! one before succeeded. Board 0xB2 is written as MJ102 here as in the
 //! kernel, even though its kit may be an MJ110 at other addresses
 //! ([`crate::model::kit_for_board`]); those writes then fail harmlessly,
-//! which is why [`run_standby`] stops at the first failure. Unverified on
-//! hardware.
+//! which is why [`run_standby`] stops at the first failure. Run on boards
+//! 0xB3 and 0xB4 without an error; unverified on the others.
 
 use crate::Result;
 use crate::i2c::I2c;

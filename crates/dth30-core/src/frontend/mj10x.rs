@@ -7,7 +7,8 @@
 //! The tuner takes the frequency in 1/64 MHz, rounded, in registers
 //! 0x14/0x15, between a stop (0x11 = 0x00) and a start (0x11 = 0x02).
 //!
-//! Nothing here is verified on hardware.
+//! Nothing here is verified on hardware (no unit with board 0xB2 or 0xC6
+//! has been at hand).
 
 use crate::Result;
 use crate::model::KitKind;

@@ -15,10 +15,10 @@
 //!   is opened (and the card reset) on the first device-mode tune and stays
 //!   open until [`Session::close`].
 //!
-//! A unit is named by its USB serial number; the DT-H50/U2 has none, so it
-//! is named `DTH30-<product ID>` instead (`-2`, `-3`, ... for further units
-//! of the same product, in USB location order) ([`list`],
-//! [`dth30_usb::name_units`]).
+//! A unit is named by its USB serial number; the DT-H30/U2 and DT-H50/U2
+//! have none, so such a unit is named by its product and the USB port it is
+//! plugged in, `DTH30-<product ID>-<bus>-<ports>` ([`list`],
+//! [`dth30_usb::unit_name`]).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -450,6 +450,9 @@ impl Session for Dth30Tuner {
         }
     }
     fn has_second_terrestrial(&self) -> bool {
+        false
+    }
+    fn has_satellite(&self) -> bool {
         false
     }
     fn set_stream_mode(&mut self, mode: StreamModeCfg) {

@@ -346,7 +346,7 @@ pub struct Holder {
     pub channel: String,
 }
 
-/// What a status reply says: `<serial> ter=30.1 sat=- [ter1=28.0] [ter_ch=27 ter_by=5/4120-1]
+/// What a status reply says: `<serial> ter=30.1 sat=-|none [ter1=28.0] [ter_ch=27 ter_by=5/4120-1]
 /// [sat_ch=BS15_0 sat_by=7 | ter1_ch=27 ter1_by=8] [busy]`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Status {
@@ -354,6 +354,9 @@ pub struct Status {
     pub ter: Option<f32>,
     /// C/N in dB of the satellite demodulator.
     pub sat: Option<f32>,
+    /// The unit has no satellite tuner (`sat=none`; a client that does not
+    /// know the word reads it as `-`).
+    pub no_satellite: bool,
     /// Tuner #1 is a second terrestrial tuner (the reply has `ter1=`).
     pub second_ter: bool,
     /// C/N in dB of the second terrestrial tuner.
@@ -369,7 +372,8 @@ impl Status {
     /// The reply's text after `ok`.
     pub fn to_info(&self, serial: &str) -> String {
         let show = |v: Option<f32>| v.map_or("-".to_owned(), |x| format!("{x:.1}"));
-        let mut s = format!("{serial} ter={} sat={}", show(self.ter), show(self.sat));
+        let sat = if self.no_satellite { "none".to_owned() } else { show(self.sat) };
+        let mut s = format!("{serial} ter={} sat={sat}", show(self.ter));
         if self.second_ter {
             s.push_str(&format!(" ter1={}", show(self.ter1)));
         }
@@ -400,6 +404,7 @@ impl Status {
         for word in info.split_whitespace() {
             match word.split_once('=') {
                 Some(("ter", v)) => st.ter = v.parse().ok(),
+                Some(("sat", "none")) => st.no_satellite = true,
                 Some(("sat", v)) => st.sat = v.parse().ok(),
                 Some(("ter1", v)) => {
                     st.second_ter = true;
@@ -615,6 +620,7 @@ mod tests {
         let st = Status {
             ter: Some(30.1),
             sat: None,
+            no_satellite: false,
             second_ter: false,
             ter1: None,
             holders: [
@@ -642,13 +648,14 @@ mod tests {
         let st = Status {
             ter: Some(30.1),
             sat: None,
+            no_satellite: true,
             second_ter: true,
             ter1: Some(28.0),
             holders: [None, Some(Holder { conn: 8, client: Some("4120-1".into()), channel: "27".into() })],
             busy: false,
         };
         let info = st.to_info("X");
-        assert_eq!(info, "X ter=30.1 sat=- ter1=28.0 ter1_ch=27 ter1_by=8/4120-1");
+        assert_eq!(info, "X ter=30.1 sat=none ter1=28.0 ter1_ch=27 ter1_by=8/4120-1");
         assert_eq!(Status::parse(&info), st);
         assert_eq!(
             (st.cnr_of(System::IsdbT, 0), st.cnr_of(System::IsdbT, 1), st.cnr_of(System::IsdbS, 1)),
@@ -663,5 +670,15 @@ mod tests {
         assert!(!sat.second_ter);
         assert_eq!(sat.to_info("X"), "X ter=30.1 sat=18.6 sat_ch=BS15_0 sat_by=7");
         assert_eq!((sat.cnr_of(System::IsdbT, 1), sat.cnr_of(System::IsdbS, 1)), (Some(30.1), Some(18.6)));
+    }
+
+    #[test]
+    fn status_of_a_unit_without_a_satellite_tuner() {
+        let st = Status::parse("X ter=29.6 sat=none ter_ch=27 ter_by=1");
+        assert!(st.no_satellite && !st.second_ter);
+        assert_eq!(st.cnr(), (Some(29.6), None));
+        assert_eq!(st.to_info("X"), "X ter=29.6 sat=none ter_ch=27 ter_by=1");
+        // an older server's reply: the satellite tuner may be there
+        assert!(!Status::parse("X ter=29.6 sat=-").no_satellite);
     }
 }

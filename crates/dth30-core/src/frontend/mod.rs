@@ -25,10 +25,11 @@
 //! frequency is set yet; here the re-tune is skipped until a frequency is
 //! known, so the TS output stays off until the first [`Frontend::tune`].
 //!
-//! Nothing here is verified on hardware. The register sequences come from
-//! static analysis of the vendor filter; the worked PLL examples in the
-//! tests were obtained by re-deriving the formulas (docs/26 `tune_ref.py`),
-//! not from vendor output or I2C captures.
+//! The register sequences come from static analysis of the vendor filter;
+//! the worked PLL examples in the tests were obtained by re-deriving the
+//! formulas (docs/26 `tune_ref.py`), not from vendor output or I2C captures.
+//! The MJ100 kit (DT-H30/U2) and the TOSHIBA kit (DT-H50/U2) tune and lock
+//! on hardware; the MJ102 and MJ110 kits are unverified.
 
 pub mod att;
 pub mod channel;

@@ -178,7 +178,7 @@ pub fn status(a: &StatusArgs) -> Result<(), Box<dyn Error>> {
             println!("ISDB-T C/N {}, {}", show(st.ter), held(&st.holders[0]));
             if st.second_ter {
                 println!("ISDB-T #1 C/N {}, {}", show(st.ter1), held(&st.holders[1]));
-            } else {
+            } else if !st.no_satellite {
                 println!("ISDB-S C/N {}, {}", show(st.sat), held(&st.holders[1]));
             }
             if st.busy {
