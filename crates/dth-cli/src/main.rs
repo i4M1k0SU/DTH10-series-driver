@@ -23,7 +23,7 @@
 //! (`dth30_backend`): one terrestrial tuner, this project's own firmware
 //! (or one given with `--firmware`), device mode descrambled by the unit's own
 //! B-CAS card (no application keys). Such a unit is named by its unit name
-//! (`DTH30-<product ID>` when it has no USB serial number).
+//! (`DTH30-<product ID>-<bus>-<ports>` when it has no USB serial number).
 
 mod serve;
 mod stop;

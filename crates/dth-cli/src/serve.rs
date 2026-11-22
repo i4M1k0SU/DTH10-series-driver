@@ -33,7 +33,7 @@
 //! `device` = one service descrambled by the unit's own B-CAS card. They
 //! need no application key file, and run this project's own firmware
 //! unless one is given with `--firmware`. A unit without a USB serial number is
-//! named `DTH30-<product ID>`.
+//! named `DTH30-<product ID>-<bus>-<ports>` (the USB port it is plugged in).
 
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Read, Write};

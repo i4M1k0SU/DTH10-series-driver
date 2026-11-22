@@ -80,7 +80,8 @@ USB VID は `0x0411` (BUFFALO) で共通。
 1. 必要に応じて `BonDriver_DTH.ini` (`BonDriver_DTH-T.ini`, `BonDriver_DTH-S.ini`) を編集
     - 複数台接続する場合、 `Serial=` の指定が必要
       - `dth list` で確認。未指定では動作しない
-      - DTH30 series は USB シリアル番号を持たないため、 `dth list` に表示されるユニット名 (`DTH30-0123` など) を指定する
+      - DTH30 series は USB シリアル番号を持たないため、 `dth list` に表示されるユニット名 (`DTH30-0128-3-1` など) を指定する
+        - ユニット名の末尾は差し込んだ USB ポートの位置 (バス番号とポート番号) を表す。別のポートに差し替えると変わる
     - `BonDriver_DTH-T.ini`
       - `Spaces=GR`
     - `BonDriver_DTH-S.ini`
