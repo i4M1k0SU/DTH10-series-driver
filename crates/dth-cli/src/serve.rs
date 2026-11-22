@@ -132,6 +132,8 @@ struct Unit {
     tuner: Mutex<Option<Box<dyn Session>>>,
     /// Whether tuner #1 is a second terrestrial tuner; `None` until the unit was first opened.
     second_ter: Mutex<Option<bool>>,
+    /// Whether the unit has a satellite tuner; `None` until the unit was first opened.
+    satellite: Mutex<Option<bool>>,
     /// Per tuner: the connection streaming it and the flag that ends that connection's stream.
     slots: [Mutex<Slot>; 2],
     /// The last C/N read of each tuner, answered to a status request while
@@ -157,11 +159,25 @@ impl Cnr {
     }
 }
 
+/// The tuners of a unit as far as a status reply tells them apart.
+#[derive(Clone, Copy)]
+struct Tuners {
+    /// Tuner #1 is a second terrestrial tuner.
+    second_ter: bool,
+    /// The unit has no satellite tuner (known once the unit was opened).
+    no_satellite: bool,
+}
+
 /// A unit's status reply from the C/N of its tuners: tuner #1 is the
 /// satellite one, or the second terrestrial one (`ter1=`).
-fn unit_status(cnr: [Option<f32>; 2], second_ter: bool, holders: [Option<Holder>; 2], busy: bool) -> Status {
-    let (sat, ter1) = if second_ter { (None, cnr[1]) } else { (cnr[1], None) };
-    Status { ter: cnr[0], sat, second_ter, ter1, holders, busy }
+fn unit_status(cnr: [Option<f32>; 2], tuners: Tuners, holders: [Option<Holder>; 2], busy: bool) -> Status {
+    let Tuners { second_ter, no_satellite } = tuners;
+    let (sat, ter1) = match (second_ter, no_satellite) {
+        (true, _) => (None, cnr[1]),
+        (false, true) => (None, None),
+        (false, false) => (cnr[1], None),
+    };
+    Status { ter: cnr[0], sat, no_satellite, second_ter, ter1, holders, busy }
 }
 
 /// How often the status of a unit that streams is read. Some kits follow the
@@ -270,6 +286,7 @@ impl Unit {
             .map_err(|e| format!("unit {}: {e}", self.serial))?;
         t.set_queue(1, self.queues[1].clone());
         *self.second_ter.locked() = Some(t.has_second_terrestrial());
+        *self.satellite.locked() = Some(t.has_satellite());
         log::info!("unit {}: opened in {:?}", self.serial, t0.elapsed());
         *tuner = Some(t);
         Ok(())
@@ -346,17 +363,20 @@ fn serve_status(conn: &Conn, id: u64, unit: &Unit) {
         let s = unit.slots[i].locked();
         (s.owner != 0).then(|| Holder { conn: s.owner, client: s.client.clone(), channel: s.channel.clone() })
     });
-    let second_ter = unit.second_ter.locked().unwrap_or(false);
+    let tuners = Tuners {
+        second_ter: unit.second_ter.locked().unwrap_or(false),
+        no_satellite: *unit.satellite.locked() == Some(false),
+    };
     let r = match unit.tuner.try_lock() {
         Ok(mut guard) => match guard.as_mut() {
             // Not open (nothing streamed yet, or the device went away): nothing to
             // measure. A status request never opens the device: that can take
             // seconds with a device in trouble, and a client polls this often.
-            None => Reply::Ok(unit_status([None, None], second_ter, holders, false).to_info(&unit.serial)),
+            None => Reply::Ok(unit_status([None, None], tuners, holders, false).to_info(&unit.serial)),
             Some(t) => {
                 let cnr = t.poll_status();
                 *unit.cnr.locked() = Cnr { tuners: cnr, read: Some(Instant::now()) };
-                Reply::Ok(unit_status(cnr, second_ter, holders, false).to_info(&unit.serial))
+                Reply::Ok(unit_status(cnr, tuners, holders, false).to_info(&unit.serial))
             }
         },
         Err(std::sync::TryLockError::WouldBlock) => {
@@ -364,7 +384,7 @@ fn serve_status(conn: &Conn, id: u64, unit: &Unit) {
             // is in progress: answer with the last values rather than wait.
             let cnr = unit.cnr.locked().tuners;
             let busy = unit.tuning.load(Ordering::Relaxed) > 0;
-            Reply::Ok(unit_status(cnr, second_ter, holders, busy).to_info(&unit.serial))
+            Reply::Ok(unit_status(cnr, tuners, holders, busy).to_info(&unit.serial))
         }
         Err(std::sync::TryLockError::Poisoned(p)) => {
             drop(p.into_inner());
@@ -733,6 +753,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             queues: [TsQueue::new(), TsQueue::new()],
             tuner: Mutex::new(None),
             second_ter: Mutex::new(None),
+            satellite: Mutex::new(None),
             slots: [Mutex::new(Slot::default()), Mutex::new(Slot::default())],
             cnr: Mutex::new(Cnr::default()),
             tuning: AtomicUsize::new(0),
@@ -893,13 +914,18 @@ mod tests {
     #[test]
     fn status_by_unit_kind() {
         let h = Some(Holder { conn: 5, client: None, channel: "27".into() });
-        // tuner #1 is the satellite one: the reply as before
-        let st = unit_status([Some(30.1), Some(18.6)], false, [None, h.clone()], false);
+        let sat = Tuners { second_ter: false, no_satellite: false };
+        // tuner #1 is the satellite one (or the unit was not opened yet): the reply as before
+        let st = unit_status([Some(30.1), Some(18.6)], sat, [None, h.clone()], false);
         assert_eq!(st.to_info("X"), "X ter=30.1 sat=18.6 sat_ch=27 sat_by=5");
-        assert_eq!(unit_status([None, None], false, [None, None], false).to_info("X"), "X ter=- sat=-");
+        assert_eq!(unit_status([None, None], sat, [None, None], false).to_info("X"), "X ter=- sat=-");
+        // a unit with one terrestrial tuner only
+        let ter = Tuners { second_ter: false, no_satellite: true };
+        assert_eq!(unit_status([Some(29.6), None], ter, [None, None], false).to_info("X"), "X ter=29.6 sat=none");
         // tuner #1 is a second terrestrial tuner
-        let st = unit_status([None, Some(28.0)], true, [None, h], true);
-        assert_eq!(st.to_info("X"), "X ter=- sat=- ter1=28.0 ter1_ch=27 ter1_by=5 busy");
+        let two = Tuners { second_ter: true, no_satellite: true };
+        let st = unit_status([None, Some(28.0)], two, [None, h], true);
+        assert_eq!(st.to_info("X"), "X ter=- sat=none ter1=28.0 ter1_ch=27 ter1_by=5 busy");
         assert_eq!((st.sat, st.ter1), (None, Some(28.0)));
     }
 

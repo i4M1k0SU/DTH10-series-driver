@@ -452,6 +452,9 @@ impl Session for Dth30Tuner {
     fn has_second_terrestrial(&self) -> bool {
         false
     }
+    fn has_satellite(&self) -> bool {
+        false
+    }
     fn set_stream_mode(&mut self, mode: StreamModeCfg) {
         self.mode = mode;
     }

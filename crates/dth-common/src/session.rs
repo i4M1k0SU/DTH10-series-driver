@@ -13,6 +13,8 @@ pub trait Session: Send {
     fn set_queue(&mut self, tuner: usize, queue: TsQueue);
     /// Whether tuner #1 is a second terrestrial tuner.
     fn has_second_terrestrial(&self) -> bool;
+    /// Whether the unit has a satellite (BS/CS) tuner.
+    fn has_satellite(&self) -> bool;
     fn set_stream_mode(&mut self, mode: StreamModeCfg);
     fn set_device_program(&mut self, program: DeviceProgram);
     /// Antenna supply for BS/CS (units without one ignore it).

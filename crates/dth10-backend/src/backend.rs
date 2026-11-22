@@ -238,6 +238,9 @@ impl Session for Dth10Session {
     fn has_second_terrestrial(&self) -> bool {
         self.tuner.has_second_terrestrial()
     }
+    fn has_satellite(&self) -> bool {
+        self.tuner.system_of(1) == Some(System::IsdbS)
+    }
     fn set_stream_mode(&mut self, mode: StreamModeCfg) {
         self.mode = mode;
         self.tuner.set_stream_mode(mode)
