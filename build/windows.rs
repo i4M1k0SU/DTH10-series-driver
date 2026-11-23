@@ -12,7 +12,7 @@ pub fn compile(filename: &str, dll: bool) {
 
     let product = env::var("CARGO_PKG_NAME").expect("package name");
     let version = env::var("CARGO_PKG_VERSION").expect("package version");
-    let year = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).year();
+    let year = jiff::Timestamp::now().to_zoned_datetime(jiff::tz::TimeZone::UTC).year();
     let mut numeric = 0u64;
     for component in ["MAJOR", "MINOR", "PATCH"] {
         let value: u16 = env::var(format!("CARGO_PKG_VERSION_{component}"))
