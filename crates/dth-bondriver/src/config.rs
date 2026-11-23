@@ -45,7 +45,7 @@ use dth_common::stream::{
 };
 use dth_proto::proto::TunerChoice;
 
-use crate::channels::{ALL_SPACES, SPACE_BS, SPACE_CS, SPACE_TERRESTRIAL};
+use crate::channels::Space;
 use crate::client::ServerConfig;
 use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
@@ -105,9 +105,9 @@ pub struct Config {
     pub dll_dir: Option<PathBuf>,
     /// `[Device]`, `[Stream]`, `[ISDB-T]`, `[ISDB-S]` keys.
     pub tuner: Tuning,
-    /// `[Device] Spaces`: the tuning spaces this DLL shows, as indices of
-    /// `channels::space_name` (0 = terrestrial, 1 = BS, 2 = CS110); all by default.
-    pub spaces: Vec<u32>,
+    /// `[Device] Spaces`: the tuning spaces this DLL shows, in order; all by
+    /// default.
+    pub spaces: Vec<Space>,
     /// `[Device] Tuner`: the terrestrial tuner this DLL asks for on a unit with
     /// two (`0`, `1`; `auto` or empty = the first free one). Units with one
     /// terrestrial tuner always use tuner 0.
@@ -125,7 +125,7 @@ impl Default for Config {
             ini_path: None,
             dll_dir: None,
             tuner: Tuning::default(),
-            spaces: ALL_SPACES.to_vec(),
+            spaces: Space::ALL.to_vec(),
             ter_tuner: TunerChoice::Auto,
             server: ServerConfig::default(),
             log_level: "warn".into(),
@@ -134,21 +134,21 @@ impl Default for Config {
     }
 }
 
-/// `GR,BS,CS` and the like (also 地デジ / T / CS110) to space indices; empty = all.
-pub fn parse_spaces(s: &str) -> Vec<u32> {
-    let mut v: Vec<u32> = s
+/// `GR,BS,CS` and the like (also 地デジ / T / CS110) to the spaces; empty = all.
+pub fn parse_spaces(s: &str) -> Vec<Space> {
+    let mut v: Vec<Space> = s
         .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
         .filter(|w| !w.is_empty())
         .filter_map(|w| match w.to_ascii_uppercase().as_str() {
-            "GR" | "T" | "UHF" | "ISDB-T" | "地デジ" => Some(SPACE_TERRESTRIAL),
-            "BS" => Some(SPACE_BS),
-            "CS" | "CS110" => Some(SPACE_CS),
+            "GR" | "T" | "UHF" | "ISDB-T" | "地デジ" => Some(Space::Terrestrial),
+            "BS" => Some(Space::Bs),
+            "CS" | "CS110" => Some(Space::Cs),
             _ => None,
         })
         .collect();
     v.sort_unstable();
     v.dedup();
-    if v.is_empty() { ALL_SPACES.to_vec() } else { v }
+    if v.is_empty() { Space::ALL.to_vec() } else { v }
 }
 
 /// Room for the DLL's path, in UTF-16 units.
@@ -286,11 +286,11 @@ mod tests {
 
     #[test]
     fn spaces_parse() {
-        assert_eq!(parse_spaces("GR"), vec![0]);
-        assert_eq!(parse_spaces("BS, CS"), vec![1, 2]);
-        assert_eq!(parse_spaces("CS110;BS;BS"), vec![1, 2]);
-        assert_eq!(parse_spaces(""), vec![0, 1, 2]);
-        assert_eq!(parse_spaces("x"), vec![0, 1, 2]);
+        assert_eq!(parse_spaces("GR"), vec![Space::Terrestrial]);
+        assert_eq!(parse_spaces("BS, CS"), vec![Space::Bs, Space::Cs]);
+        assert_eq!(parse_spaces("CS110;BS;BS"), vec![Space::Bs, Space::Cs]);
+        assert_eq!(parse_spaces(""), Space::ALL.to_vec());
+        assert_eq!(parse_spaces("x"), Space::ALL.to_vec());
     }
 
     /// The DLL `BonDriver_Test.dll` in a folder of its own, with `ini` (if
@@ -314,7 +314,7 @@ mod tests {
         let (c, dir) = load_with("none", None);
         let t = &c.tuner;
         assert_eq!(c.ini_path, None);
-        assert_eq!(c.spaces, vec![0, 1, 2]);
+        assert_eq!(c.spaces, Space::ALL.to_vec());
         assert_eq!(c.ter_tuner, TunerChoice::Auto);
         assert_eq!(
             (t.serial.as_str(), t.stream_mode, t.device_program),
@@ -404,7 +404,7 @@ mod tests {
                    [Server]\r\nIdleExitSec=9\r\nStartTimeoutSec=7\r\n";
         let (c, dir) = load_with("keys", Some(ini));
         let t = &c.tuner;
-        assert_eq!((t.serial.as_str(), c.spaces.as_slice()), ("SN1", &[1, 2][..]));
+        assert_eq!((t.serial.as_str(), c.spaces.as_slice()), ("SN1", &[Space::Bs, Space::Cs][..]));
         assert_eq!(c.ter_tuner, TunerChoice::Index(1));
         assert_eq!((t.stream_mode, t.device_program), (StreamModeCfg::Raw, DeviceProgram::Id(0x400)));
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")));

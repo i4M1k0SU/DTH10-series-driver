@@ -383,14 +383,14 @@ bon_abi!(
 );
 
 /// The tuning space behind TVTest's space index (`[Device] Spaces` may hide some).
-fn real_space(st: &State, space: Dword) -> Option<u32> {
+fn real_space(st: &State, space: Dword) -> Option<channels::Space> {
     st.config.spaces.get(space as usize).copied()
 }
 
 bon_abi!(
     fn enum_tuning_space(this: *mut Obj, space: Dword) -> Pcwstr {
         with_state(this, "EnumTuningSpace", std::ptr::null(), |st| {
-            match real_space(st, space).and_then(channels::space_name) {
+            match real_space(st, space).map(channels::Space::name) {
                 Some(n) => st.strings.wide(n),
                 None => std::ptr::null(),
             }
