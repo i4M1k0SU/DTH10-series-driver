@@ -162,7 +162,7 @@ impl<B: RemotePci> Vixs<B> {
         if self.opts.read_otp {
             self.otp = Some(self.read_otp_signature()?);
         }
-        gpio::update_leds(&self.chip, gpio::app_status::NOT_USING)?;
+        gpio::update_leds(&self.chip, gpio::AppStatus::NotUsing)?;
         log::info!("ViXS up: {} MB SDRAM, {} kHz, Power_Mode {}", mem.mem_size >> 20, mem.clock_khz, mem.power_mode);
         Ok(())
     }
@@ -239,9 +239,8 @@ impl<B: RemotePci> Vixs<B> {
         i2c::I2cMaster::new(&mut self.chip, channel, khz)
     }
 
-    /// Update the LED / "in use" bits for an application state
-    /// ([`gpio::app_status`] bits).
-    pub fn set_app_status(&mut self, status: u32) -> Result<()> {
+    /// Update the LED / "in use" bits for an application state.
+    pub fn set_app_status(&mut self, status: gpio::AppStatus) -> Result<()> {
         gpio::update_leds(&self.chip, status)
     }
 
