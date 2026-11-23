@@ -8,9 +8,8 @@
 //! is about 57 MHz. Both dividers and the band go out in one 5-byte write to
 //! registers 0x01–0x05. The demodulator sends 204-byte packets.
 //!
-//! Checked on hardware with a DT-H50/U2 (board 0xB4): it tunes, locks and
-//! streams. The worked examples in the tests come from re-deriving the
-//! formulas (docs/26 `tune_ref.py`), not from vendor output.
+//! The worked examples in the tests come from re-deriving the formulas
+//! (docs/26 `tune_ref.py`), not from vendor output.
 
 use crate::Result;
 

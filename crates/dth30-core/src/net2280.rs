@@ -6,8 +6,6 @@
 //! with the same values, [`dma_write`] is the host-to-ViXS memory path (the
 //! NET2280 DMA engine fed by bulk OUT), and [`IrqState::wait`] implements the
 //! one-shot interrupt endpoint with the vendor's re-arm sequence.
-//!
-//! None of this is verified on hardware.
 
 use core::time::Duration;
 

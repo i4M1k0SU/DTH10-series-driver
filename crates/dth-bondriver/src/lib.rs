@@ -1,5 +1,5 @@
-//! BonDriver (IBonDriver / IBonDriver2) DLL for the BUFFALO DTH10 series of
-//! USB TV tuners (verified on a DT-H70/U2).
+//! BonDriver (IBonDriver / IBonDriver2) DLL for the BUFFALO DTH10/DTH30
+//! series of USB TV tuners.
 //!
 //! The C++ interface TVTest expects (`IBonDriver2.h`):
 //!

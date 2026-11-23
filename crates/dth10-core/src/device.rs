@@ -249,12 +249,12 @@ impl<T: UsbControl> Device<T> {
     /// The original sets `stream_id` to 0 when `desc.id == 0`, otherwise 2, and
     /// `mode` = 0.
     ///
-    /// Verified on a DT-H70/U2 (firmware 1.0.18): with `mode` = 0 the device
-    /// delivers only PSI + the partial-reception (1seg) layer, re-encrypted
-    /// with a device key (scrambling-control bits set to the reserved value 01,
-    /// key-info packets inserted); with `mode` = 1 it delivers the complete
-    /// transport stream as received from the demodulator, in the clear
-    /// (PSI readable, elementary streams still MULTI2-scrambled as broadcast).
+    /// With `mode` = 0 the device delivers only PSI + the partial-reception
+    /// (1seg) layer, re-encrypted with a device key (scrambling-control bits
+    /// set to the reserved value 01, key-info packets inserted); with `mode` =
+    /// 1 it delivers the complete transport stream as received from the
+    /// demodulator, in the clear (PSI readable, elementary streams still
+    /// MULTI2-scrambled as broadcast).
     pub fn stream_enable(&self, desc: &TunerDesc) -> Result<()> {
         self.stream_enable_mode(desc, StreamMode::RawFullTs)
     }

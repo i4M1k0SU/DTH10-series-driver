@@ -8,8 +8,6 @@ BUFFALO DTH10/DTH30 series ユーザーモード実装
 
 USB VID は `0x0411` (BUFFALO) で共通。
 
-一部のKit (LGDT3305 など) はベンダードライバーの解析から実装したもので、搭載機種も不明。
-
 ### DTH10 series
 
 | 型番            | PID      | 発売時期 | 受信         | 検証 | 備考 |
@@ -27,17 +25,18 @@ USB VID は `0x0411` (BUFFALO) で共通。
 | DT-H11/U2       | `0x01DA` | 2010-11 | 地上         | ✅ | - |
 | DT-F200/U2W     | `0x01DB` | 2010-12 | 地上x2       | -  | - |
 | DT-H71/U2       | `0x01FF` | 2011-10 | 地上, BS, CS | -  | - |
-| DT-F120/U2      | `0x0202` | 2011-11 | 地上         | -  | - |
 | DT-H70B/PCIE    | `0x0200` | 2011-12 | 地上, BS, CS | -  | - |
-| DT-H30/PCIEM-TS | `0x0218` | -       | 地上         | -  | 東芝 dynabook REGZA PC に搭載の内蔵チューナー |
+| DT-F120/U2      | `0x0202` | 2011-11 | 地上         | -  | - |
+| DT-H30/PCIEM-TS | `0x0218` | -       | 地上         | -  | 東芝 dynabook REGZA PC に搭載の内蔵チューナー。型番は H30 だが、DTH10 series |
 
 ### DTH30 series
 
-| 型番            | PID                 | 発売時期 | 受信         | 検証 | 備考 |
-|-----------------|---------------------|---------|--------------|:--:|-------|
-| DT-H30/U2       | `0x0128` , `0x0144` | 2008-05 | 地上         | ✅ | `0x0128` で検証。 `0x0144` は未検証 |
-| DT-H50/U2       | `0x0129`            | 2008-07 | 地上         | ✅ | - |
-| DT-H50/U2W      | `0x012A`            | 2008-07 | 地上x2       | -  | INF に定義されているが未発売機種 |
+| 型番       | PID                 | 発売時期 | 受信   | 検証 | 備考 |
+|------------|---------------------|---------|--------|:--:|-------|
+| DT-H30/U2  | `0x0128` , `0x0144` | 2008-05 | 地上   | ✅ | `0x0128` で検証。 `0x0144` は未検証 |
+| DT-H45/U2  | `0x0128`            | 2009-08 | 地上   | ✅ | DT-H30/U2 として扱われる (純正ドライバーも同様) |
+| DT-H50/U2  | `0x0129`            | 2008-07 | 地上   | ✅ | - |
+| DT-H50/U2W | `0x012A`            | -       | 地上x2 | -  | INF に定義されているが未発売機種 |
 
 ## 使用方法
 
@@ -47,9 +46,9 @@ USB VID は `0x0411` (BUFFALO) で共通。
 
 付属の CD や公式サイトからダウンロードしたインストーラーを展開する (もしくはインストールして取り出す)。
 
-| Series | ファイル        | サイズ (bytes) | SHA256                                                             |
-|--------|----------------|---------------:|--------------------------------------------------------------------|
-| DTH10  | `CoBDACom.dll` |        351,232 | `7F4CABFD0B104C0E739F1172A10A98FCF24377C6947E3AB6AC0FA856353BCC15` |
+| Series       | ファイル        | サイズ (bytes) | SHA256                                                             |
+|--------------|----------------|---------------:|--------------------------------------------------------------------|
+| DTH10        | `CoBDACom.dll` |        351,232 | `7F4CABFD0B104C0E739F1172A10A98FCF24377C6947E3AB6AC0FA856353BCC15` |
 | DTH30 (任意) | `BufFsUSB.sys` |      1,486,392 | `60872BD9225A8FD7EF402B83CCBCBAE58EDEE40D05C73DA9EBA8BBA90DC4E286` |
 
 #### DTH10 series
@@ -72,16 +71,16 @@ USB VID は `0x0411` (BUFFALO) で共通。
 1. 以下のファイルを `TVTest.exe` と同じ階層にコピー
     - `BonDriver_DTH.dll`
       - TVTest と同じアーキテクチャのものを使用すること
-      - 地デジと BS/CS を同時に視聴する場合は、コピーして `BonDriver_DTH-T.dll`, `BonDriver_DTH-S.dll` にリネーム
+      - 対応機種にて、地デジと BS/CS を同時に視聴する場合は、コピーして `BonDriver_DTH-T.dll`, `BonDriver_DTH-S.dll` などにリネーム
     - `BonDriver_DTH.ini`
-      - 同時に視聴する場合は、DLL と同様に `BonDriver_DTH-T.ini`, `BonDriver_DTH-S.ini` にリネーム
+      - 同時に視聴する場合は、DLL と同様のファイル名にリネーム (`BonDriver_DTH-T.ini`, `BonDriver_DTH-S.ini` など)
     - `dth.exe`
-    - DTH10 series: `CoBDACom.dll`
+    - `CoBDACom.dll` (**DTH10 series 限定**)
 1. 必要に応じて `BonDriver_DTH.ini` (`BonDriver_DTH-T.ini`, `BonDriver_DTH-S.ini`) を編集
     - 複数台接続する場合、 `Serial=` の指定が必要
       - `dth list` で確認。未指定では動作しない
       - DTH30 series は USB シリアル番号を持たないため、 `dth list` に表示されるユニット名 (`DTH30-0128-3-1` など) を指定する
-        - ユニット名の末尾は差し込んだ USB ポートの位置 (バス番号とポート番号) を表す。別のポートに差し替えると変わる
+        - ユニット名の末尾は差し込んだ USB ポートの位置 (バス番号とポート番号) を表すため、別のポートに差し替えると変わる
     - `BonDriver_DTH-T.ini`
       - `Spaces=GR`
     - `BonDriver_DTH-S.ini`
@@ -100,7 +99,7 @@ device モード (既定) では、`CoBDACom.dll` を `dth` 実行ファイル�
 
 純正ファームウェアを使用する場合は、 `BufFsUSB.sys` を `tune` / `info` / `serve` の `--firmware <ファイルパス>` オプションで指定する。
 
-```
+```bash
 # デバイス一覧
 dth list
 
@@ -113,19 +112,11 @@ dth tune -c BS15_1 -t 10 -o bs.ts --stats -v
 dth tune -c 27 --mode raw -t 10 > ch27.ts
 
 # Mirakurun / mirakc 向け (Linux, ソケットのディレクトリを作成・使用できる権限が必要)
-dth serve --socket /run/dth/dth.sock    # サーバー起動。ソケットで接続を待ち受ける
+dth serve --socket /run/dth/dth.sock # サーバー起動。ソケットで接続を待ち受ける
 dth stream --socket /run/dth/dth.sock -c BS15_0 --program 101 # クライアント動作。ソケット経由で指定した TS を取得する
 ```
 
 Linux のソケットのファイルは権限 0660 で作られ、所有者と同じグループのユーザーだけが接続できる。ファイルのグループは `dth serve` を動かすユーザーのグループ (ソケットのディレクトリに setgid ビットがあれば、そのディレクトリのグループ) になる。Mirakurun / mirakc を `dth serve` と別のユーザーで動かすときは、共通のグループを用意して、録画ソフトのユーザーをそのグループに入れる。
-
-```
-sudo groupadd dth
-sudo usermod -aG dth mirakc                # 録画ソフトのユーザー (例: mirakc) をグループに入れる
-sudo install -d -g dth -m 2775 /run/dth    # ソケットのディレクトリ。setgid でソケットのグループが dth になる (/run は再起動で消えるため、起動のたびに作る)
-```
-
-systemd で `dth serve` を動かす場合は、ユニットに `Group=dth` と `RuntimeDirectory=dth` を指定すれば、ディレクトリの作成も任せられる。
 
 ## 開発者向け
 
@@ -165,7 +156,7 @@ Windows 向けには Visual Studio Build Tools の C++ ビルド環境と Window
 
 ビルド成果物は `target/<ターゲット名>/release/` に出力される。
 
-```
+```bash
 # Windows (BonDriver DLL + dth.exe + dth10-diag.exe + dth30-diag.exe)
 cargo build --release --target x86_64-pc-windows-msvc   # Windows x86_64
 cargo build --release --target i686-pc-windows-msvc     # Windows i686
@@ -186,7 +177,7 @@ cargo build --release -p dth-cli -p dth10-diag -p dth30-diag --target aarch64-ap
 
 テストは実機不要 (プロトコルの往復、IPC、デーモンのスロット判定、DLL 境界の panic 捕捉)。
 
-```
+```bash
 cargo test --workspace
 
 # MSVC で C++ 側をビルドし、本物の `dynamic_cast` で RTTI を検証する

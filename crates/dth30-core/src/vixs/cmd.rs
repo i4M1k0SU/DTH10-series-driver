@@ -13,8 +13,6 @@
 //! Messages from the firmware (bit 0 of 0x30E0) carry an ID in 0x3028 and
 //! the SDRAM address of nine words in 0x3040; the host answers by writing
 //! those two values back to 0x3038 / 0x3024.
-//!
-//! Checked on a DT-H50/U2 (board 0xB4); the other boards are unverified.
 
 use std::time::{Duration, Instant};
 

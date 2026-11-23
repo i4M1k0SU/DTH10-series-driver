@@ -69,7 +69,7 @@ pub struct ServeArgs {
     /// bmRequestType recipient of the vendor requests (default: device on Windows, interface elsewhere).
     #[arg(long, value_enum)]
     recipient: Option<RecipientArg>,
-    /// Directory of the CEPM handshake cache (DTH10_<serial>.cepm). Default: $DTH_STATE_DIR,
+    /// Directory of the CEPM handshake cache (`DTH10_<serial>.cepm`). Default: $DTH_STATE_DIR,
     /// else /var/lib/dth when it is writable, else the directory of this executable.
     #[arg(long, value_name = "DIR")]
     state_dir: Option<PathBuf>,
@@ -96,10 +96,10 @@ pub struct ServeArgs {
     /// application's "use booster"; separate from --lnb).
     #[arg(long)]
     booster: bool,
-    /// ISDB-T: how long to wait for lock before streaming [ms] (up to 2 s longer while there is a signal).
+    /// ISDB-T: how long to wait for lock before streaming, in ms (up to 2 s longer while there is a signal).
     #[arg(long, value_name = "MS", default_value_t = 1200)]
     ter_lock_wait: u64,
-    /// ISDB-S: how long to wait for lock and the TMCC TS-ID table [ms] (up to 2 s longer while there is a signal).
+    /// ISDB-S: how long to wait for lock and the TMCC TS-ID table, in ms (up to 2 s longer while there is a signal).
     #[arg(long, value_name = "MS", default_value_t = 1500)]
     sat_lock_wait: u64,
     /// Bulk IN transfers kept in flight per stream (39936 bytes each; default 16 on Linux, 4 on Windows).

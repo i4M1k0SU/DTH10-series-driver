@@ -40,7 +40,7 @@ impl DeviceProgram {
     }
 }
 
-/// Platform default of [`TunerConfig::read_depth`].
+/// Platform default of the backends' `read_depth` setting (`TunerConfig::read_depth`).
 pub fn default_read_depth() -> usize {
     if cfg!(windows) { 4 } else { 16 }
 }

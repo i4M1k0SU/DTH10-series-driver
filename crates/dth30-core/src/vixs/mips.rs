@@ -6,8 +6,6 @@
 //! are board-ID checked. The firmware goes to SDRAM window 1 and up, 1 MB per
 //! DMA transfer; the vector table is then copied to window 0, which stays
 //! selected from then on.
-//!
-//! Checked on a DT-H50/U2 (board 0xB4); the other boards are unverified.
 
 use super::firmware::{Firmware, VECTOR_COUNT_OFFSET, VECTOR_TABLE_OFFSET};
 use super::meminit::MemInit;

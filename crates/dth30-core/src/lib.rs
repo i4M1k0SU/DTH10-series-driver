@@ -1,5 +1,5 @@
 //! Chip drivers for the BUFFALO DTH30 series of USB TV tuners
-//! (DT-H30/U2, DT-H50/U2, DT-H50/U2W), I/O-agnostic.
+//! (DT-H30/U2, DT-H45/U2, DT-H50/U2, DT-H50/U2W), I/O-agnostic.
 //!
 //! The hardware is unrelated to the DTH10 series: a ViXS XCode2 ("Camino")
 //! PCI chip with a MIPS core sits behind a PLX NET2280 USB controller in PCI

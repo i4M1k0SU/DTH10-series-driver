@@ -1,10 +1,11 @@
 //! Hardware diagnostics for the BUFFALO DTH30 series (DT-H30/U2,
-//! DT-H50/U2, DT-H50/U2W): a ViXS XCode2 chip behind a PLX NET2280.
+//! DT-H45/U2, DT-H50/U2, DT-H50/U2W): a ViXS XCode2 chip behind a PLX
+//! NET2280.
 //!
-//! A developer tool, checked on a DT-H30/U2 and a DT-H50/U2. Every command that touches the
-//! device opens it afresh: `probe` only resets the NET2280 side and reads
-//! the chip's identity (no firmware), the others first bring the chip up
-//! with the firmware from the user's own vendor driver file.
+//! A developer tool. Every command that touches the device opens it afresh:
+//! `probe` only resets the NET2280 side and reads the chip's identity (no
+//! firmware), the others first bring the chip up with the firmware from the
+//! user's own vendor driver file.
 //!
 //! On Windows the device must be bound to WinUSB.
 
@@ -30,11 +31,11 @@ type Res<T = ()> = Result<T, Box<dyn Error>>;
 #[command(
     name = "dth30-diag",
     version,
-    about = "Hardware diagnostics for the BUFFALO DTH30 series of USB TV tuners (developer tool, checked on a DT-H30/U2 and a DT-H50/U2)"
+    about = "Hardware diagnostics for the BUFFALO DTH30 series of USB TV tuners (developer tool)"
 )]
 struct Cli {
     /// Select the device by its unit name as `list` shows it (the USB serial number of a device
-    /// that has one, else DTH30-<product ID>-<bus>-<ports>; default: the first one found).
+    /// that has one, else `DTH30-<product ID>-<bus>-<ports>`; default: the first one found).
     #[arg(long, global = true, help_heading = "Global options", value_name = "UNIT")]
     serial: Option<String>,
     /// -v = info, -vv = debug, -vvv = trace (default: warn; RUST_LOG overrides). Logs go to stderr.
@@ -138,9 +139,6 @@ struct TuneArgs {
     channel: String,
     #[arg(long, default_value_t = 3000, value_name = "MS")]
     lock_wait: u32,
-    /// Subsystem IDs for board 0xB2 (MJ102 when EEEE:EEEE), as "VVVV:DDDD" in hex.
-    #[arg(long, value_name = "VVVV:DDDD", value_parser = parse_subsystem)]
-    subsystem: Option<(u16, u16)>,
 }
 
 fn parse_cas_mode(s: &str) -> Result<CasMode, String> {
@@ -172,12 +170,6 @@ fn parse_hex_bytes(s: &str) -> Result<HexBytes, String> {
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
         .collect::<Result<_, _>>()
         .map(HexBytes)
-}
-
-fn parse_subsystem(s: &str) -> Result<(u16, u16), String> {
-    let (a, b) = s.split_once(':').ok_or("expected VVVV:DDDD")?;
-    let p = |x: &str| u16::from_str_radix(x, 16).map_err(|e| e.to_string());
-    Ok((p(a)?, p(b)?))
 }
 
 fn init_logging(verbose: u8) {
@@ -213,12 +205,12 @@ fn run(cli: Cli) -> Res {
         Cmd::Probe => probe(serial),
         Cmd::Fw { path, out } => fw(path, out.as_deref()),
         Cmd::BringUp(a) => {
-            let v = bring_up(serial, &a)?;
-            report_bring_up(&v);
+            let (v, usb_id) = bring_up(serial, &a)?;
+            report_bring_up(&v, usb_id);
             Ok(())
         }
         Cmd::I2cRead { fw, addr, reg, count, channel } => {
-            let mut v = bring_up(serial, &fw)?;
+            let (mut v, _) = bring_up(serial, &fw)?;
             let mut bus = StdSleep(v.i2c(channel, 400));
             let mut buf = vec![0u8; count as usize];
             read_regs(&mut bus, addr, reg, &mut buf)?;
@@ -226,7 +218,7 @@ fn run(cli: Cli) -> Res {
             Ok(())
         }
         Cmd::I2cWrite { fw, addr, reg, data, channel } => {
-            let mut v = bring_up(serial, &fw)?;
+            let (mut v, _) = bring_up(serial, &fw)?;
             let mut bus = StdSleep(v.i2c(channel, 400));
             write_regs(&mut bus, addr, reg, &data.0)?;
             println!("wrote i2c 0x{addr:02x} reg 0x{reg:02x}: {}", hex(&data.0));
@@ -285,9 +277,9 @@ fn info(serial: Option<&str>) -> Res {
 
 fn probe(serial: Option<&str>) -> Res {
     let t = open(serial)?;
-    let pid = t.product_id();
+    let usb_id = t.usb_id();
     let p = pipes(&t);
-    let v = Vixs::open(t, pid, &p, Options::default())?;
+    let v = Vixs::open(t, usb_id.1, &p, Options::default())?;
     let l = v.layout();
     println!("ViXS vendor/device: 0x{:08x}", l.vixs_id);
     for (off, sizing, addr) in &l.bars {
@@ -296,23 +288,23 @@ fn probe(serial: Option<&str>) -> Res {
     println!("FB (BAR0) 0x{:08x}, MMR (BAR1) 0x{:08x}", l.fb, l.mmr);
     println!("FIFO endpoints {:02x?} at {:08x?}, EP_CFG {:08x?}", l.endpoints, l.fifo, l.ep_cfg);
     println!("DMA channel offset 0x{:02x} (mapped: {})", l.dma_offset, l.dma_mapped);
-    report_board(v.board_id());
+    report_board(v.board_id(), usb_id);
     Ok(())
 }
 
-fn report_board(reg: u32) {
+fn report_board(reg: u32, usb_id: (u16, u16)) {
     let id = model::board_id(reg);
     println!(
         "board ID register 0x{reg:08x}: chip {}, board 0x{id:02x}",
         if model::is_camino(reg) { "Camino" } else { "unknown" }
     );
-    match model::kit_for_board(id, (0, 0)) {
+    match model::kit_for_board(id, usb_id) {
         Some(k) => println!(
             "front end: {} (demodulator 0x{:02x}, tuner 0x{:02x}{})",
             k.name(),
             k.demod_addr(),
             k.tuner_addr(),
-            if id == 0xB2 { "; board 0xB2 is MJ102 with subsystem EEEE:EEEE, else MJ110" } else { "" }
+            if id == 0xB2 { "; board 0xB2 is MJ102 with USB ID EEEE:EEEE, else MJ110" } else { "" }
         ),
         None => println!("front end: unknown board"),
     }
@@ -341,18 +333,19 @@ fn fw(path: Option<PathBuf>, out: Option<&Path>) -> Res {
     Ok(())
 }
 
-fn bring_up(serial: Option<&str>, a: &FwArgs) -> Res<Vixs<Net2280Usb>> {
+/// The chip brought up, and the device's USB vendor and product ID.
+fn bring_up(serial: Option<&str>, a: &FwArgs) -> Res<(Vixs<Net2280Usb>, (u16, u16))> {
     let f = firmware(a.firmware.clone())?;
     let t = open(serial)?;
-    let pid = t.product_id();
+    let usb_id = t.usb_id();
     let p = pipes(&t);
-    let mut v = Vixs::open(t, pid, &p, Options::default())?;
+    let mut v = Vixs::open(t, usb_id.1, &p, Options::default())?;
     v.bring_up(&f)?;
-    Ok(v)
+    Ok((v, usb_id))
 }
 
-fn report_bring_up(v: &Vixs<Net2280Usb>) {
-    report_board(v.board_id());
+fn report_bring_up(v: &Vixs<Net2280Usb>, usb_id: (u16, u16)) {
+    report_board(v.board_id(), usb_id);
     if let Some(m) = v.mem() {
         println!("memory init: {m:?}");
     }
@@ -383,10 +376,10 @@ fn tune(serial: Option<&str>, a: &TuneArgs, cas: CasMode) -> Res<Dth30<Net2280Us
     let hz = channel_hz(&a.channel)?;
     let f = firmware(a.fw.firmware.clone())?;
     let t = open(serial)?;
-    let pid = t.product_id();
+    let usb_id = t.usb_id();
     let p = pipes(&t);
-    let cfg = Config { subsystem: a.subsystem, cas_mode: cas, ..Config::default() };
-    let mut d = Dth30::open(t, pid, &p, Options::default(), cfg)?;
+    let cfg = Config { cas_mode: cas, ..Config::default() };
+    let mut d = Dth30::open(t, usb_id, &p, Options::default(), cfg)?;
     d.bring_up(&f)?;
     println!("front end {} on board 0x{:02x}, tuning {hz} Hz", d.kit().name(), d.board());
     d.tune(hz)?;

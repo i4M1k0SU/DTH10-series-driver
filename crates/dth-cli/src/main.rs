@@ -1,6 +1,5 @@
-//! `dth`: stand-alone tuner command for the BUFFALO DTH10 series of USB TV
-//! tuners (the models the vendor's Windows driver covers; verified on
-//! a DT-H70/U2).
+//! `dth`: stand-alone tuner command for the BUFFALO DTH10/DTH30 series of
+//! USB TV tuners (the models the vendor's Windows drivers cover).
 //!
 //! `dth tune` opens the device, tunes, and writes the transport stream to
 //! stdout (or a file) until it is stopped (SIGTERM / SIGINT / Ctrl-C, the
@@ -61,8 +60,8 @@ struct Cli {
 enum Cmd {
     /// List the connected supported devices.
     List,
-    /// Show the device information (DTH10 series: tuner descriptors, firmware, endpoints; DT-H30/U2
-    /// family: endpoints, board and front end, firmware source; this resets its chip).
+    /// Show the device information (DTH10 series: tuner descriptors, firmware, endpoints; DTH30
+    /// series: endpoints, board and front end, firmware source; this resets its chip).
     Info(DeviceArgs),
     /// Tune and write the TS to stdout (or --output) until stopped.
     Tune(Box<TuneArgs>),
@@ -153,7 +152,7 @@ struct TuneArgs {
     /// Device mode: leave the link encryption in place (output stays encrypted; for analysis).
     #[arg(long)]
     no_decrypt: bool,
-    /// Directory of the CEPM handshake cache (DTH10_<serial>.cepm). Default: $DTH_STATE_DIR,
+    /// Directory of the CEPM handshake cache (`DTH10_<serial>.cepm`). Default: $DTH_STATE_DIR,
     /// else /var/lib/dth when it is writable, else the directory of this executable.
     #[arg(long, value_name = "DIR")]
     state_dir: Option<PathBuf>,
@@ -182,10 +181,10 @@ struct TuneArgs {
     /// ISDB-S: switch the booster on (the vendor application's "use booster"; separate from --lnb).
     #[arg(long)]
     booster: bool,
-    /// ISDB-T: how long to wait for lock before streaming [ms] (up to 2 s longer while there is a signal).
+    /// ISDB-T: how long to wait for lock before streaming, in ms (up to 2 s longer while there is a signal).
     #[arg(long, value_name = "MS", default_value_t = 1200)]
     ter_lock_wait: u64,
-    /// ISDB-S: how long to wait for lock and the TMCC TS-ID table [ms] (up to 2 s longer while there is a signal).
+    /// ISDB-S: how long to wait for lock and the TMCC TS-ID table, in ms (up to 2 s longer while there is a signal).
     #[arg(long, value_name = "MS", default_value_t = 1500)]
     sat_lock_wait: u64,
     /// ISDB-S: command path (bRequest bit7) of the satellite demodulator's I2C
