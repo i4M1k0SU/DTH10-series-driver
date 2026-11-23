@@ -26,7 +26,7 @@
 //! read back (§1.2). [`CasMode::Bcas`] yields a clear TS (see [`CasMode`]).
 
 use super::Vixs;
-use super::cmd::{self, func};
+use super::cmd::{self, Func};
 use crate::bus::RemotePci;
 use crate::model::KitKind;
 use crate::net2280::{Layout, reg};
@@ -622,7 +622,7 @@ impl<B: RemotePci> Vixs<B> {
         for (off, v) in tsd_config_fb_writes(c) {
             self.chip.fb_write_checked(off, v)?;
         }
-        let r = self.send_cmd(func::TSD_CONFIG, &build_tsd_config())?;
+        let r = self.send_cmd(Func::TsdConfig, &build_tsd_config())?;
         if !r.ok() {
             log::error!("TS input set-up failed with status {}", r.status);
             return Err(Error::Protocol("ViXS TS input set-up failed"));
@@ -632,7 +632,7 @@ impl<B: RemotePci> Vixs<B> {
 
     /// Send an OPEN in a fresh slot, keep the slot reserved and read the
     /// firmware's handle back.
-    fn open_stream(&mut self, kind: StreamKind, cookie: u32, f: u32, payload: Vec<u8>) -> Result<StreamHandle> {
+    fn open_stream(&mut self, kind: StreamKind, cookie: u32, f: Func, payload: Vec<u8>) -> Result<StreamHandle> {
         let ring = self.ring_mut()?;
         let slot = ring.next_slot();
         ring.reserve(slot)?;
@@ -660,7 +660,7 @@ impl<B: RemotePci> Vixs<B> {
     pub fn open_generic(&mut self, mode: CasMode) -> Result<StreamHandle> {
         let cookie = self.new_cookie();
         let p = build_open_generic(cookie, mode).to_vec();
-        self.open_stream(StreamKind::Generic, cookie, func::OPEN_GENERIC, p)
+        self.open_stream(StreamKind::Generic, cookie, Func::OpenGeneric, p)
     }
 
     /// Ask the firmware to reset the B-CAS card (function 11 on the CAS
@@ -672,7 +672,7 @@ impl<B: RemotePci> Vixs<B> {
         if cas.kind != StreamKind::Generic {
             return Err(Error::Protocol("the card reset goes to the CAS object"));
         }
-        let r = self.send_cmd(func::INPUT, &build_card_reset(cas.phys))?;
+        let r = self.send_cmd(Func::Input, &build_card_reset(cas.phys))?;
         if !r.ok() {
             log::error!("card reset request failed with status {}", r.status);
             return Err(Error::Protocol("ViXS card reset refused"));
@@ -684,14 +684,14 @@ impl<B: RemotePci> Vixs<B> {
     pub fn open_psi(&mut self, ts_port: u32) -> Result<StreamHandle> {
         let cookie = self.new_cookie();
         let p = build_open_psi(cookie, ts_port).to_vec();
-        self.open_stream(StreamKind::Raw, cookie, func::OPEN_STREAM, p)
+        self.open_stream(StreamKind::Raw, cookie, Func::OpenStream, p)
     }
 
     /// Open the Program stream (function 8, kind 5).
     pub fn open_program(&mut self, params: &ProgramParams) -> Result<StreamHandle> {
         let cookie = self.new_cookie();
         let p = build_open_program(cookie, params).to_vec();
-        self.open_stream(StreamKind::Program, cookie, func::OPEN_STREAM, p)
+        self.open_stream(StreamKind::Program, cookie, Func::OpenStream, p)
     }
 
     /// The internal flush (function 10, a slot of its own) that precedes
@@ -701,7 +701,7 @@ impl<B: RemotePci> Vixs<B> {
         if h.kind == StreamKind::Generic {
             return Err(Error::Protocol("the CAS object is closed without a flush"));
         }
-        let r = self.send_cmd(func::CONTROL, &build_flush(h.phys))?;
+        let r = self.send_cmd(Func::Control, &build_flush(h.phys))?;
         if !r.ok() {
             log::error!("{} flush failed with status {}", h.kind.name(), r.status);
             return Err(Error::Protocol("ViXS stream flush failed"));
@@ -717,12 +717,12 @@ impl<B: RemotePci> Vixs<B> {
             StreamKind::Generic => {
                 let open: &[u8; GENERIC_OPEN_LEN] =
                     h.open_payload.as_slice().try_into().map_err(|_| Error::Protocol("bad CAS open payload"))?;
-                (func::CLOSE_GENERIC, build_close_generic(open, h.phys).to_vec())
+                (Func::CloseGeneric, build_close_generic(open, h.phys).to_vec())
             }
             StreamKind::Raw | StreamKind::Program => {
                 let open: &[u8; OPEN_LEN] =
                     h.open_payload.as_slice().try_into().map_err(|_| Error::Protocol("bad stream open payload"))?;
-                (func::CLOSE_STREAM, build_close(open, h.phys).to_vec())
+                (Func::CloseStream, build_close(open, h.phys).to_vec())
             }
         };
         let r = self.send_cmd_slot(h.slot, f, &payload)?;
