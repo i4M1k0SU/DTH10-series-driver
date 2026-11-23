@@ -5,6 +5,19 @@
 /// The `n/7 MHz` offset every channel carries (Hz).
 const SEVENTH: u32 = 142_857;
 
+/// First VHF channel.
+const VHF_FIRST: u32 = 1;
+/// Last VHF channel.
+const VHF_LAST: u32 = 12;
+/// First UHF channel.
+const UHF_FIRST: u32 = 13;
+/// Last UHF channel.
+const UHF_LAST: u32 = 62;
+/// Centre of UHF channel 13 (Hz).
+const UHF_FIRST_HZ: u32 = 473_000_000;
+/// Channel raster (Hz).
+const CHANNEL_HZ: u32 = 6_000_000;
+
 /// A frequency band of the channel plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Band {
@@ -17,16 +30,16 @@ pub enum Band {
 }
 
 /// VHF 1–12 centres (MHz).
-const VHF_MHZ: [u32; 12] = [93, 99, 105, 173, 179, 185, 191, 195, 201, 207, 213, 219];
+const VHF_MHZ: [u32; VHF_LAST as usize] = [93, 99, 105, 173, 179, 185, 191, 195, 201, 207, 213, 219];
 
 /// UHF channel 13–62.
 pub fn uhf_hz(ch: u32) -> Option<u32> {
-    (13..=62).contains(&ch).then(|| 473_000_000 + 6_000_000 * (ch - 13) + SEVENTH)
+    (UHF_FIRST..=UHF_LAST).contains(&ch).then(|| UHF_FIRST_HZ + CHANNEL_HZ * (ch - UHF_FIRST) + SEVENTH)
 }
 
 /// VHF channel 1–12.
 pub fn vhf_hz(ch: u32) -> Option<u32> {
-    let i = usize::try_from(ch).ok()?.checked_sub(1)?;
+    let i = usize::try_from(ch.checked_sub(VHF_FIRST)?).ok()?;
     VHF_MHZ.get(i).map(|m| m * 1_000_000 + SEVENTH)
 }
 
@@ -64,8 +77,8 @@ pub fn parse_channel(name: &str) -> Option<(Band, u32)> {
     }
     let ch: u32 = name.parse().ok()?;
     match ch {
-        1..=12 => Some((Band::Vhf, ch)),
-        13..=62 => Some((Band::Uhf, ch)),
+        VHF_FIRST..=VHF_LAST => Some((Band::Vhf, ch)),
+        UHF_FIRST..=UHF_LAST => Some((Band::Uhf, ch)),
         _ => None,
     }
 }

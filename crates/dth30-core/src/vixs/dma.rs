@@ -8,7 +8,7 @@
 //! budget is shared by all entries). The vendor polls without bound; here
 //! each entry gives up after [`READ_LIMIT`] reads.
 
-use super::mmr::{Chip, INT_ENABLE};
+use super::mmr::{Chip, INT_DMA, INT_ENABLE};
 use crate::bus::RemotePci;
 use crate::{Error, Result};
 
@@ -20,6 +20,10 @@ pub const DMA_INT_BITS: u32 = 0xD;
 /// The table registers: two data words, then index (bit 7 = status).
 pub const TABLE: [u32; 3] = [0x1A24, 0x1A28, 0x1A2C];
 pub const TABLE_ENTRIES: u32 = 128;
+/// The status bit in the index register.
+const TABLE_STATUS: u32 = 1 << 7;
+/// Reads with the status bit set that make one polling round.
+const ROUND_READS: u32 = 30;
 /// Per-entry bound of status reads.
 pub const READ_LIMIT: u32 = 10_000;
 
@@ -45,12 +49,14 @@ pub fn init<B: RemotePci>(chip: &mut Chip<B>, clear_table: bool) -> Result<()> {
                 if reads > READ_LIMIT {
                     return Err(Error::Timeout);
                 }
-                if chip.mmr_read_checked(TABLE[2])? & 0x80 == 0 {
+                if chip.mmr_read_checked(TABLE[2])? & TABLE_STATUS == 0 {
                     budget = 100;
                     continue;
                 }
                 n += 1;
-                if n == 30 {
+                if n == ROUND_READS {
+                    // The shared budget (module docs): a clear read sets it
+                    // to 100, else each round adds 2 until it reaches 10.
                     if budget >= 10 {
                         break;
                     }
@@ -62,7 +68,7 @@ pub fn init<B: RemotePci>(chip: &mut Chip<B>, clear_table: bool) -> Result<()> {
     }
 
     chip.mmr_modify_checked(DMA_INT_STATUS, |v| v | DMA_INT_BITS)?;
-    chip.mmr_modify_checked(INT_ENABLE, |v| v | 0x100)?;
+    chip.mmr_modify_checked(INT_ENABLE, |v| v | INT_DMA)?;
     chip.mmr_modify_checked(DMA_INT_MASK, |v| v | DMA_INT_BITS)
 }
 

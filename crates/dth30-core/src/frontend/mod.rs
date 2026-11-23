@@ -170,7 +170,7 @@ impl<B: Bus> Frontend<B> {
         match self.kind {
             KitKind::Mj100 => {
                 self.tw(0x09, 0xB1)?;
-                self.bus.delay_ms(10);
+                self.bus.delay_ms(mj100::WAKE_MS);
                 self.write_seq(mj100::INIT)?;
             }
             KitKind::Mj102 => self.write_seq(mj10x::MJ102_INIT)?,
@@ -239,9 +239,9 @@ impl<B: Bus> Frontend<B> {
     /// formula only. TOSHIBA has no attenuator.
     pub fn set_attenuator(&mut self, on: bool) -> Result<()> {
         match self.kind {
-            KitKind::Mj100 => self.tw(0x95, if on { 0x03 } else { 0xFB })?,
-            KitKind::Mj102 => self.dw(0x1C, if on { 0x3A } else { 0x2A })?,
-            KitKind::Mj110 => self.dw(0x1C, if self.att_mode { 0x2E } else { 0x2A })?,
+            KitKind::Mj100 => self.tw(mj100::ATT_REG, if on { 0x03 } else { 0xFB })?,
+            KitKind::Mj102 => self.dw(demod::reg::ATT, if on { 0x3A } else { 0x2A })?,
+            KitKind::Mj110 => self.dw(demod::reg::ATT, if self.att_mode { 0x2E } else { 0x2A })?,
             KitKind::Toshiba => return Err(Error::Unsupported("the TOSHIBA kit has no attenuator".into())),
         }
         self.att = on;
@@ -296,11 +296,12 @@ impl<B: Bus> Frontend<B> {
     /// on TOSHIBA also 0xB2 bit 1.
     pub fn ews(&mut self) -> Result<bool> {
         let r81 = self.demod.read(&mut self.bus, demod::reg::FLAGS_81)?;
+        let ews81 = r81 & demod::FLAGS_81_EWS != 0;
         if self.kind != KitKind::Toshiba {
-            return Ok(r81 & 0x80 != 0);
+            return Ok(ews81);
         }
         let rb2 = self.demod.read(&mut self.bus, demod::reg::FLAGS_B2)?;
-        Ok(r81 & 0x80 != 0 && rb2 & 0x02 != 0)
+        Ok(ews81 && rb2 & demod::FLAGS_B2_EWS != 0)
     }
 
     /// Lock, C/N, BER, level and flags in one go.
@@ -370,7 +371,7 @@ impl<B: Bus> Frontend<B> {
         let r94 = self.demod.read(&mut self.bus, demod::reg::STATUS_94)?;
         match att::vhf_toggle(self.freq, r94, self.vhf_a8) {
             Some(v) => {
-                self.tw(0xA8, v)?;
+                self.tw(att::VHF_REG, v)?;
                 self.vhf_a8 = v;
                 Ok(Some(v))
             }
@@ -423,12 +424,14 @@ impl<B: Bus> Frontend<B> {
 
     fn write_mode(&mut self, mode: u32) -> Result<()> {
         match self.kind {
-            KitKind::Mj100 | KitKind::Mj102 => self.dw(0x52, if mode == 1 || mode == 2 { 0x62 } else { 0x20 }),
+            KitKind::Mj100 | KitKind::Mj102 => {
+                self.dw(demod::reg::MODE_SONY, if mode == 1 || mode == 2 { 0x62 } else { 0x20 })
+            }
             KitKind::Mj110 => Ok(()),
             KitKind::Toshiba => match mode {
                 1 => Err(Error::Unsupported("mode 1 on the TOSHIBA kit".into())),
-                2 => self.dw(0x02, 0x80),
-                _ => self.dw(0x02, 0x00),
+                2 => self.dw(demod::reg::MODE_TOSHIBA, 0x80),
+                _ => self.dw(demod::reg::MODE_TOSHIBA, 0x00),
             },
         }
     }

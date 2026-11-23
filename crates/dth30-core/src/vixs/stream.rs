@@ -30,7 +30,12 @@ use super::cmd::{self, func};
 use crate::bus::RemotePci;
 use crate::model::KitKind;
 use crate::net2280::{Layout, reg};
+use crate::psi::SYNC_BYTE;
 use crate::{Error, Result};
+
+/// NET2280 EP_STAT bits and the EP_AVAIL register, which
+/// [`flush_endpoint_fifo`] uses.
+pub use crate::net2280::reg::{EP_AVAIL, EP_STAT_FIFO_EMPTY, EP_STAT_FIFO_FLUSH};
 
 /// PCI addresses of the NET2280 FIFOs the payloads point the firmware at.
 pub const FIFO_B: u32 = 0x3004_0000;
@@ -61,6 +66,16 @@ pub const STREAM_HANDLE_OFFSET: u32 = 0x18;
 /// Stream kinds of function 8 (payload +0x58).
 pub const STREAM_KIND_PSI: u32 = 1;
 pub const STREAM_KIND_SECURED_TS: u32 = 5;
+/// Payload offsets of the stream kind (function 8), the generic open's mode
+/// and the Program open's secured mode.
+const STREAM_KIND_OFFSET: usize = 0x058;
+const GENERIC_MODE_OFFSET: usize = 0x008;
+const SECURED_MODE_OFFSET: usize = 0xF2C;
+
+/// PMT stream types the Program open picks: MPEG-1 and MPEG-2 video, AAC.
+const STREAM_TYPE_MPEG1_VIDEO: u8 = 0x01;
+const STREAM_TYPE_MPEG2_VIDEO: u8 = 0x02;
+const STREAM_TYPE_AAC: u8 = 0x0F;
 
 /// Most elementary streams a Program open carries.
 pub const MAX_ES: usize = 24;
@@ -237,8 +252,8 @@ pub fn build_tsd_config() -> [u8; TSD_CONFIG_LEN] {
 /// back at +0x00.
 pub fn build_open_generic(cookie: u32, mode: CasMode) -> [u8; GENERIC_OPEN_LEN] {
     let mut b = [0u8; GENERIC_OPEN_LEN];
-    put(&mut b, 0x000, cookie);
-    put(&mut b, 0x008, mode.generic_mode());
+    put(&mut b, GENERIC_HANDLE_OFFSET as usize, cookie);
+    put(&mut b, GENERIC_MODE_OFFSET, mode.generic_mode());
     put_table(&mut b, 0x00C, GENERIC_BLOCK, |_| FIFO_B); // generic out
     put_table(&mut b, 0x114, GENERIC_VIDEO_IN, |i| fake_host_phys(0, i)); // input to the firmware
     put_table(&mut b, 0x21C, GENERIC_BLOCK, |_| FIFO_B); // data out
@@ -253,7 +268,7 @@ pub fn build_close_generic(open: &[u8; GENERIC_OPEN_LEN], phys: u32) -> [u8; GEN
     let mut b = *open;
     put(&mut b, 0x000, phys);
     put(&mut b, 0x004, 0);
-    put(&mut b, 0x008, 0);
+    put(&mut b, GENERIC_MODE_OFFSET, 0);
     b
 }
 
@@ -262,8 +277,8 @@ pub fn build_close_generic(open: &[u8; GENERIC_OPEN_LEN], phys: u32) -> [u8; GEN
 pub fn build_open_psi(cookie: u32, ts_port: u32) -> [u8; OPEN_LEN] {
     let mut b = [0u8; OPEN_LEN];
     put(&mut b, 0x008, ts_port);
-    put(&mut b, 0x018, cookie);
-    put(&mut b, 0x058, STREAM_KIND_PSI);
+    put(&mut b, STREAM_HANDLE_OFFSET as usize, cookie);
+    put(&mut b, STREAM_KIND_OFFSET, STREAM_KIND_PSI);
     put(&mut b, 0x060, 0x0010_0000); // output flags
     put(&mut b, 0x07C, 0xFFFF); // PID filter: all (inferred)
     put(&mut b, 0x080, 0x1010); // meaning unknown
@@ -290,14 +305,16 @@ pub const NO_ECM_PID: u16 = 0x1FFF;
 /// The first MPEG-1/2 video stream's PID (stream type 1 or 2), else
 /// [`NO_VIDEO_PID`], as the vendor's filter picks it.
 pub fn video_pid(es: &[EsEntry]) -> u16 {
-    es.iter().find(|e| matches!(e.stream_type, 1 | 2)).map_or(NO_VIDEO_PID, |e| e.pid)
+    es.iter()
+        .find(|e| matches!(e.stream_type, STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO))
+        .map_or(NO_VIDEO_PID, |e| e.pid)
 }
 
 /// The first [`MAX_AAC`] AAC streams' PIDs (stream type 0x0F), 0 where
 /// there is none.
 pub fn aac_pids(es: &[EsEntry]) -> [u16; MAX_AAC] {
     let mut a = [0; MAX_AAC];
-    for (slot, e) in a.iter_mut().zip(es.iter().filter(|e| e.stream_type == 0x0F)) {
+    for (slot, e) in a.iter_mut().zip(es.iter().filter(|e| e.stream_type == STREAM_TYPE_AAC)) {
         *slot = e.pid;
     }
     a
@@ -369,10 +386,10 @@ pub fn build_open_program(cookie: u32, p: &ProgramParams) -> [u8; OPEN_LEN] {
 
     put(&mut b, 0x008, p.ts_port); // video input port
     put(&mut b, 0x010, p.ts_port); // audio input port
-    put(&mut b, 0x018, cookie);
+    put(&mut b, STREAM_HANDLE_OFFSET as usize, cookie);
     put(&mut b, 0x020, p.cas_phys);
     put(&mut b, 0x028, p.raw_phys);
-    put(&mut b, 0x058, STREAM_KIND_SECURED_TS);
+    put(&mut b, STREAM_KIND_OFFSET, STREAM_KIND_SECURED_TS);
     put(&mut b, 0x060, 0x0010_0060); // output flags: TS video, TS audio
     put(&mut b, 0x068, 0x8000_0002);
     put(&mut b, 0x07C, video);
@@ -404,7 +421,7 @@ pub fn build_open_program(cookie: u32, p: &ProgramParams) -> [u8; OPEN_LEN] {
     put(&mut b, 0xF0C, 0x1100);
     put(&mut b, 0xF14, 1);
     put(&mut b, 0xF24, sid);
-    put(&mut b, 0xF2C, p.mode.secured_mode());
+    put(&mut b, SECURED_MODE_OFFSET, p.mode.secured_mode());
     put(&mut b, 0x1068, es.len() as u32);
     for (i, e) in es.iter().enumerate() {
         put(&mut b, 0x106C + 4 * i, u32::from(e.pid));
@@ -507,22 +524,15 @@ pub fn parse_generic_block(b: &[u8]) -> Option<(GenericBlockHeader, &[u8])> {
 /// stream (sync byte, then "CDXM" at bytes 7..11), which a TS consumer
 /// should drop (§9).
 pub fn is_cdxm_packet(p: &[u8]) -> bool {
-    p.len() >= 11 && p[0] == 0x47 && &p[7..11] == b"CDXM"
+    p.len() >= 11 && p[0] == SYNC_BYTE && &p[7..11] == b"CDXM"
 }
 
 // ---- NET2280 FIFO flush ----
 
-/// EP_STAT bits (NET2280): FIFO flush (write 1) and FIFO empty.
-pub const EP_STAT_FIFO_FLUSH: u32 = 1 << 9;
-pub const EP_STAT_FIFO_EMPTY: u32 = 1 << 10;
-/// EP_AVAIL after EP_STAT in an endpoint block. For an IN endpoint (all the
-/// stream endpoints) it is the free space in the FIFO, not the byte count.
-pub const EP_AVAIL: u16 = 0x10;
-
 /// The register block of the programmable endpoint serving `ep`.
 fn ep_block(layout: &Layout, ep: u8) -> Result<u16> {
     let i = layout.endpoints.iter().position(|&e| e == ep).ok_or(Error::Protocol("not a NET2280 FIFO endpoint"))?;
-    Ok(reg::EP_BASE + 0x20 * (i as u16 + 1))
+    Ok(reg::EP_BASE + reg::EP_STRIDE * (i as u16 + 1))
 }
 
 /// Empty the NET2280 FIFO of endpoint `ep` after its IN transfer was

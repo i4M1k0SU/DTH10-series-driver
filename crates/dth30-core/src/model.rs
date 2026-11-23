@@ -4,6 +4,8 @@
 //! carries is only known from the ViXS board-ID register (see
 //! [`crate::vixs`]).
 
+use crate::vixs::mmr;
+
 /// BUFFALO's USB vendor ID.
 pub const VENDOR_ID: u16 = 0x0411;
 
@@ -53,7 +55,7 @@ pub fn board_id(mmr_478: u32) -> u8 {
 
 /// Whether MMR 0x478 names an XCode2 ("Camino") chip.
 pub fn is_camino(mmr_478: u32) -> bool {
-    mmr_478 & 0xF3FF_0000 == 0x0300_0000
+    mmr_478 & mmr::CHIP_MASK == mmr::CAMINO
 }
 
 /// The demodulator + tuner kit on a board, as the vendor's user-mode filter

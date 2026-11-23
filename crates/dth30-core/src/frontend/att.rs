@@ -6,6 +6,8 @@
 
 use crate::model::KitKind;
 
+use super::demod;
+
 /// How often the vendor samples the AGC for the attenuator control (ms).
 pub const ATT_POLL_MS: u32 = 200;
 /// Samples averaged per attenuator decision.
@@ -87,6 +89,8 @@ impl AttControl {
 
 /// The MJ100 VHF toggle runs below this frequency (inclusive) (Hz).
 pub const VHF_TOGGLE_MAX_HZ: u32 = 170_000_000;
+/// The MJ100 tuner register the toggle writes.
+pub(super) const VHF_REG: u8 = 0xA8;
 /// The two values the toggle alternates tuner register 0xA8 between; the
 /// first is the one the init table writes.
 pub const VHF_A8: [u8; 2] = [0xD2, 0xA2];
@@ -97,7 +101,7 @@ pub const VHF_A8: [u8; 2] = [0xD2, 0xA2];
 /// or filter setting, inferred).
 pub fn vhf_toggle(freq_hz: Option<u32>, reg94: u8, a8: u8) -> Option<u8> {
     match freq_hz {
-        Some(f) if f <= VHF_TOGGLE_MAX_HZ && reg94 & 0x80 != 0 => {
+        Some(f) if f <= VHF_TOGGLE_MAX_HZ && reg94 & demod::STATUS_94_VHF != 0 => {
             Some(if a8 == VHF_A8[0] { VHF_A8[1] } else { VHF_A8[0] })
         }
         _ => None,

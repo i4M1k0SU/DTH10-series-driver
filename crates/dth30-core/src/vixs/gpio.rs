@@ -9,12 +9,14 @@ use super::mmr::{BOARD_ID, Chip};
 use crate::Result;
 use crate::bus::RemotePci;
 
-/// Output data, direction and function/input registers.
+/// Output data, direction and input registers.
 pub const DATA: u32 = 0x1088;
 pub const DIR: u32 = 0x108C;
-pub const FUNC: u32 = 0x1090;
+pub const IN: u32 = 0x1090;
 /// PCI AD-to-GPIO remapping (only for board IDs with bit 27 set).
 pub const REMAP: [u32; 2] = [0x498, 0x49C];
+/// Board-ID bit 27: the board needs the [`REMAP`] registers set.
+const BOARD_ID_REMAP: u32 = 1 << 27;
 
 /// Application states, as the vendor's "app status" bits.
 pub mod app_status {
@@ -48,14 +50,14 @@ pub fn idle_bit(board: u8) -> Option<u32> {
 
 /// The vendor's GPIO initialisation.
 pub fn init<B: RemotePci>(chip: &mut Chip<B>) -> Result<()> {
-    if chip.mmr_read_checked(BOARD_ID)? & 0x0800_0000 != 0 {
+    if chip.mmr_read_checked(BOARD_ID)? & BOARD_ID_REMAP != 0 {
         for r in REMAP {
             chip.mmr_write_checked(r, 0xFFFF_FFFF)?;
         }
     }
-    let v = chip.mmr_read_checked(FUNC)?;
-    chip.mmr_write(FUNC, v | 0x2_0000)?;
-    chip.mmr_read_checked(FUNC)?;
+    let v = chip.mmr_read_checked(IN)?;
+    chip.mmr_write(IN, v | 0x2_0000)?;
+    chip.mmr_read_checked(IN)?;
     let (dir, data) = board_gpio(chip.board());
     let v = chip.mmr_read_checked(DIR)?;
     chip.mmr_write(DIR, v | dir)?;

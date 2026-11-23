@@ -13,14 +13,20 @@
 use crate::vixs::stream::{self, EsEntry};
 use crate::{Error, Result};
 
-/// PID of the PAT.
-pub const PAT_PID: u16 = 0x0000;
+pub use dth_common::ts::{PAT_PID, PAT_TABLE_ID, PMT_TABLE_ID, SCRAMBLING_CONTROL, SYNC_BYTE};
 /// TS packet sizes the Raw stream may carry (204 on TOSHIBA kits, see
 /// [`crate::model::KitKind::ts_packet_204`]).
-pub const PACKET_188: usize = 188;
+pub const PACKET_188: usize = dth_common::ts::TS_PACKET;
 pub const PACKET_204: usize = 204;
 /// Descriptor tag of the CA descriptor.
-pub const CA_DESCRIPTOR: u8 = 0x09;
+pub const CA_DESCRIPTOR: u8 = dth_common::ts::CA_DESCRIPTOR_TAG;
+
+/// Shortest long-form section: 8 header bytes and the CRC.
+const MIN_LONG_SECTION: usize = 12;
+/// Sync bytes that must line up to detect the packet size, and the most
+/// that are checked.
+const SYNC_NEEDED: usize = 3;
+const SYNC_CHECKED: usize = 4;
 
 /// CRC-32 of MPEG-2 sections (polynomial 0x04C11DB7, no reflection, initial
 /// value all ones). A section including its CRC sums to 0.
@@ -38,7 +44,7 @@ pub fn crc32_mpeg2(data: &[u8]) -> u32 {
 /// Check the long-form section header of `table_id` and the CRC; return the
 /// section without the CRC.
 fn long_section(sec: &[u8], table_id: u8) -> Result<&[u8]> {
-    if sec.len() < 12 {
+    if sec.len() < MIN_LONG_SECTION {
         return Err(Error::Protocol("PSI section too short"));
     }
     if sec[0] != table_id {
@@ -48,7 +54,7 @@ fn long_section(sec: &[u8], table_id: u8) -> Result<&[u8]> {
         return Err(Error::Protocol("PSI section without syntax indicator"));
     }
     let len = 3 + (usize::from(sec[1] & 0x0F) << 8 | usize::from(sec[2]));
-    if len < 12 || len > sec.len() {
+    if len < MIN_LONG_SECTION || len > sec.len() {
         return Err(Error::Protocol("PSI section length out of range"));
     }
     if crc32_mpeg2(&sec[..len]) != 0 {
@@ -74,7 +80,7 @@ pub struct PatEntry {
 
 /// The entries of a PAT section (table ID 0x00, CRC checked).
 pub fn parse_pat(sec: &[u8]) -> Result<Vec<PatEntry>> {
-    let s = long_section(sec, 0x00)?;
+    let s = long_section(sec, PAT_TABLE_ID)?;
     let (entries, _) = s[8..].as_chunks::<4>();
     Ok(entries
         .iter()
@@ -132,7 +138,7 @@ pub struct Pmt {
 
 /// Parse a PMT section (table ID 0x02, CRC checked).
 pub fn parse_pmt(sec: &[u8]) -> Result<Pmt> {
-    let s = long_section(sec, 0x02)?;
+    let s = long_section(sec, PMT_TABLE_ID)?;
     let program_number = u16::from_be_bytes([s[3], s[4]]);
     let pcr_pid = pid13(s[8], s[9]);
     let pil = len12(s[10], s[11]);
@@ -230,8 +236,8 @@ impl ProgramSpec {
 pub fn detect_packet_size(data: &[u8]) -> Option<(usize, usize)> {
     for size in [PACKET_188, PACKET_204] {
         for off in 0..size {
-            let n = data.len().saturating_sub(off).div_ceil(size).min(4);
-            if n >= 3 && (0..n).all(|i| data[off + i * size] == 0x47) {
+            let n = data.len().saturating_sub(off).div_ceil(size).min(SYNC_CHECKED);
+            if n >= SYNC_NEEDED && (0..n).all(|i| data[off + i * size] == SYNC_BYTE) {
                 return Some((off, size));
             }
         }
@@ -268,13 +274,15 @@ impl SectionCollector {
     /// gap drops the partial section.
     pub fn push(&mut self, pkt: &[u8]) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        if pkt.len() < PACKET_188 || pkt[0] != 0x47 || pid13(pkt[1], pkt[2]) != self.pid {
+        if pkt.len() < PACKET_188 || pkt[0] != SYNC_BYTE || pid13(pkt[1], pkt[2]) != self.pid {
             return out;
         }
+        // Transport error indicator, scrambling control.
         if pkt[1] & 0x80 != 0 || pkt[3] & 0xC0 != 0 {
             self.reset();
             return out;
         }
+        // Adaptation field control: bit 0 = payload, bit 1 = adaptation field.
         let afc = pkt[3] >> 4 & 3;
         if afc & 1 == 0 {
             return out;
@@ -291,6 +299,7 @@ impl SectionCollector {
             return out;
         }
         let payload = &pkt[start..PACKET_188];
+        // Payload unit start: a pointer field comes first.
         if pkt[1] & 0x40 != 0 {
             let ptr = usize::from(payload[0]);
             if 1 + ptr > payload.len() {
@@ -372,7 +381,7 @@ impl ProgramScanner {
                     }
                     None => {
                         // Keep only what a later detection can still use.
-                        let keep = 4 * PACKET_204;
+                        let keep = SYNC_CHECKED * PACKET_204;
                         if self.carry.len() > keep {
                             self.carry.drain(..self.carry.len() - keep);
                         }
@@ -381,7 +390,7 @@ impl ProgramScanner {
                 },
             };
             let mut pos = 0;
-            while pos + size <= self.carry.len() && self.carry[pos] == 0x47 {
+            while pos + size <= self.carry.len() && self.carry[pos] == SYNC_BYTE {
                 let pkt = self.carry[pos..pos + size].to_vec();
                 pos += size;
                 if let Some(p) = self.packet_in(&pkt) {

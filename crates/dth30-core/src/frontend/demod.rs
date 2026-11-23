@@ -22,6 +22,12 @@ use super::regs::{self, Bus};
 pub mod reg {
     /// Resynchronisation after a tune (0x40 on SONY kits, 0x50 on TOSHIBA).
     pub const RESYNC: u8 = 0x01;
+    /// TOSHIBA: the mode register (0x80 for mode 2, else 0x00; meaning
+    /// unknown).
+    pub const MODE_TOSHIBA: u8 = 0x02;
+    /// MJ102/MJ110: the attenuator switch (MJ102 0x3A on / 0x2A off, MJ110
+    /// 0x2E / 0x2A by `ATTMode`).
+    pub const ATT: u8 = 0x1C;
     /// TS output control pair: [`super::TS_OFF`] / [`super::TS_ON`].
     pub const TS_OUT: u8 = 0x1E;
     /// Lock state: bits 3 and 5 clear when locked.
@@ -36,6 +42,9 @@ pub mod reg {
     pub const STATUS_94: u8 = 0x94;
     /// BER error counts and periods from here.
     pub const BER: u8 = 0x9D;
+    /// MJ100/MJ102: the mode register (0x62 for modes 1 and 2, else 0x20;
+    /// meaning unknown).
+    pub const MODE_SONY: u8 = 0x52;
     /// TS-sync state in the low nibble (8 or more = locked).
     pub const SYNC_B0: u8 = 0xB0;
     /// TOSHIBA: bit 1 joins 0x81 bit 7 for the emergency-warning flag.
@@ -52,9 +61,23 @@ pub const TS_ON: [u8; 2] = [0x80, 0x08];
 /// Bits per 204-byte packet; the BER period counts packets.
 pub const BER_PERIOD_BITS: u32 = 1632;
 
+/// [`reg::STATUS_80`] bits 3 and 5, both clear when locked.
+const STATUS_80_UNLOCKED: u8 = 0x28;
+/// The TS-sync state field of [`reg::SYNC_B0`] (low nibble).
+const SYNC_B0_STATE: u8 = 0x0F;
+/// The TS-sync state from which the demodulator counts as locked.
+const SYNC_B0_LOCKED: u8 = 8;
+/// [`reg::FLAGS_81`] bit 7, read as the emergency-warning flag (inferred).
+pub(super) const FLAGS_81_EWS: u8 = 0x80;
+/// [`reg::FLAGS_B2`] bit 1, which the TOSHIBA kit also requires for the
+/// emergency-warning flag.
+pub(super) const FLAGS_B2_EWS: u8 = 0x02;
+/// [`reg::STATUS_94`] bit 7, which lets the MJ100 VHF toggle run.
+pub(super) const STATUS_94_VHF: u8 = 0x80;
+
 /// Whether the demodulator is locked: `(0x80 & 0x28) == 0 && (0xB0 & 0x0F) >= 8`.
 pub fn is_locked(r80: u8, rb0: u8) -> bool {
-    r80 & 0x28 == 0 && rb0 & 0x0F >= 8
+    r80 & STATUS_80_UNLOCKED == 0 && rb0 & SYNC_B0_STATE >= SYNC_B0_LOCKED
 }
 
 /// Which C/N conversion a kit uses.
@@ -191,7 +214,7 @@ impl Demod {
 
     /// Error counts and periods of layers A/B/C.
     pub fn ber_counts<B: Bus + ?Sized>(&self, bus: &mut B, periods: BerPeriods) -> Result<[BerCount; 3]> {
-        let mut b = [0u8; 15];
+        let mut b = [0u8; BerPeriods::PerLayer.block_len()];
         let buf = &mut b[..periods.block_len()];
         regs::read_regs(bus, self.addr, reg::BER, buf)?;
         Ok(parse_ber(buf, periods))

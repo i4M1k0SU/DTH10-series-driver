@@ -17,8 +17,8 @@
 use std::time::{Duration, Instant};
 
 use super::Vixs;
-use super::mips::{self, M2H_DONE_FUNC, M2H_DONE_SLOT, M2H_INT_ENABLE, M2H_INT_STATUS};
-use super::mmr::{Chip, INT_ENABLE, INT_STATUS, TIMER};
+use super::mips::{self, M2H_DONE_FUNC, M2H_DONE_SLOT, M2H_INT_DONE, M2H_INT_ENABLE, M2H_INT_MSG, M2H_INT_STATUS};
+use super::mmr::{Chip, INT_DMA, INT_ENABLE, INT_I2C_GPIO, INT_MIPS, INT_STATUS, TIMER};
 use crate::bus::RemotePci;
 use crate::net2280::{self, IRQ_PCI_INTA};
 use crate::{Error, Result};
@@ -27,6 +27,8 @@ use crate::{Error, Result};
 pub const SLOT_SIZE: usize = 0x23C0;
 /// Most slots the vendor uses.
 pub const MAX_SLOTS: u32 = 41;
+/// Fewest slots a ring may have.
+const MIN_SLOTS: u32 = 2;
 /// Offset of the payload in a slot, and its largest size.
 pub const PAYLOAD_OFFSET: usize = 0x24;
 pub const MAX_PAYLOAD: usize = SLOT_SIZE - PAYLOAD_OFFSET;
@@ -34,6 +36,12 @@ pub const MAX_PAYLOAD: usize = SLOT_SIZE - PAYLOAD_OFFSET;
 pub const RESULT_OFFSET: u32 = 0x10;
 /// Result value of a successful command.
 pub const RESULT_OK: u32 = 1;
+/// Result value of a failed command, and the host's answer to a message it
+/// did not handle.
+pub const RESULT_FAILED: u32 = 2;
+/// Result value of an unsupported function, and the host's answer to a
+/// message ID at or above [`M2H_ID_LIMIT`].
+pub const RESULT_UNSUPPORTED: u32 = 5;
 
 /// Function IDs seen in the vendor driver.
 pub mod func {
@@ -65,10 +73,17 @@ pub mod m2h {
     pub const INPUT_DONE: u32 = 0x0F;
 }
 
-/// Message IDs at or above this are refused with status 5.
+/// Message IDs at or above this are refused with [`RESULT_UNSUPPORTED`].
 pub const M2H_ID_LIMIT: u32 = 0x1C;
 /// Words of a firmware message.
 pub const M2H_WORDS: usize = 9;
+/// The words of a message that hold its ID again and the FB address of its
+/// descriptor.
+const M2H_WORD_ID: usize = 3;
+const M2H_WORD_DESC: usize = 5;
+/// The stream state ([`m2h::STREAM_STATUS`], descriptor +8) that means ready
+/// to close.
+const STREAM_READY_TO_CLOSE: u32 = 6;
 /// Heartbeat timer advance after which the vendor reports a hang.
 pub const HANG_TICKS: u32 = 0x1C2;
 
@@ -90,7 +105,7 @@ impl CmdRing {
     /// slots; fewer than two is an error, as in the vendor driver.
     pub fn new(fb_base: u32, size: u32) -> Result<Self> {
         let n = size / SLOT_SIZE as u32;
-        if n < 2 {
+        if n < MIN_SLOTS {
             return Err(Error::Protocol("command list too small"));
         }
         Ok(Self { fb_base, slots: n.min(MAX_SLOTS), next: 0, reserved: 0 })
@@ -151,12 +166,12 @@ pub fn build_slot(index: u32, slot_fb: u32, func: u32, payload: &[u8]) -> Result
     }
     let mut s = vec![0u8; SLOT_SIZE];
     let mut put = |off: usize, v: u32| s[off..off + 4].copy_from_slice(&v.to_le_bytes());
-    put(0x08, 1);
+    put(0x08, 1); // 1 = a command (2 marks a firmware message)
     put(0x0C, func);
-    put(0x10, 0);
+    put(RESULT_OFFSET as usize, 0);
     put(0x14, if payload.is_empty() { 0 } else { slot_fb + PAYLOAD_OFFSET as u32 });
     put(0x18, 0);
-    put(0x1C, index);
+    put(0x1C, index); // not read by the firmware
     s[PAYLOAD_OFFSET..PAYLOAD_OFFSET + payload.len()].copy_from_slice(payload);
     Ok(s)
 }
@@ -319,9 +334,9 @@ impl<B: RemotePci> Vixs<B> {
             if s == 0 {
                 return Ok(());
             }
-            if s & 0x80 != 0 {
+            if s & INT_I2C_GPIO != 0 {
                 let st = self.chip.mmr_read_checked(super::i2c::STATUS)?;
-                if st & 0x0030_00C0 != 0 {
+                if st & super::i2c::IRQ_BITS != 0 {
                     // No I2C transaction is in flight outside `i2c::transaction`;
                     // acknowledge as the vendor's handler does.
                     for m in super::i2c::DONE_MASK {
@@ -333,10 +348,10 @@ impl<B: RemotePci> Vixs<B> {
                     log::debug!("ViXS GPIO interrupt {st:#x} not handled");
                 }
             }
-            if s & 0x100 != 0 {
+            if s & INT_DMA != 0 {
                 super::dma::isr(&mut self.chip)?;
             }
-            if s & 0x200 != 0 {
+            if s & INT_MIPS != 0 {
                 self.mips_isr()?;
             }
         }
@@ -352,12 +367,12 @@ impl<B: RemotePci> Vixs<B> {
             return Ok(());
         }
         let s = self.chip.mmr_read_checked(M2H_INT_STATUS)? & self.chip.mmr_read_checked(M2H_INT_ENABLE)?;
-        if s & 2 != 0 {
+        if s & M2H_INT_DONE != 0 {
             let done = self.chip.mmr_read_checked(M2H_DONE_FUNC)?;
             if let Some(p) = self.pending
                 && p.func == done
             {
-                self.chip.mmr_write(M2H_INT_STATUS, 2)?;
+                self.chip.mmr_write(M2H_INT_STATUS, M2H_INT_DONE)?;
                 let slot = self.chip.mmr_read(M2H_DONE_SLOT)?;
                 if slot == p.slot_fb {
                     let status = self.chip.fb_read(p.slot_fb + RESULT_OFFSET)?;
@@ -368,8 +383,8 @@ impl<B: RemotePci> Vixs<B> {
                 log::trace!("ViXS command {} in slot {} done", p.func, p.slot);
             }
         }
-        if s & 1 != 0 {
-            self.chip.mmr_write(M2H_INT_STATUS, 1)?;
+        if s & M2H_INT_MSG != 0 {
+            self.chip.mmr_write(M2H_INT_STATUS, M2H_INT_MSG)?;
             self.handle_m2h()?;
         }
         Ok(())
@@ -388,10 +403,10 @@ impl<B: RemotePci> Vixs<B> {
         }
         let msg = M2hMessage { id, addr, words };
         if id >= M2H_ID_LIMIT {
-            self.chip.fb_write(addr + RESULT_OFFSET, 5)?;
+            self.chip.fb_write(addr + RESULT_OFFSET, RESULT_UNSUPPORTED)?;
             return mips::ack_m2h(&mut self.chip);
         }
-        if words[3] == id {
+        if words[M2H_WORD_ID] == id {
             if let Some(result) = self.stream_message(&msg)? {
                 self.chip.fb_write(addr + RESULT_OFFSET, result)?;
                 return mips::ack_m2h(&mut self.chip);
@@ -403,7 +418,7 @@ impl<B: RemotePci> Vixs<B> {
             }
         }
         log::debug!("ViXS message {id:#x} not handled");
-        self.chip.fb_write(addr + RESULT_OFFSET, 2)?;
+        self.chip.fb_write(addr + RESULT_OFFSET, RESULT_FAILED)?;
         mips::ack_m2h(&mut self.chip)
     }
 
@@ -420,11 +435,11 @@ impl<B: RemotePci> Vixs<B> {
         if ![m2h::DATA_READY, m2h::STREAM_STATUS, m2h::INPUT_DONE].contains(&msg.id) {
             return Ok(None);
         }
-        let desc = msg.words[5];
+        let desc = msg.words[M2H_WORD_DESC];
         let host = self.chip.fb_read(desc)?;
         let Some(s) = self.streams.iter().find(|s| s.cookie == host) else {
             log::warn!("ViXS message {:#x} for unknown stream {host:#x}", msg.id);
-            return Ok(Some(2));
+            return Ok(Some(RESULT_FAILED));
         };
         self.chip.fb_write(desc, s.phys)?;
         if msg.id != m2h::STREAM_STATUS {
@@ -433,7 +448,7 @@ impl<B: RemotePci> Vixs<B> {
         }
         let state = self.chip.fb_read(desc + 8)?;
         log::debug!("ViXS stream {host:#x} status {state}");
-        Ok(Some(if state == 6 { RESULT_OK } else { 2 }))
+        Ok(Some(if state == STREAM_READY_TO_CLOSE { RESULT_OK } else { RESULT_FAILED }))
     }
 
     /// Install the handler for firmware messages.
@@ -444,7 +459,11 @@ impl<B: RemotePci> Vixs<B> {
     /// Check the firmware heartbeat (FB 0x10) against the chip timer, as the
     /// vendor's timer thread does. A change marks the firmware alive.
     pub fn heartbeat(&mut self) -> Result<Heartbeat> {
-        let off = if self.chip.board_id & super::mmr::CHIP_MASK != 0 { mips::fb::HEARTBEAT } else { 0x500 };
+        let off = if self.chip.board_id & super::mmr::CHIP_MASK != 0 {
+            mips::fb::HEARTBEAT
+        } else {
+            mips::fb::HEARTBEAT_OTHER
+        };
         let hb = self.chip.fb_read_checked(off)?;
         let now = self.chip.mmr_read_checked(TIMER)?;
         if self.hb.last == Some(hb) {
