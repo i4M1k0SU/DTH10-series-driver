@@ -221,7 +221,7 @@ struct TuneArgs {
     /// UHF physical channel 13..62 (27 or 27ch), or the centre frequency in Hz (e.g. 557142857).
     #[arg(value_parser = ter_channel)]
     channel: Channel,
-    /// How long to wait for lock [ms].
+    /// How long to wait for lock, in ms.
     #[arg(long, value_name = "MS", default_value_t = 1500)]
     lock_wait: u64,
     /// Skip the device start command (wValue 0 / wIndex 0x10) after the kit Init.
@@ -255,7 +255,7 @@ struct TuneSatArgs {
     /// Select this TSID (hex, e.g. 40f1) instead of the relative TS number.
     #[arg(long, value_name = "HEX", value_parser = parse_hex16)]
     tsid: Option<u16>,
-    /// How long to wait for lock and the TMCC TS-ID table [ms].
+    /// How long to wait for lock and the TMCC TS-ID table, in ms.
     #[arg(long, value_name = "MS", default_value_t = 1500)]
     lock_wait: u64,
     /// Skip the device start command (wValue 0 / wIndex 0x10) after the kit Init.

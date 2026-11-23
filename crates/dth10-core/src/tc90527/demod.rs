@@ -102,7 +102,7 @@ fn switches_1f(driver: VendorDriver, kit_name: &str) -> bool {
     driver == VendorDriver::Series || kit_name == "TC90527_FC5500"
 }
 
-/// Wake (Open): `1F |= 0C` (see [`switches_1f`]; else 0x1F is written back
+/// Wake (Open): `1F |= 0C` (see `switches_1f`; else 0x1F is written back
 /// as read), `04 &= D7`, 2 ms, `03 <- 00`, immediate writes; the first
 /// failure ends it.
 pub fn wake<T: UsbControl>(dev: &mut Device<T>, addr: u8, driver: VendorDriver, kit_name: &str) -> Result<()> {
@@ -115,7 +115,7 @@ pub fn wake<T: UsbControl>(dev: &mut Device<T>, addr: u8, driver: VendorDriver, 
 }
 
 /// Standby (end of Init, Close): TS stopped, `03 <- 10`, `04 |= 28`,
-/// `1F &= F3` (see [`switches_1f`]; else 0x1F is written back as read),
+/// `1F &= F3` (see `switches_1f`; else 0x1F is written back as read),
 /// immediate writes; the first failure ends it.
 pub fn standby<T: UsbControl>(dev: &mut Device<T>, addr: u8, driver: VendorDriver, kit_name: &str) -> Result<()> {
     set_ts_pins(dev, addr, 1)?;

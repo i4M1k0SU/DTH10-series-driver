@@ -10,7 +10,7 @@
 //!
 //! Every kit offers the same operations (init, open / close, tune to a BS/CS
 //! IF, TSID selection, signal status, antenna supply, booster); the bridge
-//! (`dev`) is shared by all of them. A new kit goes into [`Which`] (the
+//! (`dev`) is shared by all of them. A new kit goes into `Which` (the
 //! table above), the enum and the `each!` dispatch.
 
 use crate::device::Device;

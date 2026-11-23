@@ -35,7 +35,7 @@ type Res<T = ()> = Result<T, Box<dyn Error>>;
 )]
 struct Cli {
     /// Select the device by its unit name as `list` shows it (the USB serial number of a device
-    /// that has one, else DTH30-<product ID>-<bus>-<ports>; default: the first one found).
+    /// that has one, else `DTH30-<product ID>-<bus>-<ports>`; default: the first one found).
     #[arg(long, global = true, help_heading = "Global options", value_name = "UNIT")]
     serial: Option<String>,
     /// -v = info, -vv = debug, -vvv = trace (default: warn; RUST_LOG overrides). Logs go to stderr.
