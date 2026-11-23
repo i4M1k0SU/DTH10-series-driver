@@ -25,7 +25,7 @@ use std::thread::sleep;
 
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
-use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TuneRequest, ts_pins};
+use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TsPins, TuneRequest};
 use crate::lj101::Tc90517Sat;
 use crate::protocol::UsbControl;
 use crate::tc90517::{Tc90517, TerVariant};
@@ -202,7 +202,7 @@ impl<T: UsbControl> Sharp8011SatKit<T> {
 
     /// Sleep: TS output stopped, `0x17 <- 1`.
     fn sleep(&mut self) -> Result<()> {
-        self.demod.set_ts_pins(&mut self.dev, ts_pins::STOPPED)?;
+        self.demod.set_ts_pins(&mut self.dev, TsPins::Stopped)?;
         self.demod.sleep(&mut self.dev)
     }
 
@@ -231,7 +231,7 @@ impl<T: UsbControl> Sharp8011SatKit<T> {
                 self.dev.power_up(&self.desc)?;
                 demod::configure_sat(&mut self.dev, self.demod.addr, &self.desc)?;
             } else {
-                if let Err(e) = self.demod.set_ts_pins(&mut self.dev, ts_pins::OUTPUT) {
+                if let Err(e) = self.demod.set_ts_pins(&mut self.dev, TsPins::Output) {
                     log::debug!("SHARP_8011 satellite Open, TS pins: {e}");
                 }
                 self.demod.wake(&mut self.dev)?;
@@ -266,13 +266,13 @@ impl<T: UsbControl> Sharp8011SatKit<T> {
         if !self.is_open() {
             return Err(Error::Protocol("kit is not open"));
         }
-        self.demod.set_ts_pins(&mut self.dev, ts_pins::STOPPED)?;
+        self.demod.set_ts_pins(&mut self.dev, TsPins::Stopped)?;
         self.tuner.set_frequency(&mut self.dev, if_hz)?;
         sleep(SAT_PLL_SETTLE);
         let r = self.demod.restart(&mut self.dev);
         sleep(SAT_RESTART_SETTLE);
         r?;
-        self.demod.set_ts_pins(&mut self.dev, ts_pins::OUTPUT)
+        self.demod.set_ts_pins(&mut self.dev, TsPins::Output)
     }
 
     /// Select the transport stream by TSID.

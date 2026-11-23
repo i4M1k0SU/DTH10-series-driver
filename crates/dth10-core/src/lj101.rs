@@ -18,7 +18,7 @@ use std::thread::sleep;
 
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
-use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, ts_pins};
+use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TsPins};
 use crate::protocol::UsbControl;
 use crate::tlv::{HW_ISDB_S, TunerDesc};
 
@@ -116,12 +116,12 @@ impl<T: UsbControl> Lj101Kit<T> {
         if !self.is_open() {
             return Err(Error::Protocol("kit is not open"));
         }
-        self.demod.set_ts_pins(&mut self.dev, ts_pins::STOPPED)?;
+        self.demod.set_ts_pins(&mut self.dev, TsPins::Stopped)?;
         self.tuner.set_frequency(&mut self.dev, self.demod.addr, if_hz)?;
         sleep(SAT_PLL_SETTLE);
         self.demod.restart(&mut self.dev)?;
         sleep(SAT_RESTART_SETTLE);
-        self.demod.set_ts_pins(&mut self.dev, ts_pins::OUTPUT)
+        self.demod.set_ts_pins(&mut self.dev, TsPins::Output)
     }
 
     /// Select the transport stream by TSID (a kit operation separate from tuning).
@@ -141,8 +141,8 @@ impl<T: UsbControl> Lj101Kit<T> {
         Ok(out)
     }
 
-    /// Diagnostic: re-run the TS pin control (0 = output, 1 = stopped).
-    pub fn ts_pins(&mut self, mode: u8) -> Result<()> {
+    /// Diagnostic: re-run the TS pin control.
+    pub fn ts_pins(&mut self, mode: TsPins) -> Result<()> {
         self.demod.set_ts_pins(&mut self.dev, mode)
     }
 

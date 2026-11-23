@@ -6,7 +6,7 @@
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::kit::{VendorDriver, ts_pins};
+use crate::kit::{TsPins, VendorDriver};
 use crate::lj101::demod::write_block;
 use crate::protocol::UsbControl;
 use crate::tc90517::demod::reg;
@@ -207,17 +207,15 @@ fn if_registers(desc: &TunerDesc) -> Result<[(u8, u8); 6]> {
     Ok([(0x31, r31), (0x32, r32), (0x34, 0x0F), (0x39, 0xAA), (0x16, r16), (0x30, r30)])
 }
 
-/// The TS pin control of both drivers (modes 0 / 1 / 2 = output / stopped /
-/// third state): `0x1D[7:2]` = 0 / 0x2A / 0x15 (bits 1:0 kept),
-/// `0x1E = (v & EF) | 20` and `0x1F = (v & 3) | A8` whatever the mode, each a
-/// read and a queued write (the next read sends it), then the batch is sent.
-/// Another mode only sends the batch.
-pub fn set_ts_pins<T: UsbControl>(dev: &mut Device<T>, addr: u8, mode: u8) -> Result<()> {
+/// The TS pin control of both drivers (output / stopped / third state):
+/// `0x1D[7:2]` = 0 / 0x2A / 0x15 (bits 1:0 kept), `0x1E = (v & EF) | 20` and
+/// `0x1F = (v & 3) | A8` whatever the mode, each a read and a queued write
+/// (the next read sends it), then the batch is sent.
+pub fn set_ts_pins<T: UsbControl>(dev: &mut Device<T>, addr: u8, mode: TsPins) -> Result<()> {
     let r1d = match mode {
-        ts_pins::OUTPUT => 0x00,
-        ts_pins::STOPPED => 0xA8,
-        ts_pins::THIRD => 0x54,
-        _ => return dev.i2c_batch_flush(),
+        TsPins::Output => 0x00,
+        TsPins::Stopped => 0xA8,
+        TsPins::Third => 0x54,
     };
     let mut v = [0u8; 1];
     dev.i2c_reg_read(addr, reg::TS_PINS_1D, &mut v)?;
@@ -367,21 +365,18 @@ mod tests {
 
     #[test]
     fn ts_pins_rewrite_0x1d_by_mode() {
-        for (mode, r1d) in [(0u8, 0x02u8), (1, 0xAA), (2, 0x56)] {
+        for (mode, r1d) in [(TsPins::Output, 0x02u8), (TsPins::Stopped, 0xAA), (TsPins::Third, 0x56)] {
             let mut dev =
                 Device::new(RegMock::with_regs(&[(0x10, 0x1D, 0xFE), (0x10, 0x1E, 0x1C), (0x10, 0x1F, 0x55)]));
             set_ts_pins(&mut dev, 0x10, mode).unwrap();
             assert_eq!(
                 dev.transport().take(),
                 vec![Op::R(0x10, 0x1D), Op::Other, Op::R(0x10, 0x1E), Op::Other, Op::R(0x10, 0x1F), Op::Other],
-                "mode {mode}"
+                "mode {mode:?}"
             );
             let t = dev.transport();
-            assert_eq!((t.reg(0x10, 0x1D), t.reg(0x10, 0x1E), t.reg(0x10, 0x1F)), (r1d, 0x2C, 0xA9), "mode {mode}");
+            assert_eq!((t.reg(0x10, 0x1D), t.reg(0x10, 0x1E), t.reg(0x10, 0x1F)), (r1d, 0x2C, 0xA9), "mode {mode:?}");
         }
-        let mut dev = Device::new(RegMock::default());
-        set_ts_pins(&mut dev, 0x10, 3).unwrap();
-        assert_eq!(dev.transport().take(), vec![]);
     }
 
     #[test]

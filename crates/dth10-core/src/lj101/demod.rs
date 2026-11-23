@@ -5,7 +5,7 @@
 
 use crate::device::Device;
 use crate::error::Result;
-use crate::kit::{BER_UNUSED, SignalStatus, field, lock, ts_pins};
+use crate::kit::{BER_UNUSED, SignalStatus, TsPins, field, lock};
 use crate::protocol::UsbControl;
 use crate::tc90517::demod::reg;
 use crate::tlv::{TunerDesc, flag};
@@ -223,14 +223,13 @@ impl Tc90517Sat {
         Ok(b[0])
     }
 
-    /// TS pin control: 0 = output, 1 = stopped, 2 = unused.
-    pub fn set_ts_pins<T: UsbControl>(&self, dev: &mut Device<T>, mode: u8) -> Result<()> {
+    /// TS pin control.
+    pub fn set_ts_pins<T: UsbControl>(&self, dev: &mut Device<T>, mode: TsPins) -> Result<()> {
         let v = self.read1(dev, reg::TS_PINS_1C)? & 0x3F;
         let (r1c, r1f) = match mode {
-            ts_pins::OUTPUT => (v, 0x88),
-            ts_pins::STOPPED => (v | 0x80, 0xAA),
-            ts_pins::THIRD => (v | 0x40, 0x99),
-            _ => return Ok(()),
+            TsPins::Output => (v, 0x88),
+            TsPins::Stopped => (v | 0x80, 0xAA),
+            TsPins::Third => (v | 0x40, 0x99),
         };
         dev.i2c_batch_append(self.addr, reg::TS_PINS_1C, &[r1c])?;
         dev.i2c_batch_append(self.addr, reg::TS_PINS_1F, &[r1f])?;

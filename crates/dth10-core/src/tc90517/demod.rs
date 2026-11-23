@@ -10,7 +10,7 @@ use std::thread::sleep;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::kit::{BER_UNUSED, SignalStatus, VendorDriver, field, lock, ts_pins};
+use crate::kit::{BER_UNUSED, SignalStatus, TsPins, VendorDriver, field, lock};
 use crate::lj101::demod::module_chip;
 use crate::protocol::UsbControl;
 use crate::tlv::{TunerDesc, flag};
@@ -196,21 +196,20 @@ impl Tc90517 {
     }
 
     /// TS output / pin control: registers 0x1E/0x1F.
-    /// MxL kit: mode 0 = `80/08`, 1 = `A8/A8`, 2 = `94/58`.
-    /// SMT_LJ101 kit: mode 0 = `A2/08`, 1 = `AA/A8`, 2 = `A6/58`.
+    /// MxL kit: output `80/08`, stopped `A8/A8`, third `94/58`.
+    /// SMT_LJ101 kit: output `A2/08`, stopped `AA/A8`, third `A6/58`.
     /// TC90522 / TC90532 kits: [`crate::tc9052x::demod::set_ts_pins`].
     /// TC90527 kits: [`crate::tc90527::demod::set_ts_pins`].
-    pub fn set_ts_mode<T: UsbControl>(&self, dev: &mut Device<T>, mode: u8) -> Result<()> {
+    pub fn set_ts_mode<T: UsbControl>(&self, dev: &mut Device<T>, mode: TsPins) -> Result<()> {
         let (r1e, r1f) = match (self.variant, mode) {
-            (TerVariant::Tc90517Mxl, ts_pins::OUTPUT) => (0x80, 0x08),
-            (TerVariant::Tc90517Mxl, ts_pins::STOPPED) => (0xA8, 0xA8),
-            (TerVariant::Tc90517Mxl, ts_pins::THIRD) => (0x94, 0x58),
-            (TerVariant::SmtLj101, ts_pins::OUTPUT) => (0xA2, 0x08),
-            (TerVariant::SmtLj101, ts_pins::STOPPED) => (0xAA, 0xA8),
-            (TerVariant::SmtLj101, ts_pins::THIRD) => (0xA6, 0x58),
+            (TerVariant::Tc90517Mxl, TsPins::Output) => (0x80, 0x08),
+            (TerVariant::Tc90517Mxl, TsPins::Stopped) => (0xA8, 0xA8),
+            (TerVariant::Tc90517Mxl, TsPins::Third) => (0x94, 0x58),
+            (TerVariant::SmtLj101, TsPins::Output) => (0xA2, 0x08),
+            (TerVariant::SmtLj101, TsPins::Stopped) => (0xAA, 0xA8),
+            (TerVariant::SmtLj101, TsPins::Third) => (0xA6, 0x58),
             (TerVariant::Tc9052x(_), _) => return crate::tc9052x::demod::set_ts_pins(dev, self.addr, mode),
             (TerVariant::Tc90527(_), _) => return crate::tc90527::demod::set_ts_pins(dev, self.addr, mode),
-            _ => return dev.i2c_batch_flush(),
         };
         dev.i2c_batch_append(self.addr, reg::TS_PINS_1E, &[r1e])?;
         dev.i2c_batch_append(self.addr, reg::TS_PINS_1F, &[r1f])?;
@@ -232,7 +231,7 @@ impl Tc90517 {
 
     /// Standby: TS stop, `0x1C |= 0x80`, `0x03 ← 0x90`.
     pub fn standby<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
-        self.set_ts_mode(dev, ts_pins::STOPPED)?;
+        self.set_ts_mode(dev, TsPins::Stopped)?;
         let v = self.read1(dev, 0x1C)?;
         dev.i2c_batch_append(self.addr, 0x1C, &[(v & 0x3F) | 0x80])?;
         dev.i2c_batch_append(self.addr, 0x03, &[0x90])?;
@@ -241,7 +240,7 @@ impl Tc90517 {
 
     /// Pre-tune: TS stop, `0x25 ← 00`, `0x23 |= 1` (IF-AGC hold).
     pub fn pre_tune<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
-        self.set_ts_mode(dev, ts_pins::STOPPED)?;
+        self.set_ts_mode(dev, TsPins::Stopped)?;
         let v = self.read1(dev, reg::IFAGC)?;
         dev.i2c_batch_append(self.addr, 0x25, &[0x00])?;
         dev.i2c_batch_append(self.addr, reg::IFAGC, &[v | reg::IFAGC_HOLD])?;
@@ -265,7 +264,7 @@ impl Tc90517 {
             }
         }
         sleep(POST_TUNE_SETTLE);
-        self.set_ts_mode(dev, ts_pins::OUTPUT)
+        self.set_ts_mode(dev, TsPins::Output)
     }
 
     /// The chip that this demodulator's `0x0F[3:2]` selects for the

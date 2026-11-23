@@ -61,15 +61,17 @@ pub struct SignalStatus {
 /// Value reported for a layer that is not in use.
 pub const BER_UNUSED: u32 = 0xFFFF_FFFF;
 
-/// Modes of the demodulators' TS pin control, as the vendor driver numbers
-/// them for every kit; each demodulator maps them onto its own registers.
-pub mod ts_pins {
-    /// TS output on.
-    pub const OUTPUT: u8 = 0;
-    /// TS output stopped (around tuning and at standby).
-    pub const STOPPED: u8 = 1;
-    /// Third pin state (not used by the kits).
-    pub const THIRD: u8 = 2;
+/// States of the demodulators' TS pin control, which the vendor driver
+/// numbers 0, 1 and 2 for every kit; each demodulator maps them onto its own
+/// registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TsPins {
+    /// TS output on (0).
+    Output,
+    /// TS output stopped, around tuning and at standby (1).
+    Stopped,
+    /// The third pin state, not used by the kits (2).
+    Third,
 }
 
 /// Satellite kits' tune sequence: wait after setting the PLL, before the
