@@ -8,7 +8,7 @@
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
-use crate::boot::{JR_K0, LUI_K0, ORI_K0};
+use crate::boot::{EXCEPTION_VECTORS, JR_K0, LUI_K0, ORI_K0};
 
 /// The register block (MMR) as the MIPS sees it.
 pub const MMR_BASE: usize = 0xB004_0000;
@@ -16,6 +16,13 @@ pub const MMR_BASE: usize = 0xB004_0000;
 pub const FB_BASE: usize = 0xA000_0000;
 /// Bound of the waits on a register (a stuck bit must not hang the firmware).
 pub const WAIT_READS: u32 = 1_000_000;
+/// Reads [`mmr_r`] takes at most for two in a row to agree.
+const READ_TRIES: u32 = 16;
+/// A physical address: the low 29 bits of a kseg0 or kseg1 address (and of
+/// the addresses the host passes).
+pub const PHYS_MASK: u32 = 0x1FFF_FFFF;
+/// The SDRAM offset of an FB access: a word of the 64 MB.
+const FB_WORD: u32 = 0x03FF_FFFC;
 
 /// Write a register.
 #[inline(always)]
@@ -36,7 +43,7 @@ pub fn mmr_r1(off: u32) -> u32 {
 /// occasionally returns a wrong value.
 pub fn mmr_r(off: u32) -> u32 {
     let mut a = mmr_r1(off);
-    for _ in 0..16 {
+    for _ in 0..READ_TRIES {
         let b = mmr_r1(off);
         if a == b {
             break;
@@ -66,19 +73,19 @@ pub fn mmr_wait(off: u32, mask: u32, want: u32) -> bool {
 pub fn fb_r(phys: u32) -> u32 {
     // SAFETY: SDRAM through its uncached alias; the callers pass addresses
     // inside the 64 MB.
-    unsafe { read_volatile((FB_BASE + (phys & 0x03FF_FFFC) as usize) as *const u32) }
+    unsafe { read_volatile((FB_BASE + (phys & FB_WORD) as usize) as *const u32) }
 }
 
 /// Write a word of SDRAM by physical address.
 #[inline(always)]
 pub fn fb_w(phys: u32, value: u32) {
     // SAFETY: as `fb_r`.
-    unsafe { write_volatile((FB_BASE + (phys & 0x03FF_FFFC) as usize) as *mut u32, value) }
+    unsafe { write_volatile((FB_BASE + (phys & FB_WORD) as usize) as *mut u32, value) }
 }
 
 /// The physical address of something in the image or its data.
 pub fn phys_of<T>(p: *const T) -> u32 {
-    p as u32 & 0x1FFF_FFFF
+    p as u32 & PHYS_MASK
 }
 
 /// CP0 Count: runs at half the CPU clock.
@@ -108,7 +115,10 @@ unsafe extern "C" {
 /// was.
 pub fn install_vectors() {
     let target = _exception as *const () as usize as u32;
-    for v in [0x180, 0x200, 0x380, 0x400] {
+    // Taken apart: a loop over the array itself would keep a copy of it in
+    // the image.
+    let [a, b, c, d] = EXCEPTION_VECTORS;
+    for v in [a, b, c, d] {
         fb_w(v, LUI_K0 | target >> 16);
         fb_w(v + 4, ORI_K0 | target & 0xFFFF);
         fb_w(v + 8, JR_K0);

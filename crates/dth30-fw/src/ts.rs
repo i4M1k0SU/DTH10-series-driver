@@ -15,7 +15,11 @@
 //! | 0x600C | bit 8+i = drop the null packets of port i                       |
 //! | 0x6030 | 0x503 (needed for reception)                                    |
 
-use crate::demux::{self, FILTER_ALL, FILTER_VALID, Ring};
+use crate::demux::{
+    self, CH_ACTIVE, CH_EVENT_CFG, CH_IRQ_ENABLE, CH_IRQ_ENABLE2, CH_IRQ_STATUS, CH_STATUS2, CHANNELS, CHWIN_DATA,
+    CHWIN_INDEX, CHWIN_MASK, CHWIN_PAGES, DSC_CFG, DSC_INDEX, DSC_KEEP, FILTER_ALL, FILTER_VALID, FILTERS, PORT_MAX,
+    Ring,
+};
 use crate::dma::{Dma, SRC_LOCAL};
 use crate::host::{FAILED, OK};
 use crate::hw::{fb_r, fb_w, mmr_r, mmr_rmw, mmr_w};
@@ -23,7 +27,7 @@ use crate::hw::{fb_r, fb_w, mmr_r, mmr_rmw, mmr_w};
 /// The "every PID" channel and its filter entry (the last one: entries
 /// for single PIDs come before it).
 const RAW_CHANNEL: u32 = 14;
-const RAW_FILTER: u32 = 31;
+const RAW_FILTER: u32 = FILTERS - 1;
 /// The Raw ring: 40 chunks of 0xBC00 bytes (= 10240 packets), outside the
 /// image and the areas shared with the host.
 const RAW_RING: u32 = 0x0080_0000;
@@ -38,6 +42,26 @@ const SINK: u32 = 0x0006_4000;
 /// The stream types of an open (payload +0x58).
 pub const KIND_RAW: u32 = 1;
 pub const KIND_PROGRAM: u32 = 5;
+
+/// The words of an open's payload that the Raw and the Program stream
+/// share: input port, the host's handle (two words, replaced by the
+/// firmware's), the stream type, flags, chunk size, the PCI address of the
+/// host's endpoint FIFO.
+pub const OPEN_PORT: u32 = 0x08;
+pub const OPEN_HANDLE: u32 = 0x18;
+pub const OPEN_KIND: u32 = 0x58;
+pub const OPEN_FLAGS: u32 = 0x60;
+pub const OPEN_CHUNK: u32 = 0x318;
+pub const OPEN_DEST: u32 = 0x31C;
+/// The Raw stream's PID (payload +0x7C), which has to be "every PID".
+const OPEN_PID: u32 = 0x7C;
+const PID_ALL: u32 = 0xFFFF;
+/// Open flag: the TS goes to the host.
+pub const FLAG_TO_HOST: u32 = 1 << 20;
+
+/// TSI_NULL_DROP (see the table above) and its bits for ports 0 and 1.
+pub const TSI_NULL_DROP: u32 = 0x600C;
+pub const NULL_DROP_01: u32 = 0x300;
 
 struct Raw {
     /// PCI address of the host's endpoint FIFO.
@@ -59,10 +83,10 @@ impl Ts {
     /// Bring the demultiplexer to rest: no channel runs, no filter entry
     /// is valid, no event reaches the CPU.
     pub fn new() -> Self {
-        mmr_w(0x67DC, 0);
-        mmr_w(0x67B8, 0);
-        mmr_w(0x6150, mmr_r(0x6150));
-        for i in 0..32 {
+        mmr_w(CH_IRQ_ENABLE, 0);
+        mmr_w(CH_IRQ_ENABLE2, 0);
+        mmr_w(CH_ACTIVE, mmr_r(CH_ACTIVE));
+        for i in 0..FILTERS {
             demux::set_filter(i, 0, 0);
         }
         Self { raw: None, shared: false, meter: None, written: 0 }
@@ -77,7 +101,7 @@ impl Ts {
         demux::stop_channel(RAW_CHANNEL);
         demux::lock();
         demux::set_filter(RAW_FILTER, FILTER_VALID | port << 13, RAW_CHANNEL | FILTER_ALL);
-        demux::descrambler(RAW_CHANNEL, |v| v & 0x80);
+        demux::descrambler(RAW_CHANNEL, |v| v & DSC_KEEP);
         demux::unlock();
         demux::start_channel(RAW_CHANNEL, RAW_RING, RAW_LEN);
         self.meter = Some(Ring::new(RAW_CHANNEL, RAW_RING, RAW_LEN, demux::PACKET, 0));
@@ -167,34 +191,35 @@ impl Ts {
         mmr_w(0x6008, 0x0032_0000 | edges);
         mmr_w(0x6030, 0x503);
         mmr_w(0x6168, 0);
-        mmr_w(0x67B8, 0);
-        mmr_w(0x67DC, 0);
-        mmr_w(0x6150, mmr_r(0x6150));
-        mmr_w(0x67D4, mmr_r(0x67D4));
-        mmr_w(0x67B0, mmr_r(0x67B0));
+        mmr_w(CH_IRQ_ENABLE2, 0);
+        mmr_w(CH_IRQ_ENABLE, 0);
+        mmr_w(CH_ACTIVE, mmr_r(CH_ACTIVE));
+        mmr_w(CH_IRQ_STATUS, mmr_r(CH_IRQ_STATUS));
+        mmr_w(CH_STATUS2, mmr_r(CH_STATUS2));
 
         let sink = SINK >> 12 | ((SINK >> 12) + 1) << 16;
-        for i in 0..16 {
+        for i in 0..CHANNELS {
             demux::lock();
             demux::set_filter(i, 0, 0);
-            mmr_w(0x6080, i);
-            mmr_w(0x6084, 0);
-            demux::select(0x6400, 0x1_0000 | i, 0x1_001F);
-            mmr_w(0x6404, sink);
+            mmr_w(DSC_INDEX, i);
+            mmr_w(DSC_CFG, 0);
+            demux::select(CHWIN_INDEX, CHWIN_PAGES | i, CHWIN_MASK);
+            mmr_w(CHWIN_DATA, sink);
             demux::unlock();
         }
-        for i in 16..32 {
+        for i in CHANNELS..FILTERS {
             demux::set_filter(i, 0, 0);
         }
-        for k in 0..8 {
-            mmr_w(0x6580 + 4 * k, 0);
+        // Two channels to a word.
+        for k in 0..CHANNELS / 2 {
+            mmr_w(CH_EVENT_CFG + 4 * k, 0);
         }
 
         if valid {
             let keep = w(0x6C);
-            mmr_rmw(0x600C, |v| (v & !0x300) | (!keep & 3) << 8);
+            mmr_rmw(TSI_NULL_DROP, |v| (v & !NULL_DROP_01) | (!keep & 3) << 8);
         } else {
-            mmr_rmw(0x600C, |v| v | 0x300);
+            mmr_rmw(TSI_NULL_DROP, |v| v | NULL_DROP_01);
         }
         mmr_w(0x6154, 0x3_3201);
         if w(0x70) == 1 {
@@ -228,9 +253,9 @@ impl Ts {
     /// (0xFFFF = every PID), +0x314 number of host buffers, +0x318 chunk
     /// size, +0x31C.. their PCI addresses.
     pub fn open_raw(&mut self, p: u32) -> u32 {
-        let (port, flags, pid) = (fb_r(p + 0x08), fb_r(p + 0x60), fb_r(p + 0x7C));
-        let (chunk, dest) = (fb_r(p + 0x318), fb_r(p + 0x31C));
-        if self.raw.is_some() || flags & 0x10_0000 == 0 || pid != 0xFFFF || chunk != CHUNK || port > 3 {
+        let (port, flags, pid) = (fb_r(p + OPEN_PORT), fb_r(p + OPEN_FLAGS), fb_r(p + OPEN_PID));
+        let (chunk, dest) = (fb_r(p + OPEN_CHUNK), fb_r(p + OPEN_DEST));
+        if self.raw.is_some() || flags & FLAG_TO_HOST == 0 || pid != PID_ALL || chunk != CHUNK || port > PORT_MAX {
             return FAILED;
         }
         // A channel that starts first delivers some packets it had kept
@@ -241,8 +266,8 @@ impl Ts {
             Ring::new(RAW_CHANNEL, RAW_RING, RAW_LEN, CHUNK, CHUNK)
         };
         self.raw = Some(Raw { dest, ring });
-        fb_w(p + 0x18, RAW_HANDLE);
-        fb_w(p + 0x1C, 0);
+        fb_w(p + OPEN_HANDLE, RAW_HANDLE);
+        fb_w(p + OPEN_HANDLE + 4, 0);
         OK
     }
 

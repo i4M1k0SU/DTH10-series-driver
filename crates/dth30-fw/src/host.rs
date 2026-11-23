@@ -19,12 +19,43 @@
 //! physical address of the payload. One command and one message are
 //! outstanding at a time.
 
-use crate::hw::{Clock, count, fb_r, fb_w, mmr_r, mmr_w};
+use crate::hw::{Clock, MMR_BASE, PHYS_MASK, count, fb_r, fb_w, mmr_r, mmr_w};
 
 /// Requests from the host.
 const H2M_STATUS: u32 = 0x30E8;
 const DOORBELL: u32 = 1;
 const MSG_ACK: u32 = 2;
+
+/// The other registers of the table above.
+const H2M_FUNC: u32 = 0x3020;
+const H2M_ACK_ID: u32 = 0x3024;
+const M2H_ID: u32 = 0x3028;
+const M2H_DONE_FUNC: u32 = 0x302C;
+const H2M_SLOT: u32 = 0x3030;
+const H2M_ACK_ADDR: u32 = 0x3038;
+const M2H_ADDR: u32 = 0x3040;
+const M2H_POOL_SIZE: u32 = 0x3044;
+const M2H_DONE_SLOT: u32 = 0x3048;
+/// Interrupts towards the host (write 1 to clear); bit 31 is the watchdog's.
+const M2H_INT_STATUS: u32 = 0x30E0;
+const M2H_WATCHDOG: u32 = 1 << 31;
+
+/// The parameter block (FB): where the MIPS sees the registers (written
+/// here), the host's answer to it, the SDRAM size and the FLAG word (from the
+/// host).
+const FB_MMR_WINDOW: u32 = 0x20;
+const FB_HOST_ANSWER: u32 = 0x28;
+const FB_MEM_SIZE: u32 = 0x48;
+const FB_FLAG: u32 = 0x4C;
+/// The register window as the host is to describe it: 0x1FFF in the high
+/// half, the high bits of the MIPS's address of the registers in the low.
+const MMR_WINDOW: u32 = 0x1FFF_0000 | (MMR_BASE as u32 >> 16 & 0x1FFF);
+/// The heartbeat (FB), and its period in ms.
+const FB_HEARTBEAT: u32 = 0x10;
+const HEARTBEAT_MS: u32 = 5;
+/// How far the start-up has got (FB): the step numbers of docs/27 chapter 2
+/// §1.2.
+const FB_PROGRESS: u32 = 0xB0;
 
 /// Start-up message: the host must set its areas up in the pool.
 const MSG_ALLOC_FB: u32 = 5;
@@ -36,8 +67,26 @@ pub const OK: u32 = 1;
 pub const FAILED: u32 = 2;
 pub const UNSUPPORTED: u32 = 5;
 
+/// The functions (slot +0x0C) this firmware handles: ping, open a stream,
+/// close it, flush it before the close, a request to an object, set the TS
+/// input up, open and close the CAS object.
+pub const CMD_PING: u32 = 0;
+pub const CMD_OPEN: u32 = 8;
+pub const CMD_CLOSE: u32 = 9;
+pub const CMD_FLUSH: u32 = 10;
+pub const CMD_INPUT: u32 = 11;
+pub const CMD_TS_CONFIG: u32 = 24;
+pub const CMD_CAS_OPEN: u32 = 25;
+pub const CMD_CAS_CLOSE: u32 = 26;
 /// The command that bypasses the slot: 0x3030 is the destination instead.
 pub const CMD_SIGNATURE: u32 = 27;
+
+/// A command slot: the function, the result, the payload's address.
+const SLOT_FUNC: u32 = 0x0C;
+const SLOT_RESULT: u32 = 0x10;
+const SLOT_PAYLOAD: u32 = 0x14;
+/// Slots lie in the first megabyte (the host's window 0).
+const SLOT_END: u32 = 0x0010_0000;
 
 /// The pool handed to the host starts here.
 const POOL_START: u32 = 0x1000;
@@ -49,6 +98,12 @@ const MSG_STRIDE: u32 = 0x280;
 const MSG_COUNT: usize = 8;
 /// Offset of the descriptor in a message body.
 const MSG_DESC: u32 = 0x24;
+/// Words of a message body: who sent it (2 = the firmware), the message ID,
+/// the descriptor's physical address.
+const BODY_SENDER: u32 = 0x08;
+const SENDER_FIRMWARE: u32 = 2;
+const BODY_ID: u32 = 0x0C;
+const BODY_DESC_ADDR: u32 = 0x14;
 
 /// A command taken from the host.
 pub struct Command {
@@ -81,7 +136,7 @@ pub struct Host {
 
 impl Host {
     pub fn new(clock: &Clock) -> Self {
-        let tick = clock.ticks(5);
+        let tick = clock.ticks(HEARTBEAT_MS);
         Self {
             heartbeat: 0,
             tick,
@@ -99,32 +154,36 @@ impl Host {
     /// answers in FB 0x28 (any non-zero value). Then the host is given its
     /// pool and answers through 0x3024. FB 0xB0 shows how far this got.
     pub fn handshake(&mut self) {
-        fb_w(0xB0, 1);
+        fb_w(FB_PROGRESS, 1);
+        // In the order the vendor's firmware clears them.
         for off in [0x30, 0x24, 0x38, 0x3C, 0x34, 0x2C, 0x28] {
             fb_w(off, 0);
         }
-        fb_w(0x20, 0x1FFF_1004);
-        while fb_r(0x28) == 0 {}
-        fb_w(0xB0, 2);
+        fb_w(FB_MMR_WINDOW, MMR_WINDOW);
+        while fb_r(FB_HOST_ANSWER) == 0 {}
+        fb_w(FB_PROGRESS, 2);
 
-        let mem = fb_r(0x48) & 0x1FFF_FFFF;
+        // The end of the pool by the SDRAM size and FLAG (docs/27 chapter 2
+        // §1.5).
+        let mem = fb_r(FB_MEM_SIZE) & PHYS_MASK;
         let pool_end = if mem < 0x0100_0000 {
             0x1_0000
-        } else if fb_r(0x4C) == 0 {
+        } else if fb_r(FB_FLAG) == 0 {
             0x2_0000
         } else {
             0x6_1000
         };
         mmr_w(H2M_STATUS, DOORBELL | MSG_ACK);
-        mmr_w(0x3040, POOL_START);
-        mmr_w(0x3044, pool_end - POOL_START);
-        mmr_w(0x3028, MSG_ALLOC_FB);
+        mmr_w(M2H_ADDR, POOL_START);
+        mmr_w(M2H_POOL_SIZE, pool_end - POOL_START);
+        mmr_w(M2H_ID, MSG_ALLOC_FB);
         while mmr_r(H2M_STATUS) & MSG_ACK == 0 {}
         mmr_w(H2M_STATUS, MSG_ACK);
         // Drop a stale watchdog flag on the host's side; the watchdog itself
         // (0x3084) stays off.
-        mmr_w(0x30E0, 0x8000_0000);
-        fb_w(0xB0, 5);
+        mmr_w(M2H_INT_STATUS, M2H_WATCHDOG);
+        fb_w(FB_PROGRESS, 5);
+        // Reads 0 from now on, as with the vendor's firmware.
         fb_w(0x14, 0);
     }
 
@@ -132,7 +191,7 @@ impl Host {
     /// dropped.
     pub fn ready(&mut self) {
         mmr_w(H2M_STATUS, mmr_r(H2M_STATUS));
-        fb_w(0xB0, 10);
+        fb_w(FB_PROGRESS, 10);
         if let Some(m) = self.message(MSG_READY) {
             self.send(m);
         }
@@ -151,7 +210,7 @@ impl Host {
 
     fn beat(&mut self) {
         self.heartbeat = self.heartbeat.wrapping_add(1);
-        fb_w(0x10, self.heartbeat);
+        fb_w(FB_HEARTBEAT, self.heartbeat);
     }
 
     /// Handle a message acknowledge and return the next command, if the
@@ -165,28 +224,28 @@ impl Host {
             return None;
         }
         mmr_w(H2M_STATUS, DOORBELL);
-        let id = mmr_r(0x3020);
-        let arg = mmr_r(0x3030) & 0x1FFF_FFFF;
+        let id = mmr_r(H2M_FUNC);
+        let arg = mmr_r(H2M_SLOT) & PHYS_MASK;
         if id == CMD_SIGNATURE {
             return Some(Command { id, payload: arg, slot: 0 });
         }
-        if arg == 0 || arg >= 0x0010_0000 {
+        if arg == 0 || arg >= SLOT_END {
             return None;
         }
-        Some(Command { id: fb_r(arg + 0x0C), payload: fb_r(arg + 0x14) & 0x1FFF_FFFF, slot: arg })
+        Some(Command { id: fb_r(arg + SLOT_FUNC), payload: fb_r(arg + SLOT_PAYLOAD) & PHYS_MASK, slot: arg })
     }
 
     /// Finish a command with `result`.
     pub fn complete(&mut self, c: &Command, result: u32) {
         if c.is_signature() {
             // No completion: the host waits for 0x3030 to read 0.
-            mmr_w(0x3030, 0);
+            mmr_w(H2M_SLOT, 0);
             return;
         }
-        fb_w(c.slot + 0x10, result);
+        fb_w(c.slot + SLOT_RESULT, result);
         self.beat();
-        mmr_w(0x3048, c.slot);
-        mmr_w(0x302C, c.id);
+        mmr_w(M2H_DONE_SLOT, c.slot);
+        mmr_w(M2H_DONE_FUNC, c.id);
     }
 
     /// Take a message body for message `id`; `None` when all are in use.
@@ -198,9 +257,9 @@ impl Host {
         for off in (0..MSG_STRIDE).step_by(4) {
             fb_w(body + off, 0);
         }
-        fb_w(body + 0x08, 2);
-        fb_w(body + 0x0C, id);
-        fb_w(body + 0x14, body + MSG_DESC);
+        fb_w(body + BODY_SENDER, SENDER_FIRMWARE);
+        fb_w(body + BODY_ID, id);
+        fb_w(body + BODY_DESC_ADDR, body + MSG_DESC);
         Some(i as u8)
     }
 
@@ -230,20 +289,20 @@ impl Host {
         let body = Self::body(m);
         self.outstanding = Some(m);
         self.beat();
-        mmr_w(0x3038, 0xFFFF_FFFF);
-        mmr_w(0x3040, body);
-        mmr_w(0x3028, fb_r(body + 0x0C));
+        mmr_w(H2M_ACK_ADDR, 0xFFFF_FFFF);
+        mmr_w(M2H_ADDR, body);
+        mmr_w(M2H_ID, fb_r(body + BODY_ID));
     }
 
     /// The host acknowledged: 0x3038 = the body's address, 0x3024 = the ID.
     /// An acknowledge that does not match leaves the message outstanding.
     fn acknowledged(&mut self) {
-        let id = mmr_r(0x3024);
-        let addr = mmr_r(0x3038);
+        let id = mmr_r(H2M_ACK_ID);
+        let addr = mmr_r(H2M_ACK_ADDR);
         mmr_w(H2M_STATUS, MSG_ACK);
         let Some(m) = self.outstanding else { return };
         let body = Self::body(m);
-        if addr == body && id == fb_r(body + 0x0C) {
+        if addr == body && id == fb_r(body + BODY_ID) {
             self.used[m as usize] = false;
             self.outstanding = None;
             self.pump();
