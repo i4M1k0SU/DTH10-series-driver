@@ -10,11 +10,8 @@
 //! [`tune_regs`] does the same (the float rounding of the frequency shows
 //! in the PLL fraction).
 //!
-//! Checked on hardware with a DT-H30/U2 and a DT-H45/U2 (both PID 0x0128,
-//! board 0xB3): UHF channels tune and lock (C/N 27–31 dB) and the TS is
-//! error-free. The worked examples in the tests come from re-deriving the
-//! formulas (docs/26 `tune_ref.py`), not from vendor output; VHF and the
-//! attenuator are unverified.
+//! The worked examples in the tests come from re-deriving the formulas
+//! (docs/26 `tune_ref.py`), not from vendor output.
 
 use crate::Result;
 

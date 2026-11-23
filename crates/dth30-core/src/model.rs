@@ -1,10 +1,7 @@
 //! The products of the family and how a board maps to a front-end kit.
 //!
 //! The USB product ID names the product; which tuner board it carries is
-//! only known from the ViXS board-ID register (see [`crate::vixs`]). Checked
-//! on hardware: the DT-H30/U2 and the DT-H45/U2, both with PID 0x0128
-//! (board 0xB3), and the DT-H50/U2 (PID 0x0129, board 0xB4); the others are
-//! unverified.
+//! only known from the ViXS board-ID register (see [`crate::vixs`]).
 
 /// BUFFALO's USB vendor ID.
 pub const VENDOR_ID: u16 = 0x0411;
@@ -94,8 +91,7 @@ impl KitKind {
     /// Whether the demodulator sends 204-byte packets (RS parity kept) to
     /// the ViXS chip. The vendor kernel driver sets the TS input up that way
     /// for TOSHIBA boards and for 188 bytes on SONY ones (docs/26
-    /// 3-ioctl-frontend §3.2); checked on boards 0xB3 (MJ100, 188) and 0xB4
-    /// (TOSHIBA, 204).
+    /// 3-ioctl-frontend §3.2).
     pub const fn ts_packet_204(self) -> bool {
         matches!(self, KitKind::Toshiba)
     }

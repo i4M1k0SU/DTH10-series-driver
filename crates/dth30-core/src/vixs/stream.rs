@@ -24,8 +24,6 @@
 //! fields it leaves unwritten are zero here. The firmware overwrites the
 //! stream-handle field of an OPEN with its own handle; only that word is
 //! read back (§1.2). [`CasMode::Bcas`] yields a clear TS (see [`CasMode`]).
-//!
-//! Checked on a DT-H50/U2: the opens, card reset, flush and close.
 
 use super::Vixs;
 use super::cmd::{self, func};

@@ -1,6 +1,5 @@
-//! `dth`: stand-alone tuner command for the BUFFALO DTH10 series of USB TV
-//! tuners (the models the vendor's Windows driver covers; verified on
-//! a DT-H70/U2).
+//! `dth`: stand-alone tuner command for the BUFFALO DTH10/DTH30 series of
+//! USB TV tuners (the models the vendor's Windows drivers cover).
 //!
 //! `dth tune` opens the device, tunes, and writes the transport stream to
 //! stdout (or a file) until it is stopped (SIGTERM / SIGINT / Ctrl-C, the
@@ -61,8 +60,8 @@ struct Cli {
 enum Cmd {
     /// List the connected supported devices.
     List,
-    /// Show the device information (DTH10 series: tuner descriptors, firmware, endpoints; DT-H30/U2
-    /// family: endpoints, board and front end, firmware source; this resets its chip).
+    /// Show the device information (DTH10 series: tuner descriptors, firmware, endpoints; DTH30
+    /// series: endpoints, board and front end, firmware source; this resets its chip).
     Info(DeviceArgs),
     /// Tune and write the TS to stdout (or --output) until stopped.
     Tune(Box<TuneArgs>),

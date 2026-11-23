@@ -14,8 +14,6 @@
 //! Afterwards [`Vixs::send_cmd`] talks to the firmware ([`cmd`]) and
 //! [`Vixs::i2c`] gives the host-driven I2C bus to the front end. The stream
 //! commands (TS input set-up, open / flush / close) are in [`stream`].
-//!
-//! None of this is verified on hardware.
 
 pub mod cmd;
 pub mod dma;

@@ -5,8 +5,6 @@
 //! board-ID register value; all BUFFALO boards use the same routine, which is
 //! only a list of register writes, DDR mode-register commands and a memory
 //! test through registers. It uses plain (unchecked) register accesses.
-//!
-//! Checked on a DT-H50/U2 (board 0xB4); the other boards are unverified.
 
 use core::time::Duration;
 

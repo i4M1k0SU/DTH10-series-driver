@@ -20,8 +20,7 @@
 //!   side unwrap (0xDEAF/7) is never used (docs/22 §6c).
 //!
 //! All vendor commands of this module go through the tuner/filter #1 request
-//! path (bRequest bit 7, [`FLAGS`]); the device STALLs them on the #0 path
-//! (verified on a DT-H70/U2).
+//! path (bRequest bit 7, [`FLAGS`]); the device STALLs them on the #0 path.
 
 pub mod appkeys;
 pub mod ec;

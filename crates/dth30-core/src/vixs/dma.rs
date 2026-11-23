@@ -7,8 +7,6 @@
 //! clear has been seen yet, up to five more rounds of 30 are spent (this
 //! budget is shared by all entries). The vendor polls without bound; here
 //! each entry gives up after [`READ_LIMIT`] reads.
-//!
-//! Checked on a DT-H50/U2 (board 0xB4); the other boards are unverified.
 
 use super::mmr::{Chip, INT_ENABLE};
 use crate::bus::RemotePci;
