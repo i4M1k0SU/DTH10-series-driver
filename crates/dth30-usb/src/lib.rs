@@ -53,6 +53,7 @@ use std::time::Instant;
 
 use dth_common::LockExt;
 use dth30_core::bus::RemotePci;
+use dth30_core::psi::PACKET_188;
 use dth30_core::{Error, Result, model};
 use nusb::MaybeFuture;
 use nusb::descriptors::TransferType;
@@ -85,6 +86,9 @@ pub const EP_D_IN: u8 = 0x84;
 
 /// The endpoints the vendor stack refuses to start without.
 pub const REQUIRED_ENDPOINTS: [u8; 4] = [EP_CFGOUT, EP_CFGIN, EP_PCIOUT, EP_PCIIN];
+
+/// The direction bit of an endpoint address: set for IN (USB 2.0 §9.6.6).
+const EP_DIR_IN: u8 = 0x80;
 
 /// Budget of one register access (a read: OUT and IN together).
 pub const REGISTER_TIMEOUT: Duration = Duration::from_secs(1);
@@ -681,7 +685,7 @@ impl Net2280Usb {
     /// 256 TS packets is what the vendor reads). The endpoint stays claimed
     /// until the reader is dropped.
     pub fn stream_reader(&self, addr: u8, transfer_len: usize, depth: usize) -> Result<StreamReader> {
-        if addr & 0x80 == 0 {
+        if addr & EP_DIR_IN == 0 {
             return Err(Error::Protocol("stream endpoint must be an IN endpoint"));
         }
         if addr == EP_CFGIN || addr == EP_PCIIN || addr == EP_STATIN {
@@ -732,7 +736,7 @@ impl RemotePci for Net2280Usb {
     /// that is not fully sent ends the transfer. Not under the register lock
     /// (the vendor stack does not take it for bulk data either).
     fn bulk_out(&self, endpoint: u8, data: &[u8]) -> Result<()> {
-        if endpoint & 0x80 != 0 {
+        if endpoint & EP_DIR_IN != 0 {
             return Err(Error::Protocol("bulk_out needs an OUT endpoint"));
         }
         if endpoint == EP_CFGOUT || endpoint == EP_PCIOUT {
@@ -795,7 +799,7 @@ pub struct StreamReader {
 
 impl StreamReader {
     /// 256 TS packets (256 × 188 = 94 × 512), the vendor's read size.
-    pub const DEFAULT_TRANSFER_LEN: usize = 48128;
+    pub const DEFAULT_TRANSFER_LEN: usize = 256 * PACKET_188;
     pub const DEFAULT_DEPTH: usize = 4;
 
     fn new(pipe: Pipe<In>, transfer_len: usize, depth: usize) -> Result<Self> {
@@ -866,6 +870,11 @@ mod linux {
 
     use super::{Found, map_io};
 
+    /// How long a string descriptor request may take.
+    const STRING_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+    /// The language ID of English (United States).
+    const LANG_EN_US: u16 = 0x0409;
+
     /// Wrap the usbfs node `path` in a nusb device.
     pub(super) fn device_from_path(path: &Path) -> Result<nusb::Device> {
         let f = std::fs::OpenOptions::new()
@@ -879,11 +888,10 @@ mod linux {
     /// The serial number string descriptor (English, else the first language).
     pub(super) fn read_serial(device: &nusb::Device) -> Option<String> {
         let idx = device.device_descriptor().serial_number_string_index()?;
-        let timeout = std::time::Duration::from_millis(500);
         let langs: Vec<u16> =
-            device.get_string_descriptor_supported_languages(timeout).wait().map_or_default(|it| it.collect());
-        let lang = if langs.contains(&0x0409) { 0x0409 } else { langs.first().copied().unwrap_or(0x0409) };
-        device.get_string_descriptor(idx, lang, timeout).wait().ok()
+            device.get_string_descriptor_supported_languages(STRING_TIMEOUT).wait().map_or_default(|it| it.collect());
+        let lang = if langs.contains(&LANG_EN_US) { LANG_EN_US } else { langs.first().copied().unwrap_or(LANG_EN_US) };
+        device.get_string_descriptor(idx, lang, STRING_TIMEOUT).wait().ok()
     }
 
     /// Every supported device under `/dev/bus/usb`, found by opening each node

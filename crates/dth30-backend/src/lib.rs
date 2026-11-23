@@ -31,7 +31,7 @@ use dth_common::{
     Backend, Channel, DeviceProgram, Error, Request, Result, Session, StreamModeCfg, System, TsQueue, Unit,
 };
 use dth30_core::device::{Config as DevConfig, Dth30, StreamInfo};
-use dth30_core::psi::{ProgramScanner, ProgramSpec};
+use dth30_core::psi::{PACKET_188, ProgramScanner, ProgramSpec, SYNC_BYTE};
 use dth30_core::vixs::stream::{card_state, is_cdxm_packet, parse_generic_block};
 use dth30_core::vixs::{Firmware, Options};
 pub use dth30_usb::{Found, UNIT_PREFIX};
@@ -53,8 +53,22 @@ const PSI_WAIT: Duration = Duration::from_secs(5);
 const SIGNAL_GRACE: Duration = Duration::from_secs(2);
 /// Reads that fail in a row before a stream gives itself up.
 const FAILED_READS: u32 = 20;
-
-const PACKET: usize = 188;
+/// The lock wait until the client sets one.
+const LOCK_WAIT: Duration = Duration::from_millis(1200);
+/// How often the lock and the card's activation are looked at.
+const LOCK_POLL: Duration = Duration::from_millis(100);
+const CARD_POLL: Duration = Duration::from_millis(20);
+/// Timeouts of one read: of the Raw stream while the PAT and PMT are looked
+/// for; of the CAS endpoint and of the Raw stream alone in the background
+/// threads (which look at their stop flag in between); of the Program
+/// stream; of the Raw stream drained beside the Program stream.
+const PSI_READ: Duration = Duration::from_millis(200);
+const BACKGROUND_READ: Duration = Duration::from_millis(100);
+const PROGRAM_READ: Duration = Duration::from_millis(50);
+const DRAIN_READ: Duration = Duration::from_millis(1);
+/// The pause after a failed read of the CAS endpoint and of a TS endpoint.
+const CAS_ERROR_PAUSE: Duration = Duration::from_millis(100);
+const TS_ERROR_PAUSE: Duration = Duration::from_millis(20);
 
 /// The family's devices present now, with their unit names.
 pub fn list() -> Result<Vec<(String, Found)>> {
@@ -232,7 +246,7 @@ impl Dth30Tuner {
             queue,
             mode: StreamModeCfg::Device,
             program: DeviceProgram::First,
-            lock_wait: Duration::from_millis(1200),
+            lock_wait: LOCK_WAIT,
             read_depth: read_depth.max(1),
             current: None,
             cas: None,
@@ -267,7 +281,7 @@ impl Dth30Tuner {
                     return Ok(false);
                 }
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(LOCK_POLL);
         }
     }
 
@@ -304,7 +318,7 @@ impl Dth30Tuner {
                 );
                 return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(CARD_POLL);
         }
         Ok(())
     }
@@ -322,7 +336,7 @@ impl Dth30Tuner {
         let mut scan = ProgramScanner::new(sid);
         let deadline = Instant::now() + PSI_WAIT;
         while Instant::now() < deadline {
-            if let Some(b) = raw.next(Duration::from_millis(200))?
+            if let Some(b) = raw.next(PSI_READ)?
                 && let Some(spec) = scan.push(&b)
             {
                 return Ok(spec);
@@ -563,7 +577,7 @@ impl CasWatch {
         let (c, a, ins, s) = (card.clone(), activated.clone(), inserted.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
             while !s.load(Ordering::Relaxed) {
-                match r.next(Duration::from_millis(100)) {
+                match r.next(BACKGROUND_READ) {
                     Ok(Some(b)) => {
                         let Some((h, _)) = parse_generic_block(&b) else { continue };
                         if h.card & card_state::REMOVED != 0 {
@@ -582,7 +596,7 @@ impl CasWatch {
                     Ok(None) => {}
                     Err(e) => {
                         log::debug!("CAS endpoint: {e}");
-                        std::thread::sleep(Duration::from_millis(100));
+                        std::thread::sleep(CAS_ERROR_PAUSE);
                     }
                 }
             }
@@ -622,7 +636,7 @@ impl Pump {
                     // Whole packets only: a stream may start mid-packet.
                     let mut filter = TsFilter::default();
                     while !s.load(Ordering::Relaxed) && !f.load(Ordering::Relaxed) {
-                        if let Some(b) = count(&mut errors, raw.next(Duration::from_millis(100))) {
+                        if let Some(b) = count(&mut errors, raw.next(BACKGROUND_READ)) {
                             let out = filter.push(&b);
                             if !out.is_empty() {
                                 queue.push(out);
@@ -638,14 +652,14 @@ impl Pump {
                 Some((info, mut p)) => {
                     let mut filter = TsFilter::default();
                     while !s.load(Ordering::Relaxed) && !f.load(Ordering::Relaxed) {
-                        if let Some(b) = count(&mut errors, p.next(Duration::from_millis(50))) {
+                        if let Some(b) = count(&mut errors, p.next(PROGRAM_READ)) {
                             let out = filter.push(&b);
                             if !out.is_empty() {
                                 queue.push(out);
                             }
                         }
                         // The Raw stream feeds the Program stream: keep it drained.
-                        while count(&mut errors, raw.next(Duration::from_millis(1))).is_some() {}
+                        while count(&mut errors, raw.next(DRAIN_READ)).is_some() {}
                         if errors >= FAILED_READS {
                             log::warn!("TS reads keep failing; the stream gives up");
                             f.store(true, Ordering::Relaxed);
@@ -680,7 +694,7 @@ fn count(errors: &mut u32, r: Result<Option<Vec<u8>>>) -> Option<Vec<u8>> {
         Err(e) => {
             *errors += 1;
             log::debug!("TS read: {e}");
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(TS_ERROR_PAUSE);
             None
         }
     }
@@ -713,13 +727,13 @@ impl TsFilter {
 fn for_packets(carry: &mut Vec<u8>, data: &[u8], mut f: impl FnMut(&[u8])) {
     carry.extend_from_slice(data);
     let mut i = 0;
-    while i + PACKET <= carry.len() {
-        if carry[i] != 0x47 {
+    while i + PACKET_188 <= carry.len() {
+        if carry[i] != SYNC_BYTE {
             i += 1;
             continue;
         }
-        f(&carry[i..i + PACKET]);
-        i += PACKET;
+        f(&carry[i..i + PACKET_188]);
+        i += PACKET_188;
     }
     carry.drain(..i);
 }
@@ -729,7 +743,7 @@ mod tests {
     use super::*;
 
     fn packet(pid: u16, cc: u8, payload: &[u8]) -> Vec<u8> {
-        let mut p = vec![0xFFu8; PACKET];
+        let mut p = vec![0xFFu8; PACKET_188];
         p[..4].copy_from_slice(&[0x47, 0x40 | (pid >> 8) as u8, pid as u8, 0x10 | cc]);
         p[4..4 + payload.len()].copy_from_slice(payload);
         p
@@ -751,6 +765,6 @@ mod tests {
         let (a, b) = data.split_at(200);
         let mut out = m.push(a);
         out.extend(m.push(b));
-        assert_eq!(out.chunks(PACKET).map(pid_of).collect::<Vec<_>>(), [0x100, 0x110]);
+        assert_eq!(out.chunks(PACKET_188).map(pid_of).collect::<Vec<_>>(), [0x100, 0x110]);
     }
 }
