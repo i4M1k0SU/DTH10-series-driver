@@ -19,8 +19,16 @@ use super::Dev::{self, D, T};
 use super::regs::Bus;
 use super::{Frontend, demod};
 
-/// Init table, written after tuner 0x09 = 0xB1 and 10 ms (24 tuner, 94
-/// demodulator registers).
+/// Wait after the wake-up write (tuner 0x09 = 0xB1) before the init table
+/// (ms).
+pub(super) const WAKE_MS: u32 = 10;
+/// Wait after the PLL start (tuner 0x09 = 0xF3) in a tune (ms).
+const PLL_SETTLE_MS: u32 = 30;
+/// Tuner register of the attenuator switch: 0x03 on, 0xFB off.
+pub(super) const ATT_REG: u8 = 0x95;
+
+/// Init table, written after tuner 0x09 = 0xB1 and [`WAKE_MS`] (24 tuner,
+/// 94 demodulator registers).
 #[rustfmt::skip]
 pub(super) const INIT: &[(Dev, u8, u8)] = &[
     (T, 0x49, 0x80), (T, 0x35, 0xBB), (T, 0x3B, 0x00), (T, 0x16, 0x5C), (T, 0x19, 0x36), (T, 0x4C, 0xFB),
@@ -221,7 +229,7 @@ pub(super) fn tune<B: Bus>(fe: &mut Frontend<B>, hz: u32) -> Result<()> {
         fe.tw(reg, value)?;
     }
     fe.tw(0x09, 0xF3)?;
-    fe.bus.delay_ms(30);
+    fe.bus.delay_ms(PLL_SETTLE_MS);
     fe.tw(0x88, 0xFE)?;
     fe.tw(0x09, 0xF3)?;
     fe.dw(demod::reg::RESYNC, 0x40)?;

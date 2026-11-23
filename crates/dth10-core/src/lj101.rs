@@ -14,14 +14,15 @@ pub mod tuner;
 pub use demod::Tc90517Sat;
 pub use tuner::{Lj101Tuner, PllWords, pll_words};
 
-use core::time::Duration;
 use std::thread::sleep;
+
+use dth_common::stream::Lnb;
 
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
-use crate::kit::SignalStatus;
+use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TsPins};
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tlv::{HW_ISDB_S, TunerDesc};
 
 /// The ISDB-S kit: open/close/tune/status orchestration.
 pub struct Lj101Kit<T: UsbControl> {
@@ -35,7 +36,7 @@ pub struct Lj101Kit<T: UsbControl> {
 impl<T: UsbControl> Lj101Kit<T> {
     /// Whether `desc` names this kit (`SMT_LJ101` hw 0x402).
     pub fn supports(desc: &TunerDesc) -> bool {
-        desc.kit_name.starts_with("SMT_LJ101") && desc.hw_version == 0x402
+        desc.kit_name.starts_with("SMT_LJ101") && desc.hw_version == HW_ISDB_S
     }
 
     pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
@@ -117,12 +118,12 @@ impl<T: UsbControl> Lj101Kit<T> {
         if !self.is_open() {
             return Err(Error::Protocol("kit is not open"));
         }
-        self.demod.set_ts_pins(&mut self.dev, 1)?;
+        self.demod.set_ts_pins(&mut self.dev, TsPins::Stopped)?;
         self.tuner.set_frequency(&mut self.dev, self.demod.addr, if_hz)?;
-        sleep(Duration::from_millis(100));
+        sleep(SAT_PLL_SETTLE);
         self.demod.restart(&mut self.dev)?;
-        sleep(Duration::from_millis(150));
-        self.demod.set_ts_pins(&mut self.dev, 0)
+        sleep(SAT_RESTART_SETTLE);
+        self.demod.set_ts_pins(&mut self.dev, TsPins::Output)
     }
 
     /// Select the transport stream by TSID (a kit operation separate from tuning).
@@ -142,8 +143,8 @@ impl<T: UsbControl> Lj101Kit<T> {
         Ok(out)
     }
 
-    /// Diagnostic: re-run the TS pin control (0 = output, 1 = stopped).
-    pub fn ts_pins(&mut self, mode: u8) -> Result<()> {
+    /// Diagnostic: re-run the TS pin control.
+    pub fn ts_pins(&mut self, mode: TsPins) -> Result<()> {
         self.demod.set_ts_pins(&mut self.dev, mode)
     }
 
@@ -159,9 +160,9 @@ impl<T: UsbControl> Lj101Kit<T> {
     /// vendor driver. Returns whether the bridge reported the supply as healthy
     /// (`false` = switched off again by the over-current check, see
     /// `device::lnb_set`). The booster is a separate switch ([`set_booster`](Self::set_booster)).
-    pub fn lnb_power(&mut self, volt: u32) -> Result<bool> {
+    pub fn lnb_power(&mut self, lnb: Lnb) -> Result<bool> {
         if let Some(gpio) = device::LnbGpio::of(&self.desc) {
-            return device::lnb_set(&self.dev, gpio, volt);
+            return device::lnb_set(&self.dev, gpio, lnb);
         }
         Ok(true)
     }
@@ -227,13 +228,13 @@ mod tests {
     fn lnb_power_does_not_touch_the_booster() {
         // another model: no effect at all
         let mut k = kit("", &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0x0A)]);
-        assert!(k.lnb_power(150).unwrap());
-        assert!(k.lnb_power(0).unwrap());
+        assert!(k.lnb_power(Lnb::V15).unwrap());
+        assert!(k.lnb_power(Lnb::Off).unwrap());
         assert_eq!(k.dev.transport().take(), vec![]);
         // models "h70" / "h70b": the bridge GPIO only, no I2C
         for model in ["h70", "h70b"] {
             let mut k = kit(model, &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0x0A)]);
-            let _ = k.lnb_power(150).unwrap();
+            let _ = k.lnb_power(Lnb::V15).unwrap();
             let ops = k.dev.transport().take();
             assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, Op::Other)), "{model}: {ops:?}");
             assert_eq!(k.dev.transport().reg(0x19, 0x1C), 0x0A);

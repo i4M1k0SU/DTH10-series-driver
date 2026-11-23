@@ -44,9 +44,14 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dth_common::LockExt;
+use dth_common::stream::Lnb;
+use dth_common::ts::TS_PACKET;
 use dth_common::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue};
 use dth_proto::ipc::{self, Conn, Target};
-use dth_proto::proto::{MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice, reply_tuner};
+use dth_proto::proto::{
+    MAX_LINE, Reply, Request, STREAM_READ_BUF, STREAM_READ_POLL, STREAM_REPLY_TIMEOUT, Status, StreamRequest,
+    TunerChoice, reply_tuner,
+};
 
 use crate::config::Config;
 
@@ -70,14 +75,22 @@ impl Default for ServerConfig {
 
 /// The server executable, in the DLL's folder.
 const SERVER_EXE: &str = "dth.exe";
-/// The loopback ports of the TCP fallback: one of a hundred, picked by the
-/// DLL's folder.
+/// The first loopback port of the TCP fallback, which picks one of
+/// [`FALLBACK_PORT_COUNT`] ports from here by the DLL's folder.
 const FALLBACK_PORT_BASE: u16 = 40780;
+/// How many loopback ports the TCP fallback picks from.
+const FALLBACK_PORT_COUNT: u16 = 100;
 
 /// How long a failed recovery waits before the next attempt, at first; it
 /// doubles up to [`RETRY_MAX`] while the attempts keep failing.
 const RETRY_FIRST: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// How often the DLL looks at a server it started, and the supervisor at
+/// its closing flag.
+const SERVER_POLL: Duration = Duration::from_millis(100);
+/// The supervisor's round, in [`SERVER_POLL`]s: once a second.
+const SUPERVISE_POLLS: u32 = 10;
 
 /// How long a status request may take. The server answers from what it has
 /// (it never opens the device for a status request), so this only catches a
@@ -140,7 +153,7 @@ struct Inner {
     /// This DLL's `[ISDB-S] LnbPower` / `LnbVoltage` (0 = off), `[ISDB-T]
     /// Attenuator`, `[ISDB-S] Booster` and lock waits, sent with every stream
     /// request: they apply to this DLL's unit only, whichever DLL started the server.
-    lnb: u32,
+    lnb: Lnb,
     attenuator: bool,
     booster: bool,
     ter_lock_wait_ms: u64,
@@ -186,7 +199,7 @@ fn program_text(p: DeviceProgram) -> String {
 /// folder's path, case-folded): fixed per folder, so every DLL instance of
 /// that folder meets the same server, and two installs seldom collide.
 fn fallback_port(dll_dir: &Path) -> u16 {
-    FALLBACK_PORT_BASE + (ipc::folder_hash(dll_dir) % 100) as u16
+    FALLBACK_PORT_BASE + (ipc::folder_hash(dll_dir) % u64::from(FALLBACK_PORT_COUNT)) as u16
 }
 
 /// Where the server listens: the folder's socket file in `%TEMP%`, or, where
@@ -255,7 +268,7 @@ fn status_of(target: &Target, unit: Option<&str>) -> Result<Option<Status>, NoAn
 /// tail for the rest of it to arrive (the connection delivers the server's
 /// packets in any split).
 fn whole_packets(pending: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let whole = pending.len() - pending.len() % 188;
+    let whole = pending.len() - pending.len() % TS_PACKET;
     if whole == 0 {
         return None;
     }
@@ -328,7 +341,7 @@ impl Inner {
         let mut child = self.spawn_server()?;
         let t0 = Instant::now();
         loop {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(SERVER_POLL);
             if self.closing.load(Ordering::Relaxed) {
                 return Err("closing".into());
             }
@@ -389,7 +402,7 @@ impl Inner {
         // TVTest gets the failure without any waiting.
         let conn =
             Conn::connect(&self.target).map_err(|e| format!("cannot reach the server at {}: {e}", self.target))?;
-        conn.set_read_timeout(Some(Duration::from_mins(1))).map_err(|e| e.to_string())?;
+        conn.set_read_timeout(Some(STREAM_REPLY_TIMEOUT)).map_err(|e| e.to_string())?;
         let mut c = &conn;
         c.write_all(format!("{}\n", req.to_line()).as_bytes()).map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(conn);
@@ -406,7 +419,7 @@ impl Inner {
             Reply::Busy(why) => return Err(format!("busy: {why}")),
             Reply::Error(e) => return Err(e),
         }
-        reader.get_ref().set_read_timeout(Some(Duration::from_millis(500))).map_err(|e| e.to_string())?;
+        reader.get_ref().set_read_timeout(Some(STREAM_READ_POLL)).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let inner = self.clone();
@@ -414,7 +427,7 @@ impl Inner {
         let handle = std::thread::Builder::new()
             .name("dth-client-ts".into())
             .spawn(move || {
-                let mut buf = vec![0u8; 64 * 1024];
+                let mut buf = vec![0u8; STREAM_READ_BUF];
                 let mut pending: Vec<u8> = Vec::new();
                 let mut total = 0u64;
                 let mut ended = None;
@@ -503,11 +516,11 @@ fn supervise(inner: Arc<Inner>) {
                 }
             }
         }
-        for _ in 0..10 {
+        for _ in 0..SUPERVISE_POLLS {
             if inner.closing.load(Ordering::Relaxed) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(SERVER_POLL);
         }
     }
 }
@@ -526,7 +539,7 @@ impl Client {
             unit: (!cfg.tuner.serial.is_empty()).then(|| cfg.tuner.serial.clone()),
             program: program_text(cfg.tuner.device_program),
             raw: cfg.tuner.stream_mode == StreamModeCfg::Raw,
-            lnb: if cfg.tuner.lnb_power { cfg.tuner.lnb_voltage } else { 0 },
+            lnb: if cfg.tuner.lnb_power { cfg.tuner.lnb_voltage } else { Lnb::Off },
             attenuator: cfg.tuner.attenuator,
             booster: cfg.tuner.booster,
             ter_lock_wait_ms: cfg.tuner.ter_lock_wait_ms,
@@ -765,7 +778,7 @@ mod tests {
         // (request kind, unit, client id) of every request the fake server got
         type Seen = Arc<Mutex<Vec<(&'static str, Option<String>, Option<String>)>>>;
         let seen: Seen = Arc::default();
-        type Lnbs = Arc<Mutex<Vec<(Option<String>, Option<u32>, Option<u64>, Option<bool>, Option<bool>)>>>;
+        type Lnbs = Arc<Mutex<Vec<(Option<String>, Option<Lnb>, Option<u64>, Option<bool>, Option<bool>)>>>;
         let lnbs: Lnbs = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
         let server = {
@@ -839,8 +852,8 @@ mod tests {
         );
         // each DLL's own LNB, switches and lock wait went with its own requests
         let lnbs = lnbs.locked();
-        assert_eq!(lnbs[0], (Some("SN-A".into()), Some(0), Some(1500), Some(false), Some(false)));
-        assert_eq!(lnbs[1], (Some("SN-B".into()), Some(150), Some(2500), Some(false), Some(true)));
+        assert_eq!(lnbs[0], (Some("SN-A".into()), Some(Lnb::Off), Some(1500), Some(false), Some(false)));
+        assert_eq!(lnbs[1], (Some("SN-B".into()), Some(Lnb::V15), Some(2500), Some(false), Some(true)));
     }
 
     /// A unit with two terrestrial tuners: the DLL's `[Device] Tuner` goes with

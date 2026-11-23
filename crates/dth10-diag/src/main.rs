@@ -30,10 +30,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use dth_common::channels::uhf_center_hz;
-use dth_common::stream::parse_num;
+use dth_common::channels::{UHF_BANDWIDTH_HZ, UHF_FIRST, UHF_LAST, uhf_center_hz};
+use dth_common::stream::{Lnb, parse_num};
 use dth_common::{Channel, System};
 use dth10_core::cepm;
+use dth10_core::device::FLAG_TUNER1;
 use dth10_core::kit::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
 use dth10_core::satellite::SatelliteKit;
 use dth10_core::terrestrial::TerrestrialKit;
@@ -42,6 +43,24 @@ use dth10_core::{Device, StreamMode, TunerDesc, unverified_kit_error};
 use dth10_usb::{EventReader, RecipientMode, StreamReader, UsbTransport};
 
 type Res<T = ()> = Result<T, Box<dyn Error>>;
+
+/// Default `--lock-wait` of the `tune` and `tune-sat` probes, in ms.
+const PROBE_LOCK_WAIT_MS: u64 = 1500;
+/// How often a probe reads and prints the signal status.
+const STATUS_INTERVAL: Duration = Duration::from_millis(250);
+/// How long an event read waits before the loop looks again.
+const EVENT_POLL: Duration = Duration::from_millis(500);
+/// How long a capture's bulk read waits for a transfer.
+const READ_POLL: Duration = Duration::from_millis(500);
+/// How long a capture pauses after a failed bulk read.
+const READ_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// How long after the tune the bridge sends TEI+null filler (docs/40); a
+/// capture enables the stream no earlier.
+const FILLER_AFTER_TUNE: Duration = Duration::from_millis(1500);
+/// A channel argument above this is a frequency in Hz, not a channel number.
+const MIN_FREQUENCY_HZ: u32 = 1000;
+/// A TMCC TS-ID table entry that names no TS.
+const TSID_NONE: u16 = 0xFFFF;
 
 #[derive(Parser)]
 #[command(
@@ -170,10 +189,10 @@ enum Cmd {
     /// ISDB-T: tune a range of UHF channels on tuner #0 and print lock / C/N for each.
     Scan {
         /// First UHF channel (13..62).
-        #[arg(long, default_value_t = 13, value_parser = clap::value_parser!(u32).range(13..=62))]
+        #[arg(long, default_value_t = UHF_FIRST, value_parser = uhf_channels())]
         first: u32,
         /// Last UHF channel (13..62).
-        #[arg(long, default_value_t = 62, value_parser = clap::value_parser!(u32).range(13..=62))]
+        #[arg(long, default_value_t = UHF_LAST, value_parser = uhf_channels())]
         last: u32,
         /// Settling time per channel in milliseconds.
         #[arg(long, default_value_t = 700)]
@@ -222,7 +241,7 @@ struct TuneArgs {
     #[arg(value_parser = ter_channel)]
     channel: Channel,
     /// How long to wait for lock, in ms.
-    #[arg(long, value_name = "MS", default_value_t = 1500)]
+    #[arg(long, value_name = "MS", default_value_t = PROBE_LOCK_WAIT_MS)]
     lock_wait: u64,
     /// Skip the device start command (wValue 0 / wIndex 0x10) after the kit Init.
     #[arg(long)]
@@ -256,15 +275,15 @@ struct TuneSatArgs {
     #[arg(long, value_name = "HEX", value_parser = parse_hex16)]
     tsid: Option<u16>,
     /// How long to wait for lock and the TMCC TS-ID table, in ms.
-    #[arg(long, value_name = "MS", default_value_t = 1500)]
+    #[arg(long, value_name = "MS", default_value_t = PROBE_LOCK_WAIT_MS)]
     lock_wait: u64,
     /// Skip the device start command (wValue 0 / wIndex 0x10) after the kit Init.
     #[arg(long)]
     no_start: bool,
     /// Antenna (LNB) supply: 0 (off), 110 (11 V) or 150 (15 V). The DT-H70/U2 has no such supply
     /// (the setting is for family models that have one).
-    #[arg(long, value_name = "V", default_value_t = 0, value_parser = parse_lnb)]
-    lnb: u32,
+    #[arg(long, value_name = "V", default_value_t = Lnb::Off, value_parser = parse_lnb)]
+    lnb: Lnb,
     /// Switch the booster on before tuning (separate from --lnb).
     #[arg(long)]
     booster: bool,
@@ -273,6 +292,11 @@ struct TuneSatArgs {
     /// nothing on the DT-H70/U2 and takes about 1 s per transfer (docs/40).
     #[arg(long, value_name = "0|1", default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=1))]
     i2c_tuner: u8,
+}
+
+/// The parser of a UHF channel number option ([`UHF_FIRST`]..=[`UHF_LAST`]).
+fn uhf_channels() -> clap::builder::RangedI64ValueParser<u32> {
+    clap::value_parser!(u32).range(i64::from(UHF_FIRST)..=i64::from(UHF_LAST))
 }
 
 /// A byte string given as hex digits (whitespace ignored), e.g. `00000000ff00`.
@@ -317,13 +341,8 @@ fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
-fn parse_lnb(s: &str) -> Result<u32, String> {
-    match s.trim() {
-        "0" => Ok(0),
-        "110" => Ok(110),
-        "150" => Ok(150),
-        _ => Err("0, 110 or 150 expected".into()),
-    }
+fn parse_lnb(s: &str) -> Result<Lnb, String> {
+    s.trim().parse().ok().and_then(Lnb::from_tenths).ok_or_else(|| "0, 110 or 150 expected".into())
 }
 
 /// `tune`'s channel: a UHF channel name (13..62, `27ch`) or a frequency in Hz.
@@ -332,7 +351,7 @@ fn ter_channel(s: &str) -> Result<Channel, String> {
         Some(c) if c.system == System::IsdbT => Ok(c),
         Some(_) => Err(format!("{s}: a BS/CS channel; use tune-sat")),
         None => match s.trim().parse::<u32>() {
-            Ok(hz) if hz > 1000 => Ok(Channel::terrestrial_hz(hz)),
+            Ok(hz) if hz > MIN_FREQUENCY_HZ => Ok(Channel::terrestrial_hz(hz)),
             _ => Err(format!("unknown channel {s:?} (13..62, or a frequency in Hz)")),
         },
     }
@@ -344,7 +363,7 @@ fn sat_channel(s: &str) -> Result<Channel, String> {
         Some(c) if c.system == System::IsdbS => Ok(c),
         Some(_) => Err(format!("{s}: a terrestrial channel; use tune")),
         None => match s.trim().parse::<u32>() {
-            Ok(hz) if hz > 1000 => Ok(Channel::satellite_hz(hz, None)),
+            Ok(hz) if hz > MIN_FREQUENCY_HZ => Ok(Channel::satellite_hz(hz, None)),
             _ => Err(format!("unknown channel {s:?} (BSxx[_n], NDxx[_n], or an IF frequency in Hz)")),
         },
     }
@@ -409,7 +428,7 @@ impl Opener {
             let mut rd = EventReader::new(t.interrupt_in(ep)?);
             std::thread::spawn(move || {
                 loop {
-                    match rd.next(Duration::from_millis(500)) {
+                    match rd.next(EVENT_POLL) {
                         Ok(Some(ev)) => eprintln!(
                             "[event] targets {} class 0x{:04x} code 0x{:04x} payload {:02x?}",
                             ev.targets, ev.class, ev.code, ev.payload
@@ -463,7 +482,7 @@ fn run(cli: Cli) -> Res {
             let t = o.open()?;
             let out = out.map_or_default(|h| h.0);
             let mut inbuf = vec![0u8; r#in];
-            let flags = if tuner == 0 { flags } else { flags | 0x80 };
+            let flags = if tuner == 0 { flags } else { flags | FLAG_TUNER1 };
             let n = dth10_core::protocol::send(
                 &t,
                 flags,
@@ -596,7 +615,7 @@ fn events(o: &Opener, seconds: u64) -> Res {
     let start = Instant::now();
     let mut n = 0;
     while start.elapsed() < Duration::from_secs(seconds) {
-        if let Some(ev) = rd.next(Duration::from_millis(500))? {
+        if let Some(ev) = rd.next(EVENT_POLL)? {
             n += 1;
             println!(
                 "{:7.3}s event targets {} class 0x{:04x} code 0x{:04x} payload {:02x?}",
@@ -643,7 +662,7 @@ fn status_line(st: &SignalStatus, sat: bool) -> String {
     )
 }
 
-/// Read the signal status every 250 ms, printing each reading, until `done`
+/// Read the signal status every [`STATUS_INTERVAL`], printing each reading, until `done`
 /// holds or `wait` has passed. Returns the last good reading and whether
 /// `done` was reached.
 fn wait_lock(
@@ -655,7 +674,7 @@ fn wait_lock(
     let t0 = Instant::now();
     let mut last = None;
     loop {
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(STATUS_INTERVAL);
         match status() {
             Ok(st) => {
                 println!("{:5.2} s  {}", t0.elapsed().as_secs_f64(), status_line(&st, sat));
@@ -701,7 +720,7 @@ fn ter_probe(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs) -> Re
     } else if a.attenuator {
         println!("attenuator: the {} kit has none", kit.kind());
     }
-    kit.tune(&TuneRequest::isdb_t(ch.frequency_hz as u64, 6_000_000))?;
+    kit.tune(&TuneRequest::isdb_t(ch.frequency_hz as u64, UHF_BANDWIDTH_HZ))?;
     let tuned = Instant::now();
     println!("tuned to {} ({} Hz)", ch.name, ch.frequency_hz);
     let (_, locked) = wait_lock(
@@ -735,9 +754,8 @@ fn capture(kit: &mut TerrestrialKit<UsbTransport>, ep: u8, a: &TuneArgs, file: &
             "warning: raw mode on stream #0 stops the satellite stream until the device is power-cycled (docs/40): BS/CS will not work before that."
         );
     }
-    // docs/40: the bridge sends TEI+null filler for about 1.5 s after tuning;
-    // enabling after that keeps it out of the capture.
-    if let Some(rest) = Duration::from_millis(1500).checked_sub(tuned.elapsed()) {
+    // Enabling after the filler keeps it out of the capture.
+    if let Some(rest) = FILLER_AFTER_TUNE.checked_sub(tuned.elapsed()) {
         std::thread::sleep(rest);
     }
     let mut reader = StreamReader::new(
@@ -779,7 +797,7 @@ fn capture_loop(
     let mut sec = PacketStats::default();
     let mut last_report = Instant::now();
     while start.elapsed() < Duration::from_secs(seconds) {
-        match reader.next(Duration::from_millis(500)) {
+        match reader.next(READ_POLL) {
             Ok(Some(data)) => {
                 transfers += 1;
                 if blocks {
@@ -804,7 +822,7 @@ fn capture_loop(
                     Ok(()) => eprintln!("[t+{:5.1}s] halt cleared", start.elapsed().as_secs_f64()),
                     Err(e2) => eprintln!("[t+{:5.1}s] clear_halt failed: {e2}", start.elapsed().as_secs_f64()),
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(READ_RETRY_DELAY);
             }
         }
         if last_report.elapsed() >= Duration::from_secs(1) {
@@ -836,7 +854,7 @@ struct PacketStats {
 impl PacketStats {
     fn note(&mut self, p: &[u8]) {
         self.pkts += 1;
-        if p.len() < 188 || p[1] & 0x40 == 0 {
+        if p.len() < ts_slot::TS_PACKET || p[1] & 0x40 == 0 {
             return;
         }
         self.pusi += 1;
@@ -844,7 +862,7 @@ impl PacketStats {
         if p[3] & 0x20 != 0 {
             off += 1 + p[4] as usize;
         }
-        if off + 3 <= 188 && p[off] == 0 && p[off + 1] == 0 && p[off + 2] == 1 {
+        if off + 3 <= ts_slot::TS_PACKET && p[off] == 0 && p[off + 1] == 0 && p[off + 2] == 1 {
             self.pes += 1;
         }
     }
@@ -857,7 +875,7 @@ fn pick_tsid(ch: &Channel, ids: &[u16]) -> u16 {
     if let Some(slot) = ch.slot
         && let Some(&id) = ids.get(slot as usize)
         && id != 0
-        && id != 0xFFFF
+        && id != TSID_NONE
     {
         return id;
     }
@@ -898,8 +916,8 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
     }
     kit.open()?;
     let r = sat_probe(&mut kit, &ch, a);
-    if a.lnb != 0
-        && let Err(e) = kit.lnb_power(0)
+    if a.lnb != Lnb::Off
+        && let Err(e) = kit.lnb_power(Lnb::Off)
     {
         log::warn!("LNB off: {e}");
     }
@@ -910,14 +928,15 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
 }
 
 fn sat_probe(kit: &mut SatelliteKit<UsbTransport>, ch: &Channel, a: &TuneSatArgs) -> Res {
-    if a.lnb != 0 {
+    if a.lnb != Lnb::Off {
         let healthy = kit.lnb_power(a.lnb)?;
         let st = kit.dev_ref().gpio_read()?;
         println!(
             "LNB {}: healthy={healthy} gpio status {:02x?} readback {:?}",
             a.lnb,
             &st[8..13],
-            dth10_core::device::LnbGpio::of(kit.desc()).map(|g| dth10_core::device::lnb_get(kit.dev_ref(), g))
+            dth10_core::device::LnbGpio::of(kit.desc())
+                .map(|g| dth10_core::device::lnb_get(kit.dev_ref(), g).map(Lnb::tenths))
         );
     }
     let applied = kit.set_booster(a.booster)?;
@@ -949,7 +968,7 @@ fn sat_probe(kit: &mut SatelliteKit<UsbTransport>, ch: &Channel, a: &TuneSatArgs
         Some(slot) => println!("TSID 0x{tsid:04x} selected (relative TS {slot})"),
         None => println!("TSID 0x{tsid:04x} selected"),
     }
-    std::thread::sleep(Duration::from_millis(250));
+    std::thread::sleep(STATUS_INTERVAL);
     match kit.signal_status(field::ALL | field::TSID_TABLE) {
         Ok(st) => println!("after the TS selection: {}", status_line(&st, true)),
         Err(e) => println!("status error: {e}"),
@@ -972,7 +991,7 @@ fn scan(o: &Opener, first: u32, last: u32, wait_ms: u64) -> Res {
     kit.open()?;
     for ch in first..=last {
         let freq = uhf_center_hz(ch).ok_or("UHF channel out of range")?; // 13..62, checked by the option parser
-        if let Err(e) = kit.tune(&TuneRequest::isdb_t(freq as u64, 6_000_000)) {
+        if let Err(e) = kit.tune(&TuneRequest::isdb_t(freq as u64, UHF_BANDWIDTH_HZ)) {
             println!("ch {ch}: tune error {e}");
             continue;
         }
@@ -1033,7 +1052,26 @@ fn run_cepm(o: &Opener, flags: u8, app_keys: Option<&Path>, save: Option<&Path>)
 fn hub_power(action: HubAction, hub: Option<&str>, port: Option<u8>, serial: Option<&str>) -> Res {
     use dth10_usb::nusb::MaybeFuture;
     use dth10_usb::nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
+    // Hub class requests, descriptor and port feature (USB 2.0 §11.23-11.24).
+    const GET_STATUS: u8 = 0;
+    const CLEAR_FEATURE: u8 = 1;
+    const SET_FEATURE: u8 = 3;
+    const GET_DESCRIPTOR: u8 = 6;
+    /// wValue of GET_DESCRIPTOR for the hub descriptor (type 0x29, index 0).
+    const HUB_DESCRIPTOR: u16 = 0x2900;
+    /// Bytes of the hub descriptor asked for (wHubCharacteristics is at 3..5).
+    const HUB_DESCRIPTOR_LEN: u16 = 9;
+    /// Length of the port status (wPortStatus, wPortChange).
+    const PORT_STATUS_LEN: u16 = 4;
     const PORT_POWER: u16 = 8;
+    /// bDeviceClass of a hub.
+    const CLASS_HUB: u8 = 9;
+    /// How long a hub request may take.
+    const HUB_TIMEOUT: Duration = Duration::from_secs(2);
+    /// How long `cycle` keeps the port off.
+    const CYCLE_OFF: Duration = Duration::from_secs(2);
+    /// How long the port is given to settle before its status is read again.
+    const SETTLE: Duration = Duration::from_millis(500);
     let all: Vec<dth10_usb::nusb::DeviceInfo> = dth10_usb::nusb::list_devices().wait()?.collect();
     let (hub_info, port) = if let Some(spec) = hub {
         let (b, a) = spec.split_once(':').ok_or("--hub takes BUS:ADDR")?;
@@ -1053,7 +1091,7 @@ fn hub_power(action: HubAction, hub: Option<&str>, port: Option<u8>, serial: Opt
         let (&last, parent) = chain.split_last().ok_or("the tuner is a root device")?;
         let h = all
             .iter()
-            .find(|d| d.busnum() == tuner.busnum() && d.port_chain() == parent && d.class() == 9)
+            .find(|d| d.busnum() == tuner.busnum() && d.port_chain() == parent && d.class() == CLASS_HUB)
             .ok_or("the tuner's parent hub was not found")?;
         (h.clone(), port.unwrap_or(last))
     };
@@ -1066,17 +1104,17 @@ fn hub_power(action: HubAction, hub: Option<&str>, port: Option<u8>, serial: Opt
         hub_info.product_string()
     );
     let dev = hub_info.open().wait()?;
-    let timeout = Duration::from_secs(2);
+    let timeout = HUB_TIMEOUT;
     // Hub descriptor: wHubCharacteristics bits 0-1 = power switching (0 ganged, 1 per port, 2/3 none).
     let desc = dev
         .control_in(
             ControlIn {
                 control_type: ControlType::Class,
                 recipient: Recipient::Device,
-                request: 6,
-                value: 0x2900,
+                request: GET_DESCRIPTOR,
+                value: HUB_DESCRIPTOR,
                 index: 0,
-                length: 9,
+                length: HUB_DESCRIPTOR_LEN,
             },
             timeout,
         )
@@ -1099,15 +1137,15 @@ fn hub_power(action: HubAction, hub: Option<&str>, port: Option<u8>, serial: Opt
                 ControlIn {
                     control_type: ControlType::Class,
                     recipient: Recipient::Other,
-                    request: 0,
+                    request: GET_STATUS,
                     value: 0,
                     index: port as u16,
-                    length: 4,
+                    length: PORT_STATUS_LEN,
                 },
                 timeout,
             )
             .wait()?;
-        if st.len() >= 4 {
+        if st.len() >= PORT_STATUS_LEN as usize {
             let ps = u16::from_le_bytes([st[0], st[1]]);
             println!(
                 "port {port} {what}: status 0x{ps:04x} (connected {}, enabled {}, powered {})",
@@ -1123,7 +1161,7 @@ fn hub_power(action: HubAction, hub: Option<&str>, port: Option<u8>, serial: Opt
             ControlOut {
                 control_type: ControlType::Class,
                 recipient: Recipient::Other,
-                request: if set { 3 } else { 1 },
+                request: if set { SET_FEATURE } else { CLEAR_FEATURE },
                 value: PORT_POWER,
                 index: port as u16,
                 data: &[],
@@ -1140,13 +1178,13 @@ fn hub_power(action: HubAction, hub: Option<&str>, port: Option<u8>, serial: Opt
         HubAction::On => feature(true)?,
         HubAction::Cycle => {
             feature(false)?;
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(CYCLE_OFF);
             status("while off")?;
             feature(true)?;
         }
     }
     if action != HubAction::Status {
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(SETTLE);
         status("after")?;
     }
     Ok(())
@@ -1185,7 +1223,7 @@ mod tests {
         assert!(parse_hex_bytes("abc").is_err());
         assert!(parse_hex_bytes("zz").is_err());
         assert!(parse_hex_bytes("éé").is_err());
-        assert_eq!(parse_lnb("150"), Ok(150));
+        assert_eq!(parse_lnb("150"), Ok(Lnb::V15));
         assert!(parse_lnb("15").is_err());
     }
 
@@ -1233,7 +1271,7 @@ mod tests {
     #[test]
     fn tune_sat_defaults_and_options() {
         let Cmd::TuneSat(a) = parse(&["tune-sat", "BS15"]).unwrap().cmd else { panic!("not tune-sat") };
-        assert_eq!((a.i2c_tuner, a.lnb, a.tsid, a.lock_wait), (0, 0, None, 1500));
+        assert_eq!((a.i2c_tuner, a.lnb, a.tsid, a.lock_wait), (0, Lnb::Off, None, 1500));
         let Cmd::TuneSat(a) = parse(&["tune-sat", "1613000000", "--tsid", "6020", "--i2c-tuner", "1"]).unwrap().cmd
         else {
             panic!("not tune-sat")

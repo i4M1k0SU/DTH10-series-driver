@@ -8,6 +8,7 @@
 //! * [`queue`]    – [`queue::TsQueue`], where a tuner's TS goes
 //! * [`session`]  – [`session::Session`], what is asked of an opened unit
 //! * [`backend`]  – [`backend::Backend`], one family of devices
+//! * [`ts`]       – transport stream constants (packet size, sync byte, null PID)
 //!
 //! It depends on nothing but `std`: the chip crates of both families use it.
 
@@ -17,6 +18,7 @@ pub mod error;
 pub mod queue;
 pub mod session;
 pub mod stream;
+pub mod ts;
 
 pub use backend::{Backend, Request, Unit};
 pub use channels::{Channel, System, default_tuner};

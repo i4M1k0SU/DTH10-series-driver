@@ -11,13 +11,14 @@
 //!   goes to the tuner address on the bridge bus, unwrapped. The TC90517 kits
 //!   instead wrap the tuner bytes into a demodulator write behind `0xFE`.
 
-use core::time::Duration;
 use std::thread::sleep;
 
 use super::Pn2031Variant;
 use crate::device::Device;
 use crate::error::Result;
-use crate::mxl13xrf::{self, Mxl13xRf, MxlType};
+use crate::mxl13xrf::{
+    self, CMD_READ, CMD_SOFT_RESET, Mxl13xRf, MxlType, REG_LOCK_STATUS, REG_SIGNAL_BA, REG_SIGNAL_CC, TUNE_SETTLE,
+};
 use crate::protocol::UsbControl;
 use crate::tlv::TunerDesc;
 use crate::tuner_bus::{TunerBus, TunerPath};
@@ -69,7 +70,7 @@ impl Pn2031Tuner {
 
     /// `{0xFB, reg}` then one byte back (two gated transfers).
     pub fn read_reg<T: UsbControl>(&self, dev: &mut Device<T>, reg: u8) -> Result<u8> {
-        self.write(dev, &[0xFB, reg])?;
+        self.write(dev, &[CMD_READ, reg])?;
         let mut b = [0u8; 1];
         self.read(dev, &mut b)?;
         Ok(b[0])
@@ -81,14 +82,14 @@ impl Pn2031Tuner {
     pub fn init<T: UsbControl>(&self, dev: &mut Device<T>, desc: &TunerDesc) -> Result<()> {
         if self.variant == Pn2031Variant::Dth10U7 {
             let regs = mxl13xrf::init_registers_u7(desc);
-            self.write(dev, &[0xFF])?;
+            self.write(dev, &[CMD_SOFT_RESET])?;
             return self.write(dev, &flatten(&regs));
         }
         if self.gate.is_none() {
             return self.mxl.init(dev, desc);
         }
         let regs = mxl13xrf::init_registers(desc)?;
-        self.write(dev, &[0xFF])?;
+        self.write(dev, &[CMD_SOFT_RESET])?;
         self.write(dev, &flatten(&regs))
     }
 
@@ -116,16 +117,16 @@ impl Pn2031Tuner {
         }
         let regs = mxl13xrf::rf_tune_registers(freq_hz, bw_hz);
         self.write(dev, &flatten(&regs))?;
-        sleep(Duration::from_millis(3));
-        let _ = self.read_reg(dev, 0xD8);
-        let _ = self.read_reg(dev, 0xD8);
+        sleep(TUNE_SETTLE);
+        let _ = self.read_reg(dev, REG_LOCK_STATUS);
+        let _ = self.read_reg(dev, REG_LOCK_STATUS);
         Ok(())
     }
 
     /// Signal readout from regs 0xCC / 0xBA (the shared MxL conversion).
     pub fn signal<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<i32> {
-        let cc = self.read_reg(dev, 0xCC)?;
-        let ba = self.read_reg(dev, 0xBA)?;
+        let cc = self.read_reg(dev, REG_SIGNAL_CC)?;
+        let ba = self.read_reg(dev, REG_SIGNAL_BA)?;
         Ok(mxl13xrf::signal_value(cc, ba))
     }
 }

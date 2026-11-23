@@ -33,9 +33,49 @@
 use crate::hw::{mmr_r, mmr_rmw, mmr_w};
 
 pub const PACKET: u32 = 188;
+/// The sync byte that starts a packet.
+pub const SYNC: u8 = 0x47;
+
+/// The registers of the table above.
+const PIDF_INDEX: u32 = 0x6040;
+const PIDF_MATCH: u32 = 0x6044;
+const PIDF_DEST: u32 = 0x6048;
+pub const DSC_INDEX: u32 = 0x6080;
+pub const DSC_CFG: u32 = 0x6084;
+pub const CH_ACTIVE: u32 = 0x6150;
+pub const CHWIN_INDEX: u32 = 0x6400;
+pub const CHWIN_DATA: u32 = 0x6404;
+pub const CH_EVENT_CFG: u32 = 0x6580;
+const CHCFG_INDEX: u32 = 0x65E8;
+const CHCFG_DATA: u32 = 0x65EC;
+pub const CH_IRQ_STATUS: u32 = 0x67D4;
+pub const CH_STATUS2: u32 = 0x67B0;
+pub const CH_IRQ_ENABLE: u32 = 0x67DC;
+pub const CH_IRQ_ENABLE2: u32 = 0x67B8;
+
+/// The channels and the PID filter entries.
+pub const CHANNELS: u32 = 16;
+pub const FILTERS: u32 = 32;
+/// The highest input port a filter entry can name.
+pub const PORT_MAX: u32 = 3;
+
+/// CHWIN_INDEX: bit 16 selects the page window (the ring's bounds in
+/// pages); the mask of what reads back.
+pub const CHWIN_PAGES: u32 = 0x1_0000;
+pub const CHWIN_MASK: u32 = 0x1_001F;
+
+/// A channel's descrambler word (DSC_CFG): bits 2..0 switch descrambling on
+/// (7) and off (0), bits 5..3 are always 7, bit 7 is kept as it is.
+pub const DSC_ON: u32 = 7;
+pub const DSC_FIXED: u32 = 0x38;
+pub const DSC_KEEP: u32 = 0x80;
 
 const SEMAPHORE: u32 = 0x440;
 const SEM_DEMUX: u32 = 0x10;
+/// The semaphore reads with this bit set while it is held.
+const SEM_HELD: u32 = 0x8000_0000;
+/// How often taking the semaphore and writing an index register are tried.
+const TRIES: u32 = 1000;
 
 /// Filter match word: the entry is valid; the input port goes to bits 14..13.
 pub const FILTER_VALID: u32 = 0x8000_0000;
@@ -44,23 +84,23 @@ pub const FILTER_ALL: u32 = 0x100;
 
 /// The demultiplexer's tables are changed under hardware semaphore 16.
 pub fn lock() {
-    for _ in 0..1000 {
+    for _ in 0..TRIES {
         mmr_w(SEMAPHORE, SEM_DEMUX);
-        if mmr_r(SEMAPHORE) == 0x8000_0000 | SEM_DEMUX {
+        if mmr_r(SEMAPHORE) == SEM_HELD | SEM_DEMUX {
             return;
         }
     }
 }
 
 pub fn unlock() {
-    if mmr_r(SEMAPHORE) == 0x8000_0000 | SEM_DEMUX {
+    if mmr_r(SEMAPHORE) == SEM_HELD | SEM_DEMUX {
         mmr_w(SEMAPHORE, SEM_DEMUX);
     }
 }
 
 /// Write an index register until it reads back.
 pub fn select(reg: u32, index: u32, mask: u32) {
-    for _ in 0..1000 {
+    for _ in 0..TRIES {
         mmr_w(reg, index);
         if mmr_r(reg) & mask == index & mask {
             return;
@@ -69,16 +109,16 @@ pub fn select(reg: u32, index: u32, mask: u32) {
 }
 
 pub fn set_filter(index: u32, word: u32, dest: u32) {
-    select(0x6040, index, 0x7F);
-    mmr_w(0x6044, word);
-    mmr_w(0x6048, dest);
+    select(PIDF_INDEX, index, 0x7F);
+    mmr_w(PIDF_MATCH, word);
+    mmr_w(PIDF_DEST, dest);
 }
 
 /// Read-modify-write of a channel's descrambler word.
 pub fn descrambler(channel: u32, f: impl FnOnce(u32) -> u32) {
-    mmr_w(0x6080, channel);
-    mmr_w(0x6080, channel);
-    mmr_rmw(0x6084, f);
+    mmr_w(DSC_INDEX, channel);
+    mmr_w(DSC_INDEX, channel);
+    mmr_rmw(DSC_CFG, f);
 }
 
 fn write_position(channel: u32) -> u32 {
@@ -87,11 +127,11 @@ fn write_position(channel: u32) -> u32 {
 
 pub fn stop_channel(channel: u32) {
     let bit = 1 << channel;
-    if mmr_r(0x6150) & bit != 0 {
-        mmr_w(0x6150, bit);
+    if mmr_r(CH_ACTIVE) & bit != 0 {
+        mmr_w(CH_ACTIVE, bit);
     }
-    mmr_w(0x67D4, bit);
-    mmr_w(0x67B0, bit);
+    mmr_w(CH_IRQ_STATUS, bit);
+    mmr_w(CH_STATUS2, bit);
 }
 
 /// Point a stopped channel at its ring (`len` a multiple of 188) and start
@@ -99,21 +139,21 @@ pub fn stop_channel(channel: u32) {
 pub fn start_channel(channel: u32, base: u32, len: u32) {
     let bit = 1 << channel;
     stop_channel(channel);
-    select(0x65E8, channel, 0x1F);
-    mmr_w(0x65EC, 0x7_0015);
-    select(0x6400, 0x1_0000 | channel, 0x1_001F);
-    mmr_w(0x6404, base >> 12 | (base + len - 1) >> 12 << 16);
+    select(CHCFG_INDEX, channel, 0x1F);
+    mmr_w(CHCFG_DATA, 0x7_0015);
+    select(CHWIN_INDEX, CHWIN_PAGES | channel, CHWIN_MASK);
+    mmr_w(CHWIN_DATA, base >> 12 | (base + len - 1) >> 12 << 16);
     mmr_w(write_position(channel), base);
-    select(0x6400, channel, 0x1_001F);
-    mmr_w(0x6404, base + len - 1);
+    select(CHWIN_INDEX, channel, CHWIN_MASK);
+    mmr_w(CHWIN_DATA, base + len - 1);
     // Events at packet ends, one per 2 KB written. Nothing waits for them
     // (the rings are polled), but with this setting the write position
     // always reads at a packet boundary.
     let shift = if channel & 1 != 0 { 16 } else { 0 };
-    mmr_rmw(0x6580 + 4 * (channel >> 1), |v| (v & !(0x1F7 << shift)) | 0x006 << shift);
-    mmr_w(0x67D4, bit);
-    mmr_w(0x67B0, bit);
-    mmr_w(0x6150, bit);
+    mmr_rmw(CH_EVENT_CFG + 4 * (channel >> 1), |v| (v & !(0x1F7 << shift)) | 0x006 << shift);
+    mmr_w(CH_IRQ_STATUS, bit);
+    mmr_w(CH_STATUS2, bit);
+    mmr_w(CH_ACTIVE, bit);
 }
 
 /// A channel's ring as the firmware follows it.

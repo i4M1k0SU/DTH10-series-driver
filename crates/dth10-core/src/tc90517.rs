@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::kit::{SignalStatus, TuneRequest};
 use crate::mxl13xrf::{Mxl13xRf, MxlType};
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tlv::{HW_ISDB_T, TunerDesc};
 use crate::tuner_bus::{TunerBus, TunerPath};
 
 pub struct Tc90517Kit<T: UsbControl> {
@@ -30,7 +30,7 @@ impl<T: UsbControl> Tc90517Kit<T> {
     pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
         let variant = if desc.kit_name.starts_with("TC90517_") {
             TerVariant::Tc90517Mxl
-        } else if desc.kit_name.starts_with("SMT_LJ101") && desc.hw_version == 0x102 {
+        } else if desc.kit_name.starts_with("SMT_LJ101") && desc.hw_version == HW_ISDB_T {
             TerVariant::SmtLj101
         } else {
             // The other kits have their own types ([`crate::terrestrial`]).

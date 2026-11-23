@@ -9,19 +9,25 @@ use super::mmr::{BOARD_ID, Chip};
 use crate::Result;
 use crate::bus::RemotePci;
 
-/// Output data, direction and function/input registers.
+/// Output data, direction and input registers.
 pub const DATA: u32 = 0x1088;
 pub const DIR: u32 = 0x108C;
-pub const FUNC: u32 = 0x1090;
+pub const IN: u32 = 0x1090;
 /// PCI AD-to-GPIO remapping (only for board IDs with bit 27 set).
 pub const REMAP: [u32; 2] = [0x498, 0x49C];
+/// Board-ID bit 27: the board needs the [`REMAP`] registers set.
+const BOARD_ID_REMAP: u32 = 1 << 27;
 
-/// Application states, as the vendor's "app status" bits.
-pub mod app_status {
-    pub const RECORDING: u32 = 0x0100_0000;
-    pub const PLAYING: u32 = 0x0000_0100;
-    pub const WATCHING: u32 = 0x0001_0000;
-    pub const NOT_USING: u32 = 0x0000_0001;
+/// Application states that the lamps show. The vendor application reports
+/// them to its driver as bits (0x0100_0000 recording, 0x100 playing,
+/// 0x1_0000 watching, 0x1 not using; with several set, a busy one wins),
+/// which the driver turns into the GPIO writes [`update_leds`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppStatus {
+    Recording,
+    Playing,
+    Watching,
+    NotUsing,
 }
 
 /// LED bits.
@@ -48,14 +54,14 @@ pub fn idle_bit(board: u8) -> Option<u32> {
 
 /// The vendor's GPIO initialisation.
 pub fn init<B: RemotePci>(chip: &mut Chip<B>) -> Result<()> {
-    if chip.mmr_read_checked(BOARD_ID)? & 0x0800_0000 != 0 {
+    if chip.mmr_read_checked(BOARD_ID)? & BOARD_ID_REMAP != 0 {
         for r in REMAP {
             chip.mmr_write_checked(r, 0xFFFF_FFFF)?;
         }
     }
-    let v = chip.mmr_read_checked(FUNC)?;
-    chip.mmr_write(FUNC, v | 0x2_0000)?;
-    chip.mmr_read_checked(FUNC)?;
+    let v = chip.mmr_read_checked(IN)?;
+    chip.mmr_write(IN, v | 0x2_0000)?;
+    chip.mmr_read_checked(IN)?;
     let (dir, data) = board_gpio(chip.board());
     let v = chip.mmr_read_checked(DIR)?;
     chip.mmr_write(DIR, v | dir)?;
@@ -68,23 +74,14 @@ pub fn write_bits<B: RemotePci>(chip: &Chip<B>, mask: u32, set: bool) -> Result<
     chip.mmr_write(DATA, (v & !mask) | if set { mask } else { 0 })
 }
 
-/// Update the LED and "in use" bits for an application state (a combination
-/// of [`app_status`] bits; the highest-priority one wins). Boards without
+/// Update the LED and "in use" bits for an application state. Boards without
 /// the LED are left alone.
-pub fn update_leds<B: RemotePci>(chip: &Chip<B>, status: u32) -> Result<()> {
+pub fn update_leds<B: RemotePci>(chip: &Chip<B>, status: AppStatus) -> Result<()> {
     let Some(idle) = idle_bit(chip.board()) else { return Ok(()) };
-    let busy = status & (app_status::RECORDING | app_status::PLAYING | app_status::WATCHING) != 0;
-    if busy {
-        write_bits(chip, idle, false)?;
-        write_bits(chip, LED_ON_AIR, true)?;
-        write_bits(chip, LED_IDLE, false)
-    } else if status & app_status::NOT_USING != 0 {
-        write_bits(chip, idle, true)?;
-        write_bits(chip, LED_ON_AIR, false)?;
-        write_bits(chip, LED_IDLE, true)
-    } else {
-        Ok(())
-    }
+    let busy = status != AppStatus::NotUsing;
+    write_bits(chip, idle, !busy)?;
+    write_bits(chip, LED_ON_AIR, busy)?;
+    write_bits(chip, LED_IDLE, !busy)
 }
 
 #[cfg(test)]
@@ -124,23 +121,20 @@ mod tests {
     fn leds() {
         let c = chip(0x0300_00C6);
         c.bus().set(Space::Mem, MMR + DATA, 0x2_0007);
-        update_leds(&c, app_status::WATCHING).unwrap();
+        update_leds(&c, AppStatus::Watching).unwrap();
         assert_eq!(
             writes(&c.bus().ops()),
             vec![Acc::W(DATA, 0x2_0007), Acc::W(DATA, 0x3_0007), Acc::W(DATA, 0x1_0007)]
         );
         c.bus().clear();
-        update_leds(&c, app_status::NOT_USING).unwrap();
+        update_leds(&c, AppStatus::NotUsing).unwrap();
         assert_eq!(writes(&c.bus().ops()), vec![Acc::W(DATA, 0x1_0017), Acc::W(DATA, 0x17), Acc::W(DATA, 0x2_0017)]);
-        c.bus().clear();
-        update_leds(&c, 0).unwrap();
-        assert!(c.bus().ops().is_empty());
 
         let c = chip(0x0300_00B4);
-        update_leds(&c, app_status::RECORDING | app_status::NOT_USING).unwrap();
+        update_leds(&c, AppStatus::Recording).unwrap();
         assert_eq!(writes(&c.bus().ops()), vec![Acc::W(DATA, 0), Acc::W(DATA, 0x1_0000), Acc::W(DATA, 0x1_0000)]);
         let c = chip(0x0300_00B2);
-        update_leds(&c, app_status::RECORDING).unwrap();
+        update_leds(&c, AppStatus::Playing).unwrap();
         assert!(c.bus().ops().is_empty());
     }
 }

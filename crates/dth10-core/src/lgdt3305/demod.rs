@@ -80,6 +80,22 @@ pub mod reg {
     pub const TP_CTRL_1: u16 = 0x050E;
 }
 
+/// [`reg::GEN_CTRL_3`] bit0: running (cleared = held in soft reset).
+const SOFT_RESET_RELEASE: u8 = 0x01;
+/// How long a soft reset holds the chip.
+const SOFT_RESET_HOLD: Duration = Duration::from_millis(20);
+/// [`reg::GEN_CTRL_2`] bit5: the I2C repeater to the tuner is closed.
+const REPEATER_CLOSED: u8 = 0x20;
+/// Wait before and after switching the I2C repeater.
+const REPEATER_SETTLE: Duration = Duration::from_millis(1);
+
+/// Status bits behind the [`lock`] flags: [`reg::AGC_STATUS`] bit0,
+/// [`reg::CR_LOCK_STATUS`] bit1 (QAM) / bit7 (8VSB), [`reg::GEN_STATUS`] bit2.
+const AGC_LOCKED: u8 = 0x01;
+const CR_LOCKED_QAM: u8 = 0x02;
+const CR_LOCKED_VSB: u8 = 0x80;
+const GEN_LOCKED: u8 = 0x04;
+
 /// Lock flag bits of [`SignalStatus::lock`] for this demodulator. The values
 /// are those of [`crate::kit::lock`] with the same meaning (first flag,
 /// signal / carrier, full lock), so callers can test them the same way.
@@ -328,19 +344,19 @@ impl Lgdt3305 {
 
     /// Soft reset: `0x0002` bit0 cleared, 20 ms, set again (one read, two writes).
     pub fn soft_reset<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
-        let v = self.read(dev, reg::GEN_CTRL_3)? & !0x01;
+        let v = self.read(dev, reg::GEN_CTRL_3)? & !SOFT_RESET_RELEASE;
         self.write(dev, reg::GEN_CTRL_3, v)?;
-        sleep(Duration::from_millis(20));
-        self.write(dev, reg::GEN_CTRL_3, v | 0x01)
+        sleep(SOFT_RESET_HOLD);
+        self.write(dev, reg::GEN_CTRL_3, v | SOFT_RESET_RELEASE)
     }
 
     /// Tail shared by the two modulation set-ups: `0x030D` bit2 set, then a
     /// reset pulse that re-reads `0x0002` before releasing it.
     fn setup_tail<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         self.update(dev, reg::AGC_CTRL_030D, |v| v | 0x04)?;
-        self.update(dev, reg::GEN_CTRL_3, |v| v & !0x01)?;
-        sleep(Duration::from_millis(20));
-        self.update(dev, reg::GEN_CTRL_3, |v| v | 0x01)?;
+        self.update(dev, reg::GEN_CTRL_3, |v| v & !SOFT_RESET_RELEASE)?;
+        sleep(SOFT_RESET_HOLD);
+        self.update(dev, reg::GEN_CTRL_3, |v| v | SOFT_RESET_RELEASE)?;
         Ok(())
     }
 
@@ -449,9 +465,11 @@ impl Lgdt3305 {
     /// I2C repeater to the tuner: 1 ms, `0x0001` bit5 cleared (open) or set
     /// (closed), 1 ms.
     pub fn gate<T: UsbControl>(&self, dev: &mut Device<T>, open: bool) -> Result<()> {
-        sleep(Duration::from_millis(1));
-        self.update(dev, reg::GEN_CTRL_2, |v| if open { v & !0x20 } else { (v & !0x20) | 0x20 })?;
-        sleep(Duration::from_millis(1));
+        sleep(REPEATER_SETTLE);
+        self.update(dev, reg::GEN_CTRL_2, |v| {
+            if open { v & !REPEATER_CLOSED } else { (v & !REPEATER_CLOSED) | REPEATER_CLOSED }
+        })?;
+        sleep(REPEATER_SETTLE);
         Ok(())
     }
 
@@ -468,22 +486,22 @@ impl Lgdt3305 {
             .ok_or(Error::Protocol("LGDT3305 reports modulation mode 2"))?;
 
         let mut lk = 0u32;
-        if self.read(dev, reg::AGC_STATUS)? & 0x01 != 0 {
+        if self.read(dev, reg::AGC_STATUS)? & AGC_LOCKED != 0 {
             lk |= lock::AGC;
         }
         let cr = self.read(dev, reg::CR_LOCK_STATUS)?;
         if mode.is_qam() {
-            if cr & 0x02 != 0 {
+            if cr & CR_LOCKED_QAM != 0 {
                 lk |= lock::CARRIER;
             }
             self.read(dev, reg::STATUS_021B)?;
-        } else if cr & 0x80 != 0 {
+        } else if cr & CR_LOCKED_VSB != 0 {
             lk |= lock::CARRIER;
         }
         let gen_status = self.read(dev, reg::GEN_STATUS)?;
         // Not part of the driver's status block: the raw byte, for diagnostics.
         st.sync_state = gen_status;
-        if gen_status & 0x04 != 0 {
+        if gen_status & GEN_LOCKED != 0 {
             lk |= lock::LOCKED;
         }
         if mode.is_qam() {

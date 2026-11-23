@@ -20,6 +20,8 @@ use core::time::Duration;
 use crate::i2c::I2c;
 use crate::{Error, Result};
 
+use super::demod::reg::REPEATER;
+
 /// Millisecond delays (the vendor's `Sleep` calls). Kept apart from the
 /// I2C trait so tests can record them instead of sleeping.
 pub trait Delay {
@@ -172,10 +174,10 @@ pub fn write_tuner<B: Bus + ?Sized>(
             for (i, chunk) in data.chunks(REPEATER_CHUNK).enumerate() {
                 buf[1] = reg.wrapping_add((i * REPEATER_CHUNK) as u8);
                 buf[2..2 + chunk.len()].copy_from_slice(chunk);
-                write_regs(bus, demod, 0xFE, &buf[..2 + chunk.len()])?;
+                write_regs(bus, demod, REPEATER, &buf[..2 + chunk.len()])?;
             }
             if data.is_empty() {
-                write_regs(bus, demod, 0xFE, &[tuner, reg])?;
+                write_regs(bus, demod, REPEATER, &[tuner, reg])?;
             }
             Ok(())
         }

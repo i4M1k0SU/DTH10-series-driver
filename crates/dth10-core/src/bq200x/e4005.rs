@@ -383,6 +383,16 @@ pub fn harmonic_band(f_khz: i32, bw_khz: i32) -> u8 {
     }
 }
 
+/// MASTER1: 0x00 = standby, 0x02 = normal standby bit (awake).
+const REG_MASTER1: u8 = 0x00;
+/// AGC2: the LNA calibration result.
+const REG_AGC2: u8 = 0x1B;
+/// AGC6: [`LNA_CAL_REQUEST`] requests an LNA calibration, 0x0F ends it.
+const REG_AGC6: u8 = 0x1F;
+const LNA_CAL_REQUEST: u8 = 0x1F;
+/// Number of AGC2 reads the LNA calibration averages.
+const LNA_CAL_SAMPLES: i32 = 100;
+
 /// The E4005 tuner object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct E4005 {
@@ -427,12 +437,12 @@ impl E4005 {
 
     /// Standby: MASTER1 (0x00) = 0x00.
     pub fn standby<T: UsbControl>(&self, dev: &mut Device<T>, gate: &TunerGate) -> Result<()> {
-        gate.with(dev, |d| self.wr(d, 0x00, 0x00))
+        gate.with(dev, |d| self.wr(d, REG_MASTER1, 0x00))
     }
 
     /// Wake: MASTER1 (0x00) = 0x02 (normal standby bit).
     pub fn wake<T: UsbControl>(&self, dev: &mut Device<T>, gate: &TunerGate) -> Result<()> {
-        gate.with(dev, |d| self.wr(d, 0x00, 0x02))
+        gate.with(dev, |d| self.wr(d, REG_MASTER1, 0x02))
     }
 
     /// LNA calibration: AGC6 (0x1F) = 0x1F (bit4 = LNA calibration request)
@@ -441,18 +451,18 @@ impl E4005 {
     /// 0xFA = 0x08.
     fn lna_calibrate<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         for _ in 0..14 {
-            self.wr(dev, 0x1F, 0x1F)?;
+            self.wr(dev, REG_AGC6, LNA_CAL_REQUEST)?;
         }
-        self.wr(dev, 0x1F, 0x1F)?;
-        self.rd(dev, 0x1B)?;
+        self.wr(dev, REG_AGC6, LNA_CAL_REQUEST)?;
+        self.rd(dev, REG_AGC2)?;
         let mut sum = 0i32;
-        for _ in 0..100 {
-            self.wr(dev, 0x1F, 0x1F)?;
-            sum += self.rd(dev, 0x1B)? as i32;
+        for _ in 0..LNA_CAL_SAMPLES {
+            self.wr(dev, REG_AGC6, LNA_CAL_REQUEST)?;
+            sum += self.rd(dev, REG_AGC2)? as i32;
         }
-        self.wr(dev, 0x1F, 0x0F)?;
+        self.wr(dev, REG_AGC6, 0x0F)?;
         self.wr(dev, 0xFA, 0x08)?;
-        self.wr(dev, 0x1B, (sum / 100) as u8)
+        self.wr(dev, REG_AGC2, (sum / LNA_CAL_SAMPLES) as u8)
     }
 
     /// Start of a tune: LNA calibration, MASTER1 (0x00) = 2, AGC1 (0x1A) = 0x1C,
@@ -463,7 +473,7 @@ impl E4005 {
         let r8d = self.rd(dev, 0x8D)?;
         // The original ignores the calibration result.
         let _ = self.lna_calibrate(dev);
-        self.wr(dev, 0x00, 0x02)?;
+        self.wr(dev, REG_MASTER1, 0x02)?;
         self.wr(dev, 0x1A, 0x1C)?;
         self.wr(dev, 0x20, (r20 & 0xFC) | 0x04)?;
         self.wr(dev, 0x8D, r8d)

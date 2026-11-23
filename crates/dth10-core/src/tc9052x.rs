@@ -37,7 +37,7 @@ use crate::kit::{SignalStatus, TuneRequest, VendorDriver};
 use crate::mtv808::Mtv808;
 use crate::protocol::UsbControl;
 use crate::tc90517::{Tc90517, TerVariant};
-use crate::tlv::TunerDesc;
+use crate::tlv::{HW_ISDB_S, HW_ISDB_T, TunerDesc};
 use crate::tuner_bus::{TunerBus, TunerPath};
 
 /// The vendor driver whose code the kit for `desc` follows on the model with
@@ -46,10 +46,10 @@ use crate::tuner_bus::{TunerBus, TunerPath};
 /// that both know follows the driver of the model.
 pub fn driver_for(desc: &TunerDesc, pid: u16) -> Option<VendorDriver> {
     match (desc.kit_name.as_str(), desc.hw_version) {
-        ("TC90522_FC5500" | "TC90532_FC5500" | "TC90522_MTV808", 0x102) => Some(VendorDriver::Dth30),
-        ("TC90522_MTV600", 0x402) => Some(VendorDriver::Dth30),
-        ("TC90532_MTV808", 0x102) | ("TC90532_MTV600", 0x402) => Some(VendorDriver::for_product(pid)),
-        ("TC90532_MTV600", 0x102) | ("TC90532_MTV808", 0x402) => Some(VendorDriver::Series),
+        ("TC90522_FC5500" | "TC90532_FC5500" | "TC90522_MTV808", HW_ISDB_T) => Some(VendorDriver::Dth30),
+        ("TC90522_MTV600", HW_ISDB_S) => Some(VendorDriver::Dth30),
+        ("TC90532_MTV808", HW_ISDB_T) | ("TC90532_MTV600", HW_ISDB_S) => Some(VendorDriver::for_product(pid)),
+        ("TC90532_MTV600", HW_ISDB_T) | ("TC90532_MTV808", HW_ISDB_S) => Some(VendorDriver::Series),
         _ => None,
     }
 }
@@ -86,7 +86,7 @@ pub struct Tc9052xKit<T: UsbControl> {
 impl<T: UsbControl> Tc9052xKit<T> {
     /// Whether `desc` names this kit (a TC90522 / TC90532 name with hw 0x102).
     pub fn supports(desc: &TunerDesc) -> bool {
-        desc.hw_version == 0x102 && driver_for(desc, 0).is_some()
+        desc.hw_version == HW_ISDB_T && driver_for(desc, 0).is_some()
     }
 
     /// The kit for `desc` on the model with USB product ID `pid`
@@ -94,7 +94,7 @@ impl<T: UsbControl> Tc9052xKit<T> {
     /// MTV808 (the series driver's kit also for `TC90532_MTV600`).
     pub fn new(dev: Device<T>, desc: TunerDesc, pid: u16) -> Result<Self> {
         let driver = match driver_for(&desc, pid) {
-            Some(d) if desc.hw_version == 0x102 => d,
+            Some(d) if desc.hw_version == HW_ISDB_T => d,
             _ => {
                 return Err(Error::Unsupported(format!(
                     "terrestrial tuner kit {} hw 0x{:x} is not a TC90522 / TC90532 hw 0x102 kit",
@@ -255,7 +255,7 @@ impl<T: UsbControl> Tc9052xKit<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kit::PID_DTH30_PCIEM_TS;
+    use crate::kit::{PID_DTH30_PCIEM_TS, TsPins};
     use crate::regmock::{Op, RegMock, Write};
 
     fn desc(name: &str, hw: u32, flags: u32) -> TunerDesc {
@@ -330,8 +330,12 @@ mod tests {
 
     /// The writes of the TS pin control in `mode` from a zeroed register file
     /// that the configuration left at `1D=02 1E=28 1F=AA`.
-    fn ts_pins(addr: u8, mode: u8) -> Vec<Write> {
-        let r1d = [0x02, 0xAA, 0x56][mode as usize];
+    fn ts_pins(addr: u8, mode: TsPins) -> Vec<Write> {
+        let r1d = match mode {
+            TsPins::Output => 0x02,
+            TsPins::Stopped => 0xAA,
+            TsPins::Third => 0x56,
+        };
         vec![
             Write::Batch(vec![(addr, 0x1D, vec![r1d])]),
             Write::Batch(vec![(addr, 0x1E, vec![0x28])]),
@@ -357,7 +361,7 @@ mod tests {
         );
         // ends with the demodulator standby only (no tuner standby in this driver)
         let n = w.len();
-        assert_eq!(&w[n - 4..n - 1], &ts_pins(0x10, 1)[..]);
+        assert_eq!(&w[n - 4..n - 1], &ts_pins(0x10, TsPins::Stopped)[..]);
         assert_eq!(w[n - 1], demod_standby(0x10));
         assert!(w[5..n - 4].iter().all(|w| matches!(w, Write::Raw(0x10, d) if d[0] == 0xFE)), "{w:?}");
 
@@ -367,12 +371,12 @@ mod tests {
 
         k.tune(&TuneRequest::isdb_t(557_142_857, 6_000_000)).unwrap();
         let w = k.dev.transport().take_writes();
-        let mut pre = ts_pins(0x10, 1);
+        let mut pre = ts_pins(0x10, TsPins::Stopped);
         pre.push(Write::Batch(vec![(0x10, 0x25, vec![0x00]), (0x10, 0x23, vec![0x4D])]));
         assert_eq!(&w[..4], &pre[..]);
         let n = w.len();
         let mut post = vec![Write::Reg(0x10, 0x01, vec![0x40]), Write::Reg(0x10, 0x23, vec![0x4C])];
-        post.extend(ts_pins(0x10, 0));
+        post.extend(ts_pins(0x10, TsPins::Output));
         assert_eq!(&w[n - 5..], &post[..]);
         assert!(w[4..n - 5].iter().all(|w| matches!(w, Write::Raw(0x10, _))), "{w:?}");
         assert_eq!(k.last_request().map(|r| r.frequency_hz), Some(557_142_857));
@@ -386,7 +390,7 @@ mod tests {
         );
 
         k.close().unwrap();
-        let mut standby = ts_pins(0x10, 1);
+        let mut standby = ts_pins(0x10, TsPins::Stopped);
         standby.push(demod_standby(0x10));
         assert_eq!(k.dev.transport().take_writes(), standby);
     }
@@ -402,7 +406,7 @@ mod tests {
             std::assert_matches!(&w[0], Write::Batch(b) if b.len() == 16 && b[4] == (0x10, 0x0F, vec![0x17]), "{name}");
             let n = w.len();
             assert_eq!(w[n - 1], demod_standby(0x10), "{name}");
-            assert_eq!(&w[n - 4..n - 1], &ts_pins(0x10, 1)[..], "{name}");
+            assert_eq!(&w[n - 4..n - 1], &ts_pins(0x10, TsPins::Stopped)[..], "{name}");
             let before = &w[n - 7..n - 4];
             let mtv808_standby = [
                 Write::Raw(0x10, vec![0xFE, 0xC2, 0x33]),

@@ -24,20 +24,31 @@ mod ts;
 
 use core::panic::PanicInfo;
 
+use boot::{FATAL_COUNT, FATAL_MARK, FATAL_RECORD};
 use card::Card;
 use cas::Cas;
 use dma::Dma;
-use host::{Command, FAILED, Host, OK, UNSUPPORTED};
+use host::{
+    CMD_CAS_CLOSE, CMD_CAS_OPEN, CMD_CLOSE, CMD_FLUSH, CMD_INPUT, CMD_OPEN, CMD_PING, CMD_TS_CONFIG, Command, FAILED,
+    Host, OK, UNSUPPORTED,
+};
 use hw::{Clock, fb_r, fb_w};
 use program::Program;
 use ts::Ts;
 
+/// The place a panic gives in its fatal error record.
+const PANIC_PLACE: u32 = u32::from_le_bytes(*b"PANC");
+/// The CPU clock (kHz), from the host (FB).
+const FB_CLOCK_KHZ: u32 = 0x44;
+/// How long the close of a stream lets the running DMA transfer finish (ms).
+const CLOSE_SETTLE_MS: u32 = 100;
+
 /// The same record as for an exception, with "PANC" for the place.
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
-    fb_w(0x530, 0xDEAD_C0DE);
-    fb_w(0x534, 0x434E_4150);
-    fb_w(0x520, fb_r(0x520).wrapping_add(1));
+    fb_w(FATAL_RECORD, FATAL_MARK);
+    fb_w(FATAL_RECORD + 4, PANIC_PLACE);
+    fb_w(FATAL_COUNT, fb_r(FATAL_COUNT).wrapping_add(1));
     loop {}
 }
 
@@ -59,34 +70,34 @@ impl Firmware {
             return OK;
         }
         match c.id {
-            // Ping.
-            0 => OK,
+            CMD_PING => OK,
+            // The functions the vendor's firmware does not support either.
             1 | 2 | 3 | 5 => UNSUPPORTED,
             _ if p == 0 => FAILED,
-            // Open a stream.
-            8 => match fb_r(p + 0x58) {
+            CMD_OPEN => match fb_r(p + ts::OPEN_KIND) {
                 ts::KIND_RAW => self.ts.open_raw(p),
-                ts::KIND_PROGRAM => self.program.open(p, self.clock.ticks(5), &mut self.ts, &mut self.card),
+                ts::KIND_PROGRAM => {
+                    self.program.open(p, self.clock.ticks(program::PATIENCE_MS), &mut self.ts, &mut self.card)
+                }
                 _ => FAILED,
             },
-            // Close a stream.
-            9 => {
+            CMD_CLOSE => {
                 let result = match fb_r(p) {
                     h if self.ts.owns(h) => self.ts.close(),
                     h if self.program.owns(h) => self.program.close(&mut self.ts),
                     _ => FAILED,
                 };
-                self.dma.settle(self.clock.ticks(100));
+                self.dma.settle(self.clock.ticks(CLOSE_SETTLE_MS));
                 result
             }
             // The flush before a close: nothing is held back, so there is
             // nothing to do.
-            10 if self.ts.owns(fb_r(p)) || self.program.owns(fb_r(p)) => OK,
-            10 => FAILED,
-            11 => self.cas.input(p, &mut self.card),
-            24 => self.ts.configure(self.program.is_open()),
-            25 => self.cas.open(p),
-            26 => self.cas.close(fb_r(p)),
+            CMD_FLUSH if self.ts.owns(fb_r(p)) || self.program.owns(fb_r(p)) => OK,
+            CMD_FLUSH => FAILED,
+            CMD_INPUT => self.cas.input(p, &mut self.card),
+            CMD_TS_CONFIG => self.ts.configure(self.program.is_open()),
+            CMD_CAS_OPEN => self.cas.open(p),
+            CMD_CAS_CLOSE => self.cas.close(fb_r(p)),
             _ => FAILED,
         }
     }
@@ -101,11 +112,11 @@ fn fw_main() -> ! {
     for off in boot::FATAL_AREA.step_by(4) {
         fb_w(off, 0);
     }
-    fb_w(0xC0, boot::MAGIC);
-    fb_w(0xC4, boot::VERSION);
+    fb_w(boot::FB_MAGIC, boot::MAGIC);
+    fb_w(boot::FB_VERSION, boot::VERSION);
     // The host leaves the CPU clock (kHz) in FB 0x44 before the release.
     let khz = loop {
-        let v = fb_r(0x44);
+        let v = fb_r(FB_CLOCK_KHZ);
         if v != 0 {
             break v;
         }

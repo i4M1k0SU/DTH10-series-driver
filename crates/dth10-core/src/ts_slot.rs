@@ -5,7 +5,7 @@
 /// Size of one slot of the bulk TS pipe.
 pub const SLOT: usize = 256;
 /// Size of a TS packet.
-pub const TS_PACKET: usize = 188;
+pub const TS_PACKET: usize = dth_common::ts::TS_PACKET;
 
 /// How a TS packet sits in its 256-byte slot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

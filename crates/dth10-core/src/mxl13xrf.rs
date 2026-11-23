@@ -12,8 +12,27 @@ use std::thread::sleep;
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tlv::{HW_ATSC, HW_ISDB_T, TunerDesc, flag, present};
 use crate::tuner_bus::TunerBus;
+
+/// `tuner_opts` bit0: clock output on (reg 0x03 bit3).
+const OPT_CLOCK_OUT: u32 = 0x1;
+/// `tuner_opts` bit1: reg 0x04 bit0 set (as descriptor flags bit0).
+const OPT_REG04: u32 = 0x2;
+/// `tuner_opts` bit2: reg 0x08 bit7 cleared (else set).
+const OPT_REG08_BIT7_OFF: u32 = 0x4;
+
+/// Command byte: soft reset.
+pub(crate) const CMD_SOFT_RESET: u8 = 0xFF;
+/// Command byte: read the register that follows.
+pub(crate) const CMD_READ: u8 = 0xFB;
+/// RF / REF lock status (see [`Mxl13xRf::lock_status`]).
+pub(crate) const REG_LOCK_STATUS: u8 = 0xD8;
+/// Wait after the tune write before the lock status is read.
+pub(crate) const TUNE_SETTLE: Duration = Duration::from_millis(3);
+/// The two registers of the signal readout ([`signal_value`]'s `cc` and `ba`).
+pub(crate) const REG_SIGNAL_CC: u8 = 0xCC;
+pub(crate) const REG_SIGNAL_BA: u8 = 0xBA;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MxlType {
@@ -116,15 +135,15 @@ pub fn init_registers(desc: &TunerDesc) -> Result<[(u8, u8); 22]> {
     let p = desc.present;
 
     // 2. hardware version → reg 0x06
-    if p & 0x1 != 0 {
+    if p & present::HW_VERSION != 0 {
         match desc.hw_version {
-            0x101 => patch(&mut t, 0x06, |v| (v & 0xF2) | 0x12),
-            0x102 => patch(&mut t, 0x06, |v| (v & 0xF0) | 0x10),
+            HW_ATSC => patch(&mut t, 0x06, |v| (v & 0xF2) | 0x12),
+            HW_ISDB_T => patch(&mut t, 0x06, |v| (v & 0xF0) | 0x10),
             _ => {}
         }
     }
     // 3. IF frequency → reg 0x02
-    if p & 0x4000 != 0 {
+    if p & present::IF_FREQ != 0 {
         let (inv, if_hz) =
             if desc.if_freq_hz < 0 { (true, desc.if_freq_hz.unsigned_abs()) } else { (false, desc.if_freq_hz as u32) };
         if if_hz == 0 {
@@ -144,7 +163,7 @@ pub fn init_registers(desc: &TunerDesc) -> Result<[(u8, u8); 22]> {
         }
     }
     // 4. crystal → reg 0x03[7:4], reg 0x05[3:0]
-    if p & 0x2000 != 0 {
+    if p & present::TUNER_XTAL != 0 {
         match desc.tuner_xtal_hz {
             16_000_000 => {
                 patch(&mut t, 0x03, |v| v & 0x0F);
@@ -166,16 +185,16 @@ pub fn init_registers(desc: &TunerDesc) -> Result<[(u8, u8); 22]> {
         }
     }
     // 5. option bit0 → reg 0x03 bit3 (clock output enable)
-    if desc.tuner_opts & 0x1 != 0 {
+    if desc.tuner_opts & OPT_CLOCK_OUT != 0 {
         patch(&mut t, 0x03, |v| v | 0x08);
     } else {
         patch(&mut t, 0x03, |v| v & !0x08);
     }
     // 6. option bit1 or desc flags bit0 → reg 0x04 bit0
-    let b = (desc.tuner_opts & 0x2 != 0) || (desc.flags & 0x1 != 0);
+    let b = (desc.tuner_opts & OPT_REG04 != 0) || (desc.flags & flag::MXL_REG04 != 0);
     patch(&mut t, 0x04, |v| (v & !0x01) | b as u8);
     // 7. option bit2 → reg 0x08 bit7 cleared, else set
-    if desc.tuner_opts & 0x4 != 0 {
+    if desc.tuner_opts & OPT_REG08_BIT7_OFF != 0 {
         patch(&mut t, 0x08, |v| v & !0x80);
     } else {
         patch(&mut t, 0x08, |v| v | 0x80);
@@ -216,14 +235,14 @@ pub const INIT_TABLE_U7: [(u8, u8); 19] = [
 pub fn init_registers_u7(desc: &TunerDesc) -> [(u8, u8); 19] {
     let mut t = INIT_TABLE_U7;
     let p = desc.present;
-    if p & 0x1 != 0 {
+    if p & present::HW_VERSION != 0 {
         match desc.hw_version {
-            0x101 => patch(&mut t, 0x06, |v| (v & 0xF2) | 0x12),
-            0x102 => patch(&mut t, 0x06, |v| (v & 0xF0) | 0x10),
+            HW_ATSC => patch(&mut t, 0x06, |v| (v & 0xF2) | 0x12),
+            HW_ISDB_T => patch(&mut t, 0x06, |v| (v & 0xF0) | 0x10),
             _ => {}
         }
     }
-    if p & 0x4000 != 0 {
+    if p & present::IF_FREQ != 0 {
         let inv = desc.if_freq_hz < 0;
         match desc.if_freq_hz.unsigned_abs() {
             4_000_000 => patch(&mut t, 0x02, |v| v & 0xF0),
@@ -236,7 +255,7 @@ pub fn init_registers_u7(desc: &TunerDesc) -> [(u8, u8); 19] {
             patch(&mut t, 0x02, |v| v & !0x10);
         }
     }
-    if p & 0x2000 != 0 {
+    if p & present::TUNER_XTAL != 0 {
         match desc.tuner_xtal_hz {
             16_000_000 => {
                 patch(&mut t, 0x03, |v| v & 0x0F);
@@ -249,13 +268,13 @@ pub fn init_registers_u7(desc: &TunerDesc) -> [(u8, u8); 19] {
             _ => {}
         }
     }
-    let flags0 = desc.flags & 0x1 != 0;
-    if desc.tuner_opts & 0x1 == 0 && !flags0 {
+    let flags0 = desc.flags & flag::MXL_REG04 != 0;
+    if desc.tuner_opts & OPT_CLOCK_OUT == 0 && !flags0 {
         patch(&mut t, 0x03, |v| v & !0x08);
     }
-    let b = (desc.tuner_opts & 0x2 != 0) || flags0;
+    let b = (desc.tuner_opts & OPT_REG04 != 0) || flags0;
     patch(&mut t, 0x04, |v| (v & !0x01) | b as u8);
-    if desc.tuner_opts & 0x4 != 0 {
+    if desc.tuner_opts & OPT_REG08_BIT7_OFF != 0 {
         patch(&mut t, 0x08, |v| v & !0x80);
     } else {
         patch(&mut t, 0x08, |v| v | 0x80);
@@ -321,7 +340,7 @@ impl Mxl13xRf {
 
     /// Write `{0xFB, reg}` then read one byte.
     pub fn read_reg<T: UsbControl>(&self, dev: &mut Device<T>, reg: u8) -> Result<u8> {
-        self.bus.write(dev, &[0xFB, reg])?;
+        self.bus.write(dev, &[CMD_READ, reg])?;
         let mut b = [0u8; 1];
         self.bus.read(dev, &mut b)?;
         Ok(b[0])
@@ -331,14 +350,14 @@ impl Mxl13xRf {
     /// patched table in one write. No delay in the original.
     pub fn init<T: UsbControl>(&self, dev: &mut Device<T>, desc: &TunerDesc) -> Result<()> {
         let regs = init_registers(desc)?;
-        self.write(dev, &[0xFF])?;
+        self.write(dev, &[CMD_SOFT_RESET])?;
         self.write(dev, &flatten(&regs))
     }
 
     /// Initialisation used by the `SMT_LJ101` hw 0x102 kit:
     /// soft reset then the fixed 18-pair table in one 36-byte write.
     pub fn init_lj101<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
-        self.write(dev, &[0xFF])?;
+        self.write(dev, &[CMD_SOFT_RESET])?;
         self.write(dev, &flatten(&INIT_TABLE_LJ101))
     }
 
@@ -362,23 +381,23 @@ impl Mxl13xRf {
     pub fn set_frequency<T: UsbControl>(&self, dev: &mut Device<T>, freq_hz: u32, bw_hz: u32) -> Result<()> {
         let regs = rf_tune_registers(freq_hz, bw_hz);
         self.write(dev, &flatten(&regs))?;
-        sleep(Duration::from_millis(3));
-        let _ = self.read_reg(dev, 0xD8);
-        let _ = self.read_reg(dev, 0xD8);
+        sleep(TUNE_SETTLE);
+        let _ = self.read_reg(dev, REG_LOCK_STATUS);
+        let _ = self.read_reg(dev, REG_LOCK_STATUS);
         Ok(())
     }
 
     /// RF/REF lock bits from reg 0xD8 (Linux semantics: `0x0C` = RF lock,
     /// `0x03` = REF lock). Not evaluated by the original driver.
     pub fn lock_status<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<u8> {
-        self.read_reg(dev, 0xD8)
+        self.read_reg(dev, REG_LOCK_STATUS)
     }
 
     /// Signal readout: `1000 * (113 - ba' - cc)` where
     /// `ba' = ba > 7 ? (ba + 0xF0) as u8 : ba` (zero-extended, as the original driver computes it).
     pub fn signal<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<i32> {
-        let cc = self.read_reg(dev, 0xCC)?;
-        let ba = self.read_reg(dev, 0xBA)?;
+        let cc = self.read_reg(dev, REG_SIGNAL_CC)?;
+        let ba = self.read_reg(dev, REG_SIGNAL_BA)?;
         Ok(signal_value(cc, ba))
     }
 }

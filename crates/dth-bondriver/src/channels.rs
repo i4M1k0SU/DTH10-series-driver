@@ -1,37 +1,54 @@
 //! Tuning spaces and channel tables exposed to TVTest.
 //!
-//! Space 0: ISDB-T (UHF 13–62ch). Space 1: BS, Space 2: CS110 (ISDB-S), four
-//! relative TS numbers per transponder. The frequency tables live in
+//! The tuning spaces: ISDB-T (UHF 13–62ch), BS and CS110 (ISDB-S, four
+//! relative TS numbers per transponder), shown in that order (`[Device]
+//! Spaces` may leave some out). The frequency tables live in
 //! `dth_common::channels`.
 
 use std::collections::HashMap;
 
 pub use dth_common::channels::Channel;
-use dth_common::channels::{BS_IF_HZ, CS_IF_HZ};
+use dth_common::channels::{BS_IF_HZ, CS_IF_HZ, UHF_FIRST};
 
-pub fn space_name(space: u32) -> Option<&'static str> {
-    match space {
-        0 => Some("地デジ"),
-        1 => Some("BS"),
-        2 => Some("CS110"),
-        _ => None,
+/// A tuning space. TVTest numbers the spaces a DLL shows from 0 (see
+/// `[Device] Spaces`), so its index is not a [`Space`] by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Space {
+    /// ISDB-T (UHF).
+    Terrestrial,
+    /// BS.
+    Bs,
+    /// CS110.
+    Cs,
+}
+
+impl Space {
+    /// Every tuning space, in the order they are shown.
+    pub const ALL: [Space; 3] = [Space::Terrestrial, Space::Bs, Space::Cs];
+
+    /// The name TVTest shows.
+    pub fn name(self) -> &'static str {
+        match self {
+            Space::Terrestrial => "地デジ",
+            Space::Bs => "BS",
+            Space::Cs => "CS110",
+        }
     }
 }
 
 /// Number of TS slots enumerated per satellite transponder.
 const TS_PER_TRANSPONDER: u32 = 4;
 
-pub fn channel(space: u32, ch: u32) -> Option<Channel> {
+pub fn channel(space: Space, ch: u32) -> Option<Channel> {
     match space {
-        0 => Channel::terrestrial(ch + 13),
-        1 | 2 => {
-            let table = if space == 1 { BS_IF_HZ } else { CS_IF_HZ };
+        Space::Terrestrial => Channel::terrestrial(ch + UHF_FIRST),
+        Space::Bs | Space::Cs => {
+            let table = if space == Space::Bs { BS_IF_HZ } else { CS_IF_HZ };
             let tp = (ch / TS_PER_TRANSPONDER) as usize;
             let slot = (ch % TS_PER_TRANSPONDER) as u8;
             let (num, _) = *table.get(tp)?;
-            if space == 1 { Channel::bs(num, slot) } else { Channel::cs(num, slot) }
+            if space == Space::Bs { Channel::bs(num, slot) } else { Channel::cs(num, slot) }
         }
-        _ => None,
     }
 }
 
@@ -58,14 +75,14 @@ mod tests {
 
     #[test]
     fn spaces_map_to_channels() {
-        let c = channel(0, 14).unwrap();
+        let c = channel(Space::Terrestrial, 14).unwrap();
         assert_eq!((c.system, c.frequency_hz), (System::IsdbT, 557_142_857));
-        let b = channel(1, 4 * 7 + 1).unwrap(); // BS15, relative TS 1
+        let b = channel(Space::Bs, 4 * 7 + 1).unwrap(); // BS15, relative TS 1
         assert_eq!((b.frequency_hz, b.tsid, b.slot), (1_318_000_000, 0x40F1, Some(1)));
         assert_eq!(b.name, "BS15/TS1");
-        let n = channel(2, 0).unwrap();
+        let n = channel(Space::Cs, 0).unwrap();
         assert_eq!(n.name, "ND02/TS0");
-        assert!(channel(1, 4 * 12).is_none());
-        assert!(channel(3, 0).is_none());
+        assert!(channel(Space::Bs, 4 * 12).is_none());
+        assert_eq!(Space::ALL.map(Space::name), ["地デジ", "BS", "CS110"]);
     }
 }

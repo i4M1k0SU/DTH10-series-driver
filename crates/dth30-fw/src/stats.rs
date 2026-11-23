@@ -16,6 +16,11 @@
 
 use crate::hw::{count, fb_w};
 
+/// The words of the table above.
+const KEY_RAM_ENTRIES: u32 = 0xC8;
+const KEY_RAM_US: u32 = 0xCC;
+const TURNS: u32 = 0xD0;
+const LONGEST_TURN: u32 = 0xD4;
 pub const ECM_SENT: u32 = 0xD8;
 pub const KEYS: u32 = 0xDC;
 pub const FIRST_ES: u32 = 0xE0;
@@ -24,8 +29,8 @@ pub const FIRST_REST: u32 = 0xE4;
 /// The clearing of the key RAM at the start: `entries` written in `ticks`
 /// of Count, of which there are `per_ms` in a millisecond.
 pub fn key_ram_cleared(entries: u32, ticks: u32, per_ms: u32) {
-    fb_w(0xC8, entries);
-    fb_w(0xCC, ticks / (per_ms / 1000).max(1));
+    fb_w(KEY_RAM_ENTRIES, entries);
+    fb_w(KEY_RAM_US, ticks / (per_ms / 1000).max(1));
 }
 
 /// The main loop's turns.
@@ -52,8 +57,8 @@ impl Turns {
 
     /// Once per 5 ms tick.
     pub fn publish(&mut self) {
-        fb_w(0xD0, self.turns);
-        fb_w(0xD4, self.longest / self.per_us);
+        fb_w(TURNS, self.turns);
+        fb_w(LONGEST_TURN, self.longest / self.per_us);
         self.turns = 0;
     }
 }

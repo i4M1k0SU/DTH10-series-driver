@@ -39,6 +39,38 @@ const EV_REMOVED: u32 = 0x4000;
 const EV_ACTIVATED: u32 = 0x8000;
 const EV_INIT: u32 = 0x80_0000;
 
+/// The open's payload (see [`Cas::open`]): mode, number of event buffers,
+/// their size, their PCI address.
+const OPEN_MODE: u32 = 0x08;
+const OPEN_BUFFERS: u32 = 0x0C;
+const OPEN_SIZE: u32 = 0x10;
+const OPEN_DEST: u32 = 0x14;
+/// Mode bits: B-CAS, and B-CAS with the vendor's re-encryption.
+const MODE_BCAS: u32 = 0x10;
+const MODE_BCAS_DRM: u32 = 0x20;
+/// The most event buffers an open may give.
+const BUFFERS_MAX: u32 = 64;
+
+/// A request's words (see [`Cas::input`]): input type, request flags, and
+/// what is asked for (bit 0: a card reset).
+const REQ_KIND: u32 = 0xA0;
+const REQ_FLAGS: u32 = 0xB8;
+const REQ_WHAT: u32 = 0x1BC;
+const WHAT_RESET: u32 = 1;
+
+/// The header words of a block (see the table above).
+const HDR_KIND: u32 = 0x30;
+const HDR_LENGTH: u32 = 0x48;
+const HDR_NUMBER: u32 = 0x84;
+const HDR_EVENT: u32 = 0x88;
+const HDR_INIT: u32 = 0x8C;
+const HDR_RETURN: u32 = 0x1BC;
+/// The kind of a block that reports a card event.
+const KIND_CARD_EVENT: u32 = 0x1_0000;
+
+/// Events that can wait for the DMA engine.
+const EVENTS_MAX: usize = 8;
+
 struct Object {
     cookie: [u32; 2],
     /// The host's buffers for event blocks: how many, their size, the PCI
@@ -56,13 +88,13 @@ struct Object {
 pub struct Cas {
     object: Option<Object>,
     /// Events waiting for the DMA engine: +0x88 and +0x1BC.
-    events: [(u32, u32); 8],
+    events: [(u32, u32); EVENTS_MAX],
     count: usize,
 }
 
 impl Cas {
     pub fn new() -> Self {
-        Self { object: None, events: [(0, 0); 8], count: 0 }
+        Self { object: None, events: [(0, 0); EVENTS_MAX], count: 0 }
     }
 
     /// Command 25: open the object.
@@ -73,10 +105,11 @@ impl Cas {
     /// 4), +0x0C number of event buffers, +0x10 their size, +0x14.. their
     /// PCI addresses.
     pub fn open(&mut self, p: u32) -> u32 {
-        let (mode, buffers, size, dest) = (fb_r(p + 0x08), fb_r(p + 0x0C), fb_r(p + 0x10), fb_r(p + 0x14));
+        let (mode, buffers, size, dest) =
+            (fb_r(p + OPEN_MODE), fb_r(p + OPEN_BUFFERS), fb_r(p + OPEN_SIZE), fb_r(p + OPEN_DEST));
         if self.object.is_some()
-            || mode & 0x30 == 0
-            || !(1..=64).contains(&buffers)
+            || mode & (MODE_BCAS | MODE_BCAS_DRM) == 0
+            || !(1..=BUFFERS_MAX).contains(&buffers)
             || !(HEADER..=BLOCK_MAX).contains(&size)
         {
             return FAILED;
@@ -106,14 +139,15 @@ impl Cas {
     /// supported (+0xA0 bit 16, +0xB8 bit 4, +0x1BC bit 0); the host always
     /// gets "done" for the command itself and the outcome in message 0x0F.
     pub fn input(&mut self, p: u32, card: &mut Card) -> u32 {
+        // Cleared as the vendor's firmware does.
         fb_w(p + 0xA4, 0);
         let Some(o) = self.object.as_mut() else { return OK };
-        let (kind, flags, what) = (fb_r(p + 0xA0), fb_r(p + 0xB8), fb_r(p + 0x1BC));
+        let (kind, flags, what) = (fb_r(p + REQ_KIND), fb_r(p + REQ_FLAGS), fb_r(p + REQ_WHAT));
         if fb_r(p) != HANDLE || kind & INPUT_CAS == 0 || flags & REQUEST_CARD == 0 {
             return OK;
         }
         o.request = [kind, fb_r(p + 0xAC), flags];
-        if what & 1 != 0 {
+        if what & WHAT_RESET != 0 {
             card.request_reset();
         }
         OK
@@ -132,6 +166,7 @@ impl Cas {
         match out {
             Output::ResetDone(result) => {
                 let Some(m) = host.message(MSG_INPUT_DONE) else { return };
+                // The host's handle, the request's words and the result.
                 let d = Host::descriptor(m);
                 fb_w(d, o.cookie[0]);
                 fb_w(d + 0x04, o.cookie[1]);
@@ -176,13 +211,13 @@ impl Cas {
         }
         fb_w(BLOCK, o.cookie[0]);
         fb_w(BLOCK + 0x04, o.cookie[1]);
-        fb_w(BLOCK + 0x30, 0x1_0000);
-        fb_w(BLOCK + 0x48, 1);
-        fb_w(BLOCK + 0x84, o.next);
-        fb_w(BLOCK + 0x88, bits);
+        fb_w(BLOCK + HDR_KIND, KIND_CARD_EVENT);
+        fb_w(BLOCK + HDR_LENGTH, 1);
+        fb_w(BLOCK + HDR_NUMBER, o.next);
+        fb_w(BLOCK + HDR_EVENT, bits);
         if bits & EV_INIT != 0 {
-            fb_w(BLOCK + 0x8C, 1);
-            fb_w(BLOCK + 0x1BC, value);
+            fb_w(BLOCK + HDR_INIT, 1);
+            fb_w(BLOCK + HDR_RETURN, value);
         }
         o.next = (o.next + 1) % o.buffers;
         dma.start(BLOCK, o.dest, o.size, SRC_LOCAL);

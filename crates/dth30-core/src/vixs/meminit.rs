@@ -19,9 +19,25 @@ pub const CLOCK_KHZ: u32 = 182_250;
 /// The firmware variant the driver carries; any other result is refused.
 pub const FW_VARIANT: u32 = 4;
 
+/// SDRAM size of every BUFFALO board (64 MB).
+const MEM_SIZE: u32 = 0x0400_0000;
+
 /// How often a DDR command-done bit is polled before giving up (the vendor
 /// polls without bound).
 const POLL_LIMIT: u32 = 10_000;
+
+/// DDR mode-register command interface: command, data, and the status whose
+/// bit 0 reports the command done.
+const DDR_CMD: u32 = 0x820;
+const DDR_DATA: u32 = 0x824;
+const DDR_STATUS: u32 = 0x828;
+const DDR_DONE: u32 = 1;
+
+/// The register-interface memory test: its data register, the two patterns
+/// written and read back, and the pause after each access.
+const MEM_TEST_DATA: u32 = 0x874;
+const MEM_TEST_PATTERN: [u32; 2] = [0x1234_5678, 0x8765_4321];
+const MEM_TEST_WAIT: Duration = Duration::from_millis(2);
 
 /// One row of the vendor's board table (the BUFFALO rows only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +57,7 @@ pub struct BoardRow {
 }
 
 const fn row(board_id: u32, power_adj: bool, alt_pll: bool) -> BoardRow {
-    BoardRow { board_id, power_adj, mem_size: 0x0400_0000, half_in_low_power: true, alt_pll, fw_variant: 4 }
+    BoardRow { board_id, power_adj, mem_size: MEM_SIZE, half_in_low_power: true, alt_pll, fw_variant: FW_VARIANT }
 }
 
 /// The BUFFALO rows of the vendor's board table.
@@ -75,7 +91,7 @@ pub struct MemInit {
     pub mem_size: u32,
 }
 
-/// The DDR mode-register commands: (data 0x824, command 0x820).
+/// The DDR mode-register commands: ([`DDR_DATA`], [`DDR_CMD`]).
 const DDR_COMMANDS: [(u32, u32); 10] = [
     (0x0001_0000, 0x1171),
     (0x98EF_0000, 0x11F1),
@@ -105,7 +121,7 @@ pub fn mem_init<B: RemotePci>(chip: &Chip<B>, board_id: u32, power_mode: u32) ->
     let mem_size = if low_power { row.mem_size >> u32::from(row.half_in_low_power) } else { row.mem_size };
 
     let d10 = || chip.wait_ticks(1);
-    let d2 = || chip.sleep(Duration::from_millis(2));
+    let d2 = || chip.sleep(MEM_TEST_WAIT);
     let w = |off, v| chip.mmr_write(off, v);
     let rmw = |off, f: &dyn Fn(u32) -> u32| chip.mmr_modify(off, f);
 
@@ -167,10 +183,10 @@ pub fn mem_init<B: RemotePci>(chip: &Chip<B>, board_id: u32, power_mode: u32) ->
     w(0x808, 0x0E0F_00C8)?;
     w(0x80C, 0x024C_00C4)?;
     for (data, cmd) in DDR_COMMANDS {
-        w(0x824, data)?;
-        w(0x820, cmd)?;
+        w(DDR_DATA, data)?;
+        w(DDR_CMD, cmd)?;
         let mut n = 0;
-        while chip.mmr_read(0x828)? & 1 == 0 {
+        while chip.mmr_read(DDR_STATUS)? & DDR_DONE == 0 {
             n += 1;
             if n >= POLL_LIMIT {
                 return Err(Error::Timeout);
@@ -205,10 +221,10 @@ pub fn mem_init<B: RemotePci>(chip: &Chip<B>, board_id: u32, power_mode: u32) ->
 
     // Memory test through the register interface.
     for (off, v) in [
-        (0x874, 0x1234_5678),
+        (MEM_TEST_DATA, MEM_TEST_PATTERN[0]),
         (0x878, 0x1F00),
         (0x870, 4),
-        (0x874, 0x8765_4321),
+        (MEM_TEST_DATA, MEM_TEST_PATTERN[1]),
         (0x878, 0x1F00),
         (0x870, 0x14),
         (0x870, 0),
@@ -217,18 +233,18 @@ pub fn mem_init<B: RemotePci>(chip: &Chip<B>, board_id: u32, power_mode: u32) ->
         w(off, v)?;
         d2();
     }
-    let first = chip.mmr_read(0x874)?;
+    let first = chip.mmr_read(MEM_TEST_DATA)?;
     d2();
-    if first != 0x1234_5678 {
+    if first != MEM_TEST_PATTERN[0] {
         return Err(Error::Protocol("ViXS SDRAM test failed (first word)"));
     }
     w(0x870, 0x10)?;
     d2();
     w(0x878, 0)?;
     d2();
-    let second = chip.mmr_read(0x874)?;
+    let second = chip.mmr_read(MEM_TEST_DATA)?;
     d2();
-    if second != 0x8765_4321 {
+    if second != MEM_TEST_PATTERN[1] {
         return Err(Error::Protocol("ViXS SDRAM test failed (second word)"));
     }
 

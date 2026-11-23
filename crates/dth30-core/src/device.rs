@@ -192,7 +192,7 @@ impl<B: RemotePci> Dth30<B> {
     /// idle is power red (standby) and status green. Bring-up leaves the
     /// unit idle.
     pub fn set_in_use(&mut self, in_use: bool) -> Result<()> {
-        let s = if in_use { gpio::app_status::WATCHING } else { gpio::app_status::NOT_USING };
+        let s = if in_use { gpio::AppStatus::Watching } else { gpio::AppStatus::NotUsing };
         self.vixs_mut().set_app_status(s)
     }
 

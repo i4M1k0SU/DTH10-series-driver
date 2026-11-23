@@ -15,13 +15,26 @@ const LIST: u32 = 0xC04;
 const BUSY: u32 = 0xC34;
 const STATUS: u32 = 0xC58;
 const ENABLE: u32 = 0xC5C;
+/// STATUS and ENABLE: the transfer is done; BUSY: it runs.
 const DONE: u32 = 2;
+const RUNNING: u32 = 2;
+/// Everything STATUS can report.
+const STATUS_ALL: u32 = 0xF;
 
 /// Where the firmware keeps the descriptor list (SDRAM, above the message
 /// bodies).
 const DESC_BASE: u32 = 0x0006_2800;
 const DESC_MAX: u32 = 8;
 const PIECE: u32 = 0x8000;
+/// A descriptor: its size, and where the source, the destination and the
+/// control word are in it.
+const DESC_SIZE: u32 = 0x20;
+const DESC_SRC: u32 = 0x00;
+const DESC_DST: u32 = 0x08;
+const DESC_CTRL: u32 = 0x10;
+/// Control bits: the last descriptor, report completion.
+const CTRL_LAST: u32 = 1 << 31;
+const CTRL_REPORT: u32 = 1 << 29;
 
 /// Control bit: the source is SDRAM (bit 25 would say so for the destination).
 pub const SRC_LOCAL: u32 = 1 << 24;
@@ -33,7 +46,7 @@ pub struct Dma {
 impl Dma {
     pub fn new() -> Self {
         mmr_w(ENABLE, 0);
-        mmr_w(STATUS, 0xF);
+        mmr_w(STATUS, STATUS_ALL);
         Self { busy: false }
     }
 
@@ -46,21 +59,21 @@ impl Dma {
     pub fn start(&mut self, src: u32, dst: u32, len: u32, flags: u32) {
         let pieces = len.div_ceil(PIECE).clamp(1, DESC_MAX);
         for k in 0..pieces {
-            let d = DESC_BASE + 0x20 * k;
+            let d = DESC_BASE + DESC_SIZE * k;
             let n = (len - k * PIECE).min(PIECE);
-            let last = if k + 1 == pieces { 0xA000_0000 } else { 0 };
-            fb_w(d, src + k * PIECE);
+            let last = if k + 1 == pieces { CTRL_LAST | CTRL_REPORT } else { 0 };
+            fb_w(d + DESC_SRC, src + k * PIECE);
             fb_w(d + 0x04, 0);
-            fb_w(d + 0x08, dst + k * PIECE);
+            fb_w(d + DESC_DST, dst + k * PIECE);
             fb_w(d + 0x0C, 0);
-            fb_w(d + 0x10, last | flags | n);
+            fb_w(d + DESC_CTRL, last | flags | n);
             fb_w(d + 0x14, 0);
             fb_w(d + 0x18, 0);
             fb_w(d + 0x1C, 0);
         }
         // The descriptors must have reached the SDRAM before the engine
         // reads them.
-        let _ = fb_r(DESC_BASE + 0x20 * (pieces - 1) + 0x10);
+        let _ = fb_r(DESC_BASE + DESC_SIZE * (pieces - 1) + DESC_CTRL);
         mmr_w(STATUS, DONE);
         mmr_rmw(ENABLE, |v| v | DONE);
         mmr_w(LIST, DESC_BASE);
@@ -79,7 +92,7 @@ impl Dma {
 
     /// True once when the running transfer has completed.
     pub fn poll(&mut self) -> bool {
-        if !self.busy || mmr_r(STATUS) & DONE == 0 || mmr_r(BUSY) & DONE != 0 {
+        if !self.busy || mmr_r(STATUS) & DONE == 0 || mmr_r(BUSY) & RUNNING != 0 {
             return false;
         }
         mmr_w(STATUS, DONE);

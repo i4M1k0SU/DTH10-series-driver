@@ -29,14 +29,14 @@ use crate::error::{Error, Result};
 use crate::kit::{SignalStatus, TuneRequest, field};
 use crate::mxl13xrf::{Mxl13xRf, MxlType};
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tlv::{TunerDesc, present};
 use crate::tuner_bus::{TunerBus, TunerPath};
 
 /// Kit name the original driver builds this kit for (exact match).
 pub const KIT_NAME: &str = "LGDT3305_MxL5007T";
 
-/// Presence bit of the descriptor's demodulator IF value (tag 0x62).
-const PRESENT_DEMOD_IF: u32 = 0x20000;
+/// Wait at the start of a tune.
+const TUNE_START_WAIT: Duration = Duration::from_millis(20);
 
 pub struct Lgdt3305Kit<T: UsbControl> {
     pub dev: Device<T>,
@@ -60,7 +60,7 @@ impl<T: UsbControl> Lgdt3305Kit<T> {
                 desc.kit_name, desc.hw_version
             )));
         }
-        let demod_if = if desc.present & PRESENT_DEMOD_IF != 0 { desc.val_62 as i32 } else { demod::DEFAULT_IF_HZ };
+        let demod_if = if desc.present & present::DEMOD_IF != 0 { desc.val_62 as i32 } else { demod::DEFAULT_IF_HZ };
         let bus = TunerBus { tuner_addr: desc.tuner_i2c_addr, path: TunerPath::Direct };
         Ok(Lgdt3305Kit {
             demod: Lgdt3305::new(desc.demod_i2c_addr, demod_if),
@@ -169,7 +169,7 @@ impl<T: UsbControl> Lgdt3305Kit<T> {
         if !self.is_open() {
             return Err(Error::Protocol("kit is not open"));
         }
-        sleep(Duration::from_millis(20));
+        sleep(TUNE_START_WAIT);
         self.demod.set_modulation(&mut self.dev, Modulation::from_request(req.modulation))?;
         self.demod.set_if(&mut self.dev)?;
         let (freq, bw) = (req.frequency_u32(), req.bandwidth_hz);

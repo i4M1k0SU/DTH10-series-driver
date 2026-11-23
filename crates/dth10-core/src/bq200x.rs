@@ -26,15 +26,14 @@
 pub mod demod;
 pub mod e4005;
 
-use core::time::Duration;
 use std::thread::sleep;
 
-use crate::device::{Device, FLAG_TUNER1};
+use crate::device::{self, Device, FLAG_TUNER1};
 use crate::error::{Error, Result};
 use crate::kit::{SignalStatus, TuneRequest, field};
 use crate::mxl13xrf::{self, Mxl13xRf, MxlType};
 use crate::protocol::{self, UsbControl, cmd};
-use crate::tlv::TunerDesc;
+use crate::tlv::{TunerDesc, flag};
 use crate::tuner_bus::{TunerBus, TunerPath};
 
 pub use demod::{Bq200x, TunerGate, lock};
@@ -72,7 +71,7 @@ fn refuse(desc: &TunerDesc, why: &str) -> Error {
 /// The variant for a descriptor, as the vendor's kit factory chooses it.
 /// `diversity` is the filter layer's request (false at device start).
 pub fn select_variant(desc: &TunerDesc, diversity: bool) -> Result<Variant> {
-    let bit7 = desc.flags & 0x80 != 0;
+    let bit7 = desc.flags & flag::DIVERSITY != 0;
     match desc.kit_name.as_str() {
         "BQ200X_MxL135RF" => {
             if desc.model_is("h55") || desc.model_is("f200") {
@@ -95,6 +94,9 @@ pub fn select_variant(desc: &TunerDesc, diversity: bool) -> Result<Variant> {
         _ => Err(refuse(desc, "not a BQ200X kit")),
     }
 }
+
+/// The bridge GPIO bits of the model `f200` band switch.
+const F200_BAND_GPIO: u32 = 0xC0;
 
 /// GPIO 0xC0 value of the model `f200` tune step: below 540 MHz 0x00,
 /// 540–580 MHz 0x80, 580–680 MHz 0x40, from 680 MHz 0xC0.
@@ -181,7 +183,7 @@ impl<T: UsbControl> Bq200xKit<T> {
             Variant::MxlPlain => {
                 let ab = d.gpio_mask_a | d.gpio_mask_b;
                 let r = self.dev.gpio_enable(ab).and_then(|_| self.dev.gpio_set_bits(ab));
-                sleep(Duration::from_millis(10));
+                sleep(device::POWER_UP_B_SETTLE);
                 r
             }
             Variant::MxlDiversity | Variant::E4005Diversity => {
@@ -356,7 +358,7 @@ impl<T: UsbControl> Bq200xKit<T> {
             return Ok(());
         }
         let mut p = [0u8; 12];
-        p[4..8].copy_from_slice(&0xC0u32.to_le_bytes());
+        p[4..8].copy_from_slice(&F200_BAND_GPIO.to_le_bytes());
         p[8..12].copy_from_slice(&f200_band_bits(req.frequency_hz).to_le_bytes());
         let flags = if self.desc.id == 0 { FLAG_TUNER1 } else { self.dev.flags(0) };
         protocol::send(self.dev.transport(), flags, cmd::SYS, cmd::SYS_GPIO_SET, &p, None).map(|_| ())
@@ -397,6 +399,7 @@ impl<T: UsbControl> Bq200xKit<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::time::Duration;
     use std::cell::RefCell;
     use std::collections::HashMap;
 

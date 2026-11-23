@@ -19,17 +19,19 @@
 //! Neither driver puts the descriptor's tuner crystal, IF or demodulator
 //! crystal to use; the DT-H30/PCIEM-TS driver reads the tuner option bit1.
 
-use core::time::Duration;
 use std::thread::sleep;
 
 use super::mtv600::Mtv600;
+use dth_common::stream::Lnb;
+
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
-use crate::kit::{SignalStatus, VendorDriver};
+use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TsPins, VendorDriver};
 use crate::lj101::Tc90517Sat;
 use crate::lj101::demod::write_block;
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tc90517::demod::reg;
+use crate::tlv::{HW_ISDB_S, TunerDesc};
 use crate::tuner_bus::{TunerBus, TunerPath};
 
 /// The series driver's configuration, first block.
@@ -121,7 +123,7 @@ pub struct Tc9052xSatKit<T: UsbControl> {
 impl<T: UsbControl> Tc9052xSatKit<T> {
     /// Whether `desc` names this kit: one of [`KIT_NAMES`] with hw 0x402.
     pub fn supports(desc: &TunerDesc) -> bool {
-        desc.hw_version == 0x402 && super::driver_for(desc, 0).is_some()
+        desc.hw_version == HW_ISDB_S && super::driver_for(desc, 0).is_some()
     }
 
     /// The kit for `desc`, following `driver` (see [`super::driver_for`]).
@@ -163,24 +165,23 @@ impl<T: UsbControl> Tc9052xSatKit<T> {
         self.dev.i2c_reg_write(a, 0x04, &[x_bit])
     }
 
-    /// TS pin control: 0 = output, 1 = stopped, 2 = the third setting.
-    /// `0x1C = (0x1C & 3F) | 00 / 80 / 40` and 0x1F, in one batch.
-    pub fn set_ts_pins(&mut self, mode: u8) -> Result<()> {
+    /// TS pin control: `0x1C = (0x1C & 3F) | 00 / 80 / 40` (output / stopped
+    /// / third) and 0x1F, in one batch.
+    pub fn set_ts_pins(&mut self, mode: TsPins) -> Result<()> {
         if self.driver == VendorDriver::Dth30 {
             return self.demod.set_ts_pins(&mut self.dev, mode);
         }
         let a = self.demod.addr;
         let mut b = [0u8; 1];
-        self.dev.i2c_reg_read(a, 0x1C, &mut b)?;
+        self.dev.i2c_reg_read(a, reg::TS_PINS_1C, &mut b)?;
         let v = b[0] & 0x3F;
         let (r1c, r1f) = match mode {
-            0 => (v, 0x08),
-            1 => (v | 0x80, 0x2A),
-            2 => (v | 0x40, 0x19),
-            _ => return Ok(()),
+            TsPins::Output => (v, 0x08),
+            TsPins::Stopped => (v | 0x80, 0x2A),
+            TsPins::Third => (v | 0x40, 0x19),
         };
-        self.dev.i2c_batch_append(a, 0x1C, &[r1c])?;
-        self.dev.i2c_batch_append(a, 0x1F, &[r1f])?;
+        self.dev.i2c_batch_append(a, reg::TS_PINS_1C, &[r1c])?;
+        self.dev.i2c_batch_append(a, reg::TS_PINS_1F, &[r1f])?;
         self.dev.i2c_batch_flush()
     }
 
@@ -190,7 +191,7 @@ impl<T: UsbControl> Tc9052xSatKit<T> {
     fn sleep(&mut self) -> Result<()> {
         if self.driver == VendorDriver::Dth30 {
             self.tuner.sleep(&mut self.dev)?;
-            self.set_ts_pins(1)?;
+            self.set_ts_pins(TsPins::Stopped)?;
         }
         self.demod.sleep(&mut self.dev)
     }
@@ -201,7 +202,7 @@ impl<T: UsbControl> Tc9052xSatKit<T> {
         if self.driver == VendorDriver::Series {
             return self.demod.wake(&mut self.dev);
         }
-        self.set_ts_pins(0)?;
+        self.set_ts_pins(TsPins::Output)?;
         self.demod.wake(&mut self.dev)?;
         self.tuner.wake(&mut self.dev)
     }
@@ -271,13 +272,13 @@ impl<T: UsbControl> Tc9052xSatKit<T> {
         if !self.is_open() {
             return Err(Error::Protocol("kit is not open"));
         }
-        self.set_ts_pins(1)?;
+        self.set_ts_pins(TsPins::Stopped)?;
         self.tuner.tune(&mut self.dev, (if_hz / 1000) as u32)?;
-        sleep(Duration::from_millis(100));
+        sleep(SAT_PLL_SETTLE);
         let r = self.demod.restart(&mut self.dev);
-        sleep(Duration::from_millis(150));
+        sleep(SAT_RESTART_SETTLE);
         r?;
-        self.set_ts_pins(0)?;
+        self.set_ts_pins(TsPins::Output)?;
         self.last_if_hz = Some(if_hz);
         Ok(())
     }
@@ -301,9 +302,9 @@ impl<T: UsbControl> Tc9052xSatKit<T> {
 
     /// Antenna (LNB) power: the bridge GPIO supply of the models that switch
     /// it there, no effect on others (both drivers hand it to the bridge).
-    pub fn lnb_power(&mut self, volt: u32) -> Result<bool> {
+    pub fn lnb_power(&mut self, lnb: Lnb) -> Result<bool> {
         if let Some(gpio) = device::LnbGpio::of(&self.desc) {
-            return device::lnb_set(&self.dev, gpio, volt);
+            return device::lnb_set(&self.dev, gpio, lnb);
         }
         Ok(true)
     }
@@ -583,12 +584,12 @@ mod tests {
     #[test]
     fn lnb_power_follows_the_model() {
         let mut k = kit(VendorDriver::Series, 0);
-        assert!(k.lnb_power(150).unwrap());
+        assert!(k.lnb_power(Lnb::V15).unwrap());
         assert_eq!(k.dev.transport().take(), vec![]);
         let mut d = desc("TC90522_MTV600", 0x402, 0);
         d.model = "h70b".into();
         let mut k = Tc9052xSatKit::new(Device::new(RegMock::default()), d, VendorDriver::Dth30).unwrap();
-        let _ = k.lnb_power(110).unwrap();
+        let _ = k.lnb_power(Lnb::V11).unwrap();
         let ops = k.dev.transport().take();
         assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, Op::Other)), "{ops:?}");
     }

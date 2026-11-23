@@ -16,6 +16,9 @@ use crate::{Error, Result};
 pub mod reg {
     /// DEVINIT: PCI reset / soft reset / PCI enable.
     pub const DEVINIT: u16 = 0x00;
+    /// DEVINIT bits: PCI reset and soft reset (together), PCI enable.
+    pub const DEVINIT_RESETS: u32 = 0x84;
+    pub const DEVINIT_PCI_ENABLE: u32 = 0x20;
     /// USBIRQENB1: interrupt enables reported on the status endpoint.
     pub const USBIRQENB1: u16 = 0x24;
     /// IRQSTAT1: interrupt status (write 1 to clear).
@@ -24,16 +27,27 @@ pub mod reg {
     pub const FIFOCTL: u16 = 0x38;
     /// GPIOCTL (only touched for the NetChip evaluation product IDs).
     pub const GPIOCTL: u16 = 0x50;
+    /// PCIMSTCTL: control of the remote (PCI master) cycles.
+    pub const PCIMSTCTL: u16 = 0x100;
     /// DMA channel A registers; channels B..D follow at +0x20 each.
     pub const DMACTL: u16 = 0x180;
     pub const DMASTAT: u16 = 0x184;
     pub const DMACOUNT: u16 = 0x190;
     pub const DMAADDR: u16 = 0x194;
     /// EP_CFG of programmable endpoint `n` (1..=4 = A..D) is at
-    /// `EP_CFG + 0x20 * n`, with EP_RSP at +4 and EP_STAT at +0xC.
+    /// `EP_BASE + EP_STRIDE * n`, with EP_RSP at +4 and EP_STAT at +0xC.
     pub const EP_BASE: u16 = 0x300;
+    /// Size of an endpoint register block (and of a DMA channel's).
+    pub const EP_STRIDE: u16 = 0x20;
     pub const EP_RSP: u16 = 0x04;
     pub const EP_STAT: u16 = 0x0C;
+    /// EP_AVAIL after EP_STAT in an endpoint block. For an IN endpoint (all
+    /// the stream endpoints) it is the free space in the FIFO, not the byte
+    /// count.
+    pub const EP_AVAIL: u16 = 0x10;
+    /// EP_STAT bits: FIFO flush (write 1) and FIFO empty.
+    pub const EP_STAT_FIFO_FLUSH: u32 = 1 << 9;
+    pub const EP_STAT_FIFO_EMPTY: u32 = 1 << 10;
     /// EP_CFG of endpoint A..D (the registers [`super::hw_init`] reads back).
     pub const EP_CFG_A: u16 = 0x320;
     /// The endpoint register blocks whose halt the vendor clears after a PCI
@@ -41,14 +55,27 @@ pub mod reg {
     pub const HALT_CLEAR_BLOCKS: [u16; 6] = [0x220, 0x230, 0x320, 0x340, 0x360, 0x380];
 }
 
-/// NET2280's own PCI configuration registers (`local_cfg_*`).
+/// PCI configuration registers (the standard header): of the NET2280
+/// itself (`local_cfg_*`) and, as `REMOTE_CFG | register`, of the ViXS chip.
 pub mod cfg {
+    /// Vendor and device ID.
+    pub const ID: u16 = 0x00;
     pub const COMMAND: u16 = 0x04;
+    pub const BAR0: u16 = 0x10;
+    pub const BAR1: u16 = 0x14;
     pub const BAR2: u16 = 0x18;
+    /// The expansion ROM BAR (its bit 0 is the enable, not a flag).
+    pub const ROM: u16 = 0x30;
 }
 
 /// Configuration addresses of the remote (ViXS) device are `REMOTE_CFG | register`.
 pub const REMOTE_CFG: u32 = 0x1_0000;
+/// The ViXS command register value: I/O, memory and bus master enabled.
+const VIXS_COMMAND: u32 = 7;
+/// The flag bits of a memory BAR.
+const BAR_FLAGS: u32 = 0xF;
+/// BARs are assigned on 256 MB boundaries.
+const BAR_ALIGN: u32 = 0x1000_0000;
 /// USBIRQENB1 value: USB interrupt enable (bit 31) and PCI INTA (bit 24).
 pub const IRQ_ENABLE: u32 = 0x8100_0000;
 /// Interrupt status bit of the remote INTA# (the ViXS chip).
@@ -142,13 +169,13 @@ pub fn hw_init<B: RemotePci + ?Sized>(bus: &B, pid: u16, pipes: &[u8], sleep: fn
 
     // 2. DEVINIT pulse: PCI reset + soft reset with PCI disabled, then enable.
     let devinit = bus.csr_read(reg::DEVINIT)?;
-    bus.csr_write(reg::DEVINIT, (devinit & !0x20) | 0x84)?;
+    bus.csr_write(reg::DEVINIT, (devinit & !reg::DEVINIT_PCI_ENABLE) | reg::DEVINIT_RESETS)?;
     sleep(ticks(10));
-    bus.csr_write(reg::DEVINIT, (devinit & !0x84) | 0x20)?;
+    bus.csr_write(reg::DEVINIT, (devinit & !reg::DEVINIT_RESETS) | reg::DEVINIT_PCI_ENABLE)?;
 
     // 3./4. Command registers: NET2280 MEM|MASTER|MWI, ViXS IO|MEM|MASTER.
     bus.local_cfg_write(cfg::COMMAND, 0x16)?;
-    bus.cfg_write(REMOTE_CFG | 0x04, 7)?;
+    bus.cfg_write(REMOTE_CFG | u32::from(cfg::COMMAND), VIXS_COMMAND)?;
     // 5. ViXS vendor/device ID (not checked by the vendor).
     let vixs_id = bus.cfg_read(REMOTE_CFG)?;
 
@@ -156,7 +183,7 @@ pub fn hw_init<B: RemotePci + ?Sized>(bus: &B, pid: u16, pipes: &[u8], sleep: fn
     let mut base = BAR_BASE;
     let mut bars = Vec::new();
     for off in [0x10u16, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x30] {
-        let want_bit0 = u32::from(off == 0x30);
+        let want_bit0 = u32::from(off == cfg::ROM);
         let addr = REMOTE_CFG | u32::from(off);
         bus.cfg_write(addr, 0xFFFF_FFFF)?;
         let v = bus.cfg_read(addr)?;
@@ -164,10 +191,10 @@ pub fn hw_init<B: RemotePci + ?Sized>(bus: &B, pid: u16, pipes: &[u8], sleep: fn
             bus.cfg_write(addr, base)?;
             bars.push((off, v, base));
             let mut n = base.wrapping_sub(v);
-            if n & 0x0FFF_FFFF != 0 {
-                n = n.wrapping_add(0x1000_0000);
+            if n & (BAR_ALIGN - 1) != 0 {
+                n = n.wrapping_add(BAR_ALIGN);
             }
-            base = n & 0xF000_0000;
+            base = n & !(BAR_ALIGN - 1);
         }
     }
 
@@ -175,7 +202,7 @@ pub fn hw_init<B: RemotePci + ?Sized>(bus: &B, pid: u16, pipes: &[u8], sleep: fn
     let (endpoints, out) = endpoints_for(pid);
     let mut dma_offset = 0;
     let mut dma_mapped = false;
-    for ep_cfg in [0x320u16, 0x340, 0x360, 0x380] {
+    for ep_cfg in [0, 1, 2, 3].map(|i| reg::EP_CFG_A + reg::EP_STRIDE * i) {
         let v = bus.csr_read(ep_cfg)?;
         let ep = (v & 0x0F) as u8 | (v & 0x80) as u8;
         if pipes.contains(&ep) {
@@ -185,12 +212,12 @@ pub fn hw_init<B: RemotePci + ?Sized>(bus: &B, pid: u16, pipes: &[u8], sleep: fn
                 dma_mapped = true;
             }
             bus.csr_write(reg::DMASTAT + off, 2)?; // DMA abort
-            bus.csr_write(ep_cfg + reg::EP_STAT, 0x200)?; // FIFO flush
+            bus.csr_write(ep_cfg + reg::EP_STAT, reg::EP_STAT_FIFO_FLUSH)?;
         }
     }
 
     // 8./9. ViXS command again, then the interrupt enables.
-    bus.cfg_write(REMOTE_CFG | 0x04, 7)?;
+    bus.cfg_write(REMOTE_CFG | u32::from(cfg::COMMAND), VIXS_COMMAND)?;
     bus.csr_write(reg::USBIRQENB1, IRQ_ENABLE)?;
     // 10. Dummy read at the first BAR address.
     bus.mem_read(BAR_BASE)?;
@@ -200,7 +227,7 @@ pub fn hw_init<B: RemotePci + ?Sized>(bus: &B, pid: u16, pipes: &[u8], sleep: fn
 
     // 13. Endpoints A..D.
     for (i, (&ep, &is_out)) in endpoints.iter().zip(out.iter()).enumerate() {
-        let blk = reg::EP_BASE + 0x20 * (i as u16 + 1);
+        let blk = reg::EP_BASE + reg::EP_STRIDE * (i as u16 + 1);
         bus.csr_write(blk, u32::from(ep) | 0x600)?;
         bus.csr_write(blk + reg::EP_STAT, 0x003F_127F)?;
         bus.csr_write(blk + reg::EP_RSP, 0x80)?;
@@ -211,11 +238,11 @@ pub fn hw_init<B: RemotePci + ?Sized>(bus: &B, pid: u16, pipes: &[u8], sleep: fn
     // 14. Read back EP_CFG (logged by the vendor).
     let mut ep_cfg = [0; 4];
     for (i, v) in ep_cfg.iter_mut().enumerate() {
-        *v = bus.csr_read(reg::EP_CFG_A + 0x20 * i as u16)?;
+        *v = bus.csr_read(reg::EP_CFG_A + reg::EP_STRIDE * i as u16)?;
     }
     // 15. Where the BARs ended up.
-    let fb = bus.cfg_read(REMOTE_CFG | 0x10)? & !0xF;
-    let mmr = bus.cfg_read(REMOTE_CFG | 0x14)? & !0xF;
+    let fb = bus.cfg_read(REMOTE_CFG | u32::from(cfg::BAR0))? & !BAR_FLAGS;
+    let mmr = bus.cfg_read(REMOTE_CFG | u32::from(cfg::BAR1))? & !BAR_FLAGS;
 
     let fifo = [0, 1, 2, 3].map(|i| FIFO_WINDOW + FIFO_STRIDE * i);
     if !dma_mapped {

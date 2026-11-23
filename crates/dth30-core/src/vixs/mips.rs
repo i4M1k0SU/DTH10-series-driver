@@ -7,9 +7,9 @@
 //! DMA transfer; the vector table is then copied to window 0, which stays
 //! selected from then on.
 
-use super::firmware::{Firmware, VECTOR_COUNT_OFFSET, VECTOR_TABLE_OFFSET};
+use super::firmware::{Firmware, VECTOR_COUNT_OFFSET, VECTOR_ENTRY_SIZE, VECTOR_TABLE_OFFSET};
 use super::meminit::MemInit;
-use super::mmr::{Chip, INT_ENABLE, RBM_SWAP};
+use super::mmr::{Chip, INT_ENABLE, INT_MIPS, RBM_SWAP, WINDOW_MASK, WINDOW_SHIFT};
 use crate::bus::RemotePci;
 use crate::net2280::{self, Layout};
 use crate::{Error, Result};
@@ -18,11 +18,17 @@ use crate::{Error, Result};
 pub const M2H_INT_STATUS: u32 = 0x30E0;
 /// MIPS-to-host interrupt enable.
 pub const M2H_INT_ENABLE: u32 = 0x30E4;
+/// [`M2H_INT_STATUS`] / [`M2H_INT_ENABLE`] bits: a message, a command done.
+pub const M2H_INT_MSG: u32 = 1 << 0;
+pub const M2H_INT_DONE: u32 = 1 << 1;
+/// What the vendor writes to [`M2H_INT_STATUS`] to clear every pending bit.
+pub const M2H_INT_CLEAR: u32 = 0x8000_0007;
 /// MIPS state (debug only).
 pub const MIPS_DEBUG: u32 = 0x30E8;
 /// Host-to-MIPS doorbell: function ID.
 pub const H2M_FUNC: u32 = 0x3020;
-/// Host-to-MIPS: acknowledged message ID (4 answers ALLOC_FB at start-up).
+/// Host-to-MIPS: acknowledged message ID ([`ALLOC_FB_ACK`] answers ALLOC_FB
+/// at start-up).
 pub const H2M_ACK_ID: u32 = 0x3024;
 /// MIPS-to-host: message ID / start-up state.
 pub const M2H_ID: u32 = 0x3028;
@@ -40,16 +46,26 @@ pub const M2H_POOL_SIZE: u32 = 0x3044;
 pub const M2H_DONE_SLOT: u32 = 0x3048;
 /// MIPS core control registers (bit0/bit1 = core 0/1 runs).
 pub const MIPS_CTRL: [u32; 3] = [0x30F8, 0x34F8, 0x38F8];
+/// The run bits of core 0 and core 1 in [`MIPS_CTRL`].
+const CORE0_RUN: u32 = 1 << 0;
+const CORE1_RUN: u32 = 1 << 1;
+/// The MIPS's window onto the register space (see [`MIPS_MMR_WINDOW`]).
+pub const MIPS_MMR_MAP: u32 = 0x3008;
 
 /// Start-up states in [`M2H_ID`].
 pub const STATE_OK: u32 = 0;
 pub const STATE_ALLOC_FB: u32 = 5;
 pub const STATE_INIT_FAILED: u32 = 7;
+/// The ID the host writes to [`H2M_ACK_ID`] to answer ALLOC_FB (the
+/// vendor's value; the firmware does not check it).
+pub const ALLOC_FB_ACK: u32 = 4;
 
 /// FB parameter words the host fills before the MIPS starts.
 pub mod fb {
     /// Firmware heartbeat (Camino).
     pub const HEARTBEAT: u32 = 0x10;
+    /// Firmware heartbeat on the vendor's other chip families.
+    pub const HEARTBEAT_OTHER: u32 = 0x500;
     /// MIPS-side register address, written by the firmware.
     pub const MIPS_MMR_OUT: u32 = 0x20;
     /// Host-side (PCI) register address, written by the host.
@@ -65,12 +81,14 @@ pub const DMA_DESC_SIZE: u32 = 0x840;
 /// Size of the command list following it.
 pub const COM_LIST_SIZE: u32 = 0x8_F000;
 
-/// The vendor's handshake bounds: 5 idle reads per tick, 100 ticks.
-/// MMR 0x3008 at release: the MIPS's window onto the register space.
+/// [`MIPS_MMR_MAP`] at release: the MIPS's window onto the register space.
 pub const MIPS_MMR_WINDOW: u32 = 0x1FFF_1004;
 
+/// The vendor's handshake bounds: 5 idle reads per tick, 100 ticks.
 const IDLE_READS_PER_TICK: u32 = 5;
 const TICK_LIMIT: u32 = 100;
+/// Accepted reads that end a handshake wait.
+const STABLE_READS: u32 = 3;
 
 /// What the firmware reported at start-up and where the host put its areas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,8 +122,8 @@ pub fn start<B: RemotePci>(chip: &mut Chip<B>, layout: &Layout, fw: &Firmware, m
     chip.mmr_modify_checked(0x000, |v| v | 0xE0)?;
     chip.mmr_modify_checked(0x000, |v| v & !0x20)?;
     // 5. The vendor clears these FB words (the same offsets as the doorbells).
-    chip.fb_write_checked(0x3024, 0)?;
-    chip.fb_write_checked(0x3028, 0)?;
+    chip.fb_write_checked(H2M_ACK_ID, 0)?;
+    chip.fb_write_checked(M2H_ID, 0)?;
     // 6./7. Window 0, then window 1 for the download.
     chip.select_window(0)?;
     chip.select_window(1)?;
@@ -120,7 +138,7 @@ pub fn start<B: RemotePci>(chip: &mut Chip<B>, layout: &Layout, fw: &Firmware, m
         return Err(Error::Protocol("firmware vector table not readable from SDRAM"));
     }
     for k in 0..count {
-        let e = VECTOR_TABLE_OFFSET + 16 * k;
+        let e = VECTOR_TABLE_OFFSET + VECTOR_ENTRY_SIZE * k;
         chip.select_window(1)?;
         let dst = chip.fb_read_checked(e)?;
         let w1 = chip.fb_read_checked(e + 4)?;
@@ -155,14 +173,14 @@ pub fn start<B: RemotePci>(chip: &mut Chip<B>, layout: &Layout, fw: &Firmware, m
     // the registers hangs and the firmware stops at its first instruction
     // that reads one.
     chip.mmr_write_checked(0x3000, 0x0FFF_FFFF)?;
-    chip.mmr_write_checked(0x3008, MIPS_MMR_WINDOW)?;
+    chip.mmr_write_checked(MIPS_MMR_MAP, MIPS_MMR_WINDOW)?;
     chip.mmr_write_checked(0x3010, 0x110)?;
     chip.mmr_write_checked(0x3088, 0)?;
-    let ctrl = chip.mmr_read_checked(MIPS_CTRL[0])? & !2;
+    let ctrl = chip.mmr_read_checked(MIPS_CTRL[0])? & !CORE1_RUN;
     chip.fb_write_checked(fb::MMR_APERTURE_IN, 0)?;
     chip.fb_write_checked(fb::MIPS_MMR_OUT, 0)?;
     chip.mmr_write_checked(MIPS_CTRL[0], ctrl)?;
-    let ctrl = chip.mmr_read_checked(MIPS_CTRL[0])? | 3;
+    let ctrl = chip.mmr_read_checked(MIPS_CTRL[0])? | CORE0_RUN | CORE1_RUN;
     chip.mmr_write_checked(MIPS_CTRL[0], ctrl)?;
     chip.wait_ticks(1);
 
@@ -170,14 +188,14 @@ pub fn start<B: RemotePci>(chip: &mut Chip<B>, layout: &Layout, fw: &Firmware, m
     wait_mips_mmr(chip)?;
     // 16. Exchange the register addresses.
     let mips_mmr = chip.fb_read(fb::MIPS_MMR_OUT)?;
-    chip.mmr_write(0x3008, mips_mmr)?;
+    chip.mmr_write(MIPS_MMR_MAP, mips_mmr)?;
     chip.fb_write(fb::MMR_APERTURE_IN, chip.mmr)?;
 
     // 17. ALLOC_FB.
     wait_state(chip, true, |s| (s != STATE_OK).then_some(s == STATE_ALLOC_FB), "ALLOC_FB")?;
     let pool_offset = chip.mmr_read_checked(M2H_ADDR)?;
     let pool_size = chip.mmr_read_checked(M2H_POOL_SIZE)?;
-    chip.mmr_write_checked(H2M_ACK_ID, 4)?;
+    chip.mmr_write_checked(H2M_ACK_ID, ALLOC_FB_ACK)?;
     // 18. The host's areas in the pool (the vendor's arithmetic).
     let cmd_ring_fb = pool_offset.wrapping_add(DMA_DESC_SIZE);
     let end = cmd_ring_fb.wrapping_add(COM_LIST_SIZE);
@@ -209,7 +227,7 @@ fn download<B: RemotePci>(chip: &mut Chip<B>, layout: &Layout, fw: &Firmware) ->
             chip.mmr_read(RBM_SWAP)?; // logged by the vendor
         } else {
             let v = chip.mmr_read(RBM_SWAP)?;
-            chip.mmr_write_checked(RBM_SWAP, (((n as u32) + 1) << 8) | (v & 0xFFFF_80FF))?;
+            chip.mmr_write_checked(RBM_SWAP, (((n as u32) + 1) << WINDOW_SHIFT) | (v & !WINDOW_MASK))?;
             chip.mmr_read(RBM_SWAP)?;
         }
         net2280::dma_write(chip.bus(), layout, chip.fb, chunk)?;
@@ -239,7 +257,7 @@ fn wait_mips_mmr<B: RemotePci>(chip: &mut Chip<B>) -> Result<()> {
             log::error!("MIPS start: no register address from the firmware (MIPS_M2H_MMR)");
             return Err(Error::Timeout);
         }
-        if stable >= 3 {
+        if stable >= STABLE_READS {
             return Ok(());
         }
     }
@@ -272,7 +290,7 @@ fn wait_state<B: RemotePci>(
             Some(false) => idle = 0,
             None => {}
         }
-        if hits >= 3 {
+        if hits >= STABLE_READS {
             return Ok(v);
         }
         if idle == IDLE_READS_PER_TICK {
@@ -296,15 +314,15 @@ pub fn ack_m2h<B: RemotePci>(chip: &mut Chip<B>) -> Result<()> {
 }
 
 pub fn disable_interrupts<B: RemotePci>(chip: &mut Chip<B>) -> Result<()> {
-    chip.mmr_modify_checked(INT_ENABLE, |v| v & !0x200)?;
-    chip.mmr_modify_checked(M2H_INT_ENABLE, |v| v & !3)?;
-    chip.mmr_modify_checked(M2H_INT_STATUS, |v| v | 0x8000_0007)
+    chip.mmr_modify_checked(INT_ENABLE, |v| v & !INT_MIPS)?;
+    chip.mmr_modify_checked(M2H_INT_ENABLE, |v| v & !(M2H_INT_MSG | M2H_INT_DONE))?;
+    chip.mmr_modify_checked(M2H_INT_STATUS, |v| v | M2H_INT_CLEAR)
 }
 
 pub fn enable_interrupts<B: RemotePci>(chip: &mut Chip<B>) -> Result<()> {
-    chip.mmr_modify_checked(M2H_INT_STATUS, |v| v | 0x8000_0007)?;
-    chip.mmr_modify_checked(INT_ENABLE, |v| v | 0x200)?;
-    chip.mmr_modify_checked(M2H_INT_ENABLE, |v| v | 3)
+    chip.mmr_modify_checked(M2H_INT_STATUS, |v| v | M2H_INT_CLEAR)?;
+    chip.mmr_modify_checked(INT_ENABLE, |v| v | INT_MIPS)?;
+    chip.mmr_modify_checked(M2H_INT_ENABLE, |v| v | M2H_INT_MSG | M2H_INT_DONE)
 }
 
 #[cfg(test)]

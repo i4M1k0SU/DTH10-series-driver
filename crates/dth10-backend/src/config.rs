@@ -4,8 +4,15 @@
 
 use std::path::PathBuf;
 
-use dth_common::stream::{DeviceProgram, StreamModeCfg, default_read_depth};
+use dth_common::channels::UHF_BANDWIDTH_HZ;
+use dth_common::stream::{
+    DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, DeviceProgram, Lnb, StreamModeCfg, default_read_depth,
+};
 use dth10_usb::RecipientMode;
+
+/// Default of [`TunerConfig::sat_stream_path`] (`dth tune --sat-stream-path`):
+/// the satellite stream's command path, filter #1.
+pub const DEFAULT_SAT_STREAM_PATH: u8 = 1;
 
 #[derive(Debug, Clone)]
 pub struct TunerConfig {
@@ -71,7 +78,7 @@ pub struct TunerConfig {
     pub sat_endpoint: u8,
     /// `[ISDB-S] LnbVoltage = 0 | 110 | 150`: the voltage asked for when the
     /// supply is switched on.
-    pub lnb_voltage: u32,
+    pub lnb_voltage: Lnb,
     /// `[ISDB-S] LnbPower`: switch the antenna (LNB) supply on for BS/CS
     /// channels. Off by default: the DT-H70/U2 has no antenna power supply
     /// (the vendor driver's GPIO sequence for model "h70" exists and is sent
@@ -99,16 +106,16 @@ impl Default for TunerConfig {
             read_depth: default_read_depth(),
             exclusive: true,
             log_events: false,
-            ter_lock_wait_ms: 1200,
+            ter_lock_wait_ms: DEFAULT_TER_LOCK_WAIT_MS,
             attenuator: false,
-            ter_bandwidth_hz: 6_000_000,
+            ter_bandwidth_hz: UHF_BANDWIDTH_HZ,
             sat_i2c_path: None,
-            sat_stream_path: 1,
+            sat_stream_path: DEFAULT_SAT_STREAM_PATH,
             sat_endpoint: 0,
-            lnb_voltage: 150,
+            lnb_voltage: Lnb::V15,
             lnb_power: false,
             booster: false,
-            sat_lock_wait_ms: 1500,
+            sat_lock_wait_ms: DEFAULT_SAT_LOCK_WAIT_MS,
         }
     }
 }

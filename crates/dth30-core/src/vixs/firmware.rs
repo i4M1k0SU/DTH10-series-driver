@@ -92,12 +92,20 @@ pub struct VectorEntry {
 pub const VECTOR_COUNT_OFFSET: u32 = 0x110;
 /// Offset of the first vector-table entry.
 pub const VECTOR_TABLE_OFFSET: u32 = 0x120;
+/// Size of a vector-table entry: `dst` and three words.
+pub const VECTOR_ENTRY_SIZE: u32 = 16;
+/// Most vector-table entries a plausible image has.
+const MAX_VECTORS: u32 = 0x1000;
+/// Largest plausible image length in a driver file (16 MB).
+const MAX_IMAGE_LEN: usize = 0x100_0000;
 
 /// Offset in an image of the word that marks this project's own firmware.
 pub const OWN_MAGIC_OFFSET: u32 = 0x100;
 /// "DTH3": the image is this project's own firmware (`crates/dth30-fw`),
 /// not the vendor's.
 pub const OWN_MAGIC: u32 = 0x3348_5444;
+/// Offset of the own firmware's version word (after [`OWN_MAGIC`]).
+pub const OWN_VERSION_OFFSET: u32 = 0x104;
 
 /// The file names a program built without a firmware of its own looks for,
 /// in this order: an image of this project's firmware, the vendor's driver.
@@ -159,11 +167,7 @@ impl Firmware {
         let own = Self { image: image.to_vec() };
         if own.is_own() {
             own.vectors()?;
-            log::info!(
-                "own firmware, version {:#x} ({} bytes)",
-                own.word(OWN_MAGIC_OFFSET + 4).unwrap_or(0),
-                own.len()
-            );
+            log::info!("own firmware, version {:#x} ({} bytes)", own.word(OWN_VERSION_OFFSET).unwrap_or(0), own.len());
             return Ok(own);
         }
         verify(own.image, KNOWN_IMAGES).map(|image| Self { image })
@@ -246,12 +250,12 @@ impl Firmware {
     /// The vector table as stored in the image (count at +0x110).
     pub fn vectors(&self) -> Result<Vec<VectorEntry>> {
         let count = self.word(VECTOR_COUNT_OFFSET).ok_or(Error::Protocol("firmware too short"))?;
-        if count == 0xFFFF_FFFF || count > 0x1000 {
+        if count == 0xFFFF_FFFF || count > MAX_VECTORS {
             return Err(Error::Protocol("firmware vector table count invalid"));
         }
         (0..count)
             .map(|k| {
-                let e = VECTOR_TABLE_OFFSET + 16 * k;
+                let e = VECTOR_TABLE_OFFSET + VECTOR_ENTRY_SIZE * k;
                 let w = |i: u32| self.word(e + 4 * i).ok_or(Error::Protocol("firmware vector table truncated"));
                 Ok(VectorEntry { dst: w(0)?, words: [w(1)?, w(2)?, w(3)?] })
             })
@@ -267,6 +271,14 @@ fn verify(image: Vec<u8>, known: &[[u8; 32]]) -> Result<Vec<u8>> {
         Err(Error::Unsupported(format!("unknown firmware image ({} bytes, sha256 {})", image.len(), hex(&h))))
     }
 }
+
+/// PE format: offset of the PE header's offset (`e_lfanew`) in the MZ
+/// header, the optional header magics of PE32 and PE32+, and the size of a
+/// section header.
+const PE_OFFSET_FIELD: usize = 0x3C;
+const PE32_MAGIC: u16 = 0x10B;
+const PE32_PLUS_MAGIC: u16 = 0x20B;
+const SECTION_HEADER_SIZE: usize = 40;
 
 /// The parts of a PE file the extraction needs.
 #[derive(Debug)]
@@ -289,21 +301,24 @@ impl Pe {
         if !d.starts_with(b"MZ") {
             return Err(Error::Protocol("not a PE file (no MZ header)"));
         }
-        let pe = rd32(d, 0x3C)? as usize;
+        let pe = rd32(d, PE_OFFSET_FIELD)? as usize;
         if d.get(pe..pe + 4) != Some(b"PE\0\0") {
             return Err(Error::Protocol("not a PE file (no PE signature)"));
         }
+        // COFF header: NumberOfSections, SizeOfOptionalHeader; then the
+        // optional header with ImageBase at +28 (PE32) or +24 (PE32+).
         let nsec = rd16(d, pe + 6)? as usize;
         let opt_size = rd16(d, pe + 20)? as usize;
         let opt = pe + 24;
         let image_base = match rd16(d, opt)? {
-            0x10B => u64::from(rd32(d, opt + 28)?),
-            0x20B => u64::from(rd32(d, opt + 24)?) | u64::from(rd32(d, opt + 28)?) << 32,
+            PE32_MAGIC => u64::from(rd32(d, opt + 28)?),
+            PE32_PLUS_MAGIC => u64::from(rd32(d, opt + 24)?) | u64::from(rd32(d, opt + 28)?) << 32,
             _ => return Err(Error::Protocol("PE optional header of unknown kind")),
         };
         let mut sections = Vec::with_capacity(nsec);
         for i in 0..nsec {
-            let s = opt + opt_size + 40 * i;
+            // VirtualAddress, VirtualSize, PointerToRawData, SizeOfRawData.
+            let s = opt + opt_size + SECTION_HEADER_SIZE * i;
             sections.push((rd32(d, s + 12)?, rd32(d, s + 8)?, rd32(d, s + 20)?, rd32(d, s + 16)?));
         }
         Ok(Self { image_base, sections })
@@ -330,7 +345,7 @@ impl Pe {
 
 fn extract(pe: &Pe, sys: &[u8], image_va: u32, len_va: u32) -> Result<Vec<u8>> {
     let len = rd32(sys, pe.offset(len_va, 4)?)? as usize;
-    if len == 0 || len > 0x100_0000 {
+    if len == 0 || len > MAX_IMAGE_LEN {
         return Err(Error::Protocol("implausible firmware length"));
     }
     let off = pe.offset(image_va, len)?;

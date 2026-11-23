@@ -414,11 +414,36 @@ pub fn ber_e9(err: u32) -> u32 {
     (1_000_000_000u64 * err as u64 / 1_632_000) as u32
 }
 
-/// Bit of register `0x45` set when a C/N measurement has completed.
-const CN_READY: u8 = 0x40;
-
+/// Sync state in bits 3:0.
+const REG_SYNC_STATE: u8 = 0x0A;
+/// Sync state from which the demodulator has started to synchronise.
+const SYNC_STARTED: u8 = 2;
+/// Sync state from which a signal is detected.
+const SYNC_SIGNAL: u8 = 5;
 /// Sync state (`0x0A & 0x0F`) of full lock, from which the TMCC is decoded.
 const SYNC_LOCKED: u8 = 9;
+
+/// The 8-bit indirect window for writes: address, then data.
+const REG_IND_ADDR: u8 = 0x50;
+const REG_IND_DATA: u8 = 0x51;
+/// The 8-bit indirect window for reads (also the decoded TMCC): address, then data.
+const REG_IND_RD_ADDR: u8 = 0x6D;
+const REG_IND_RD_DATA: u8 = 0x6E;
+/// Indirect status register whose bit0 is reported as `lock::REG81_BIT7`.
+const IND_STATUS_84: u8 = 0x84;
+
+/// C/N measurement control: [`CN_READY`], and bit4 restarts the measurement.
+const REG_CN_CTRL: u8 = 0x45;
+/// Bit of register `0x45` set when a C/N measurement has completed.
+const CN_READY: u8 = 0x40;
+/// The raw C/N value, 16 bits big-endian (0x46 / 0x47).
+const REG_CN_RAW: u8 = 0x46;
+/// BER counter restart bits (one per layer, cleared then set).
+const REG_BER_RESTART: u8 = 0x5F;
+/// BER measurement-done bits (one per layer).
+const REG_BER_DONE: u8 = 0x60;
+/// Largest segment count of a layer that exists (an unused layer carries 15).
+const MAX_SEGMENTS: u8 = 13;
 
 /// Per-layer BER registers: `(request bit, measurement-done bit of 0x60,
 /// first error-count register, counter-restart bit of 0x5F, TMCC register
@@ -505,7 +530,7 @@ impl Pn2031 {
         self.batch(dev, &CFG_IND_DC)?;
         self.batch(dev, &CFG_IND_B0)?;
         append(dev, self.addr, &CFG_TS_HEAD)?;
-        dev.i2c_batch_append(self.addr, 0x51, &[ts_select(self.stream_param)])?;
+        dev.i2c_batch_append(self.addr, REG_IND_DATA, &[ts_select(self.stream_param)])?;
         self.batch(dev, &CFG_TS_TAIL)?;
         if u7 {
             self.batch(dev, &CFG_WORDS_U7)?;
@@ -524,8 +549,8 @@ impl Pn2031 {
         if u7 {
             self.batch(dev, &CFG_IND_1E_U7)?;
         }
-        self.write1(dev, 0x6D, 0x71)?;
-        self.write1(dev, 0x6E, 0xE5)
+        self.write1(dev, REG_IND_RD_ADDR, 0x71)?;
+        self.write1(dev, REG_IND_RD_DATA, 0xE5)
     }
 
     /// Before the tuner is programmed: `0x08 ← 01` (immediate), then the raw
@@ -538,9 +563,9 @@ impl Pn2031 {
     /// Restart of the C/N measurement: `0x45 |= 0x10`, then `0x45 &= 0x6F`
     /// (both immediate, from one read of `0x45`).
     pub fn restart_cn<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
-        let v = self.read1(dev, 0x45)?;
-        self.write1(dev, 0x45, v | 0x10)?;
-        self.write1(dev, 0x45, v & 0x6F)
+        let v = self.read1(dev, REG_CN_CTRL)?;
+        self.write1(dev, REG_CN_CTRL, v | 0x10)?;
+        self.write1(dev, REG_CN_CTRL, v & 0x6F)
     }
 
     /// After the tuner is programmed: `0x08 ← 00`, C/N restart, `0x53 ← 00`
@@ -557,10 +582,10 @@ impl Pn2031 {
         self.restart_cn(dev)?;
         self.write1(dev, 0x53, 0x00)?;
         self.write1(dev, 0x53, 0x07)?;
-        self.batch(dev, &[(0x5F, 0x00), (0x5F, 0x07)])?;
-        self.write1(dev, 0x50, 0xB1)?;
-        self.write1(dev, 0x51, 0x07)?;
-        self.write1(dev, 0x51, 0x00)
+        self.batch(dev, &[(REG_BER_RESTART, 0x00), (REG_BER_RESTART, 0x07)])?;
+        self.write1(dev, REG_IND_ADDR, 0xB1)?;
+        self.write1(dev, REG_IND_DATA, 0x07)?;
+        self.write1(dev, REG_IND_DATA, 0x00)
     }
 
     /// Read one layer's 24-bit error count (three one-byte reads) and restart
@@ -569,8 +594,8 @@ impl Pn2031 {
         let hi = self.read1(dev, first)? as u32;
         let mid = self.read1(dev, first + 1)? as u32;
         let lo = self.read1(dev, first + 2)? as u32;
-        let r = self.read1(dev, 0x5F)?;
-        self.batch(dev, &[(0x5F, r & !bit), (0x5F, (r & !bit) | bit)])?;
+        let r = self.read1(dev, REG_BER_RESTART)?;
+        self.batch(dev, &[(REG_BER_RESTART, r & !bit), (REG_BER_RESTART, (r & !bit) | bit)])?;
         Ok((hi << 16) | (mid << 8) | lo)
     }
 
@@ -578,9 +603,9 @@ impl Pn2031 {
     /// TMCC register, read through `0x6D`/`0x6E`) is 1..13. An unused layer
     /// carries 15.
     fn layer_present<T: UsbControl>(&self, dev: &mut Device<T>, tmcc_reg: u8) -> Result<bool> {
-        self.write1(dev, 0x6D, tmcc_reg)?;
-        let segments = self.read1(dev, 0x6E)? >> 4;
-        Ok((1..=13).contains(&segments))
+        self.write1(dev, REG_IND_RD_ADDR, tmcc_reg)?;
+        let segments = self.read1(dev, REG_IND_RD_DATA)? >> 4;
+        Ok((1..=MAX_SEGMENTS).contains(&segments))
     }
 
     /// Signal status. `st.mask` selects the BER layers to read; lock, C/N,
@@ -604,18 +629,18 @@ impl Pn2031 {
         let requested = st.mask;
         st.lock = 0;
         st.quality = 0;
-        let s = self.read1(dev, 0x0A)? & 0x0F;
-        self.write1(dev, 0x6D, 0x84)?;
-        let r84 = self.read1(dev, 0x6E)?;
+        let s = self.read1(dev, REG_SYNC_STATE)? & 0x0F;
+        self.write1(dev, REG_IND_RD_ADDR, IND_STATUS_84)?;
+        let r84 = self.read1(dev, REG_IND_RD_DATA)?;
         st.sync_state = s;
         let mut lk = 0u32;
-        if s >= 2 {
+        if s >= SYNC_STARTED {
             lk |= lock::SYNC_STARTED;
         }
-        if s >= 5 {
+        if s >= SYNC_SIGNAL {
             lk |= lock::SIGNAL;
         }
-        if s >= 9 {
+        if s >= SYNC_LOCKED {
             lk |= lock::LOCKED;
         }
         if r84 & 0x01 != 0 {
@@ -630,8 +655,8 @@ impl Pn2031 {
             st.quality = 60;
         }
 
-        if self.read1(dev, 0x45)? & CN_READY != 0 {
-            let raw = ((self.read1(dev, 0x46)? as u16) << 8) | self.read1(dev, 0x47)? as u16;
+        if self.read1(dev, REG_CN_CTRL)? & CN_READY != 0 {
+            let raw = ((self.read1(dev, REG_CN_RAW)? as u16) << 8) | self.read1(dev, REG_CN_RAW + 1)? as u16;
             self.restart_cn(dev)?;
             self.cnr_last = Some(cnr_mdb_from_raw(raw));
         }
@@ -644,7 +669,7 @@ impl Pn2031 {
         }
 
         if requested & (field::BER_A | field::BER_B | field::BER_C) != 0 {
-            let done = self.read1(dev, 0x60)?;
+            let done = self.read1(dev, REG_BER_DONE)?;
             for (idx, &(bit, done_bit, first, restart_bit, tmcc_reg)) in BER_LAYERS.iter().enumerate() {
                 if requested & bit == 0 {
                     continue;
@@ -681,7 +706,7 @@ impl Pn2031 {
             st.quality = 90;
         }
         if cnr > 24000 {
-            st.quality = if s >= 9 { 100 } else { 95 };
+            st.quality = if s >= SYNC_LOCKED { 100 } else { 95 };
         }
         st.mask = mask | field::QUALITY;
         Ok(())

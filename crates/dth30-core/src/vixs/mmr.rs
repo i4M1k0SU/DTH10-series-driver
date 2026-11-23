@@ -25,16 +25,24 @@ use crate::{Error, Result};
 pub const BOARD_ID: u32 = 0x478;
 /// SDRAM window select and more ("RBM_SWAP"); bits 14:8 = 1 MB window.
 pub const RBM_SWAP: u32 = 0x43C;
+/// The window number in [`RBM_SWAP`] (bits 14:8) and its shift.
+pub const WINDOW_MASK: u32 = 0x7F00;
+pub const WINDOW_SHIFT: u32 = 8;
 /// Mask applied to the board-ID register before comparing.
 pub const BOARD_ID_CHECK_MASK: u32 = 0xF3FF_FFFF;
 /// Chip-family bits of the board ID; Camino (XCode2) is [`CAMINO`].
 pub const CHIP_MASK: u32 = 0xF3FF_0000;
+/// The chip-family bits ([`CHIP_MASK`]) of an XCode2 ("Camino").
 pub const CAMINO: u32 = 0x0300_0000;
 /// Free-running timer (used by the heartbeat check and I2C bus recovery).
 pub const TIMER: u32 = 0x6130;
 /// Top-level interrupt status / enable (bit7 = I2C/GPIO, bit8 = DMA, bit9 = MIPS).
 pub const INT_STATUS: u32 = 0x414;
 pub const INT_ENABLE: u32 = 0x418;
+/// The sources in [`INT_STATUS`] / [`INT_ENABLE`].
+pub const INT_I2C_GPIO: u32 = 1 << 7;
+pub const INT_DMA: u32 = 1 << 8;
+pub const INT_MIPS: u32 = 1 << 9;
 
 /// How many times the checked accessors read the board ID before giving up.
 const CHECK_READS: u32 = 6;
@@ -174,7 +182,7 @@ impl<B: RemotePci> Chip<B> {
     /// as the vendor does around every FB access during the firmware load.
     pub fn select_window(&mut self, n: u32) -> Result<()> {
         let v = self.mmr_read_checked(RBM_SWAP)?;
-        self.mmr_write_checked(RBM_SWAP, (v & 0xFFFF_80FF) | ((n & 0x7F) << 8))?;
+        self.mmr_write_checked(RBM_SWAP, (v & !WINDOW_MASK) | ((n << WINDOW_SHIFT) & WINDOW_MASK))?;
         self.mmr_read_checked(RBM_SWAP)?;
         Ok(())
     }

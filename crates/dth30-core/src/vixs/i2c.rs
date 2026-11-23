@@ -17,7 +17,8 @@
 
 use core::time::Duration;
 
-use super::mmr::{Chip, INT_ENABLE, TIMER};
+use super::gpio;
+use super::mmr::{Chip, INT_ENABLE, INT_I2C_GPIO, TIMER};
 use crate::bus::RemotePci;
 use crate::i2c::I2c;
 use crate::{Error, Result};
@@ -33,9 +34,12 @@ pub const STATUS: u32 = 0x1094;
 pub const IRQ_ENABLE: u32 = 0x1098;
 /// GPIO registers the bus recovery uses (function, data, direction, input).
 pub const GPIO_FUNC: u32 = 0x1084;
-pub const GPIO_DATA: u32 = 0x1088;
-pub const GPIO_DIR: u32 = 0x108C;
-pub const GPIO_IN: u32 = 0x1090;
+pub const GPIO_DATA: u32 = gpio::DATA;
+pub const GPIO_DIR: u32 = gpio::DIR;
+pub const GPIO_IN: u32 = gpio::IN;
+/// The bus lines in the GPIO registers: SCL on GPIO 5, SDA on GPIO 6.
+const SCL: u32 = 1 << 5;
+const SDA: u32 = 1 << 6;
 /// Prescaler / control and reset registers of the block.
 pub const PRESCALE: u32 = 0x10A0;
 pub const RESET: u32 = 0x10A4;
@@ -48,6 +52,9 @@ pub const RECOVERY_COUNT: u32 = 0x10FC;
 pub const DONE_MASK: [u32; 2] = [0x0030_00C0, 0x0000_0080];
 /// Error bits in [`STATUS`].
 pub const HW_ERROR: u32 = 0x0030_0000;
+/// All I2C bits in [`STATUS`] / [`IRQ_ENABLE`]: both channels' completion
+/// and the error bits.
+pub const IRQ_BITS: u32 = 0x0030_00C0;
 /// Control-register bit set after a failed command (no acknowledge).
 pub const CMD_ERROR: u32 = 0x8000_0000;
 /// Control word that only puts a STOP on the bus.
@@ -66,6 +73,10 @@ const POLL_FAST: u32 = 4;
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// Bound of the free-running-timer waits (the vendor's are unbounded).
 const TIMER_READ_LIMIT: u32 = 10_000;
+/// Bus recovery: reads of a stuck bus before it is recovered, and the
+/// clock pulses it then sends.
+const RECOVERY_CHECKS: u32 = 4;
+const RECOVERY_CLOCKS: u32 = 9;
 
 /// The TIMING divider for a bus clock in kHz (100 kHz -> 415, 400 kHz -> 103).
 pub fn clkdiv(khz: u32) -> u32 {
@@ -101,9 +112,9 @@ pub fn init<B: RemotePci>(chip: &mut Chip<B>) -> Result<()> {
     chip.mmr_write_checked(reg(1, RDATA), 0)?;
     let a = chip.mmr_read_checked(STATUS)?;
     let b = chip.mmr_read(STATUS)?;
-    chip.mmr_write_checked(STATUS, a | 0x0030_00C0 | b)?;
-    chip.mmr_modify_checked(IRQ_ENABLE, |v| v | 0x0030_00C0)?;
-    chip.mmr_modify_checked(INT_ENABLE, |v| v | 0x80)?;
+    chip.mmr_write_checked(STATUS, a | IRQ_BITS | b)?;
+    chip.mmr_modify_checked(IRQ_ENABLE, |v| v | IRQ_BITS)?;
+    chip.mmr_modify_checked(INT_ENABLE, |v| v | INT_I2C_GPIO)?;
     chip.mmr_write_checked(GLOBAL_DIV, 0x67)
 }
 
@@ -125,8 +136,8 @@ fn timer_wait<B: RemotePci>(chip: &mut Chip<B>, n: u32) -> Result<()> {
 /// block. Returns whether a recovery was done.
 pub fn bus_recovery<B: RemotePci>(chip: &mut Chip<B>) -> Result<bool> {
     let mut stuck = true;
-    for _ in 0..4 {
-        if chip.mmr_read_checked(GPIO_IN)? & 0x60 != 0x20 {
+    for _ in 0..RECOVERY_CHECKS {
+        if chip.mmr_read_checked(GPIO_IN)? & (SCL | SDA) != SCL {
             stuck = false;
             break;
         }
@@ -140,20 +151,21 @@ pub fn bus_recovery<B: RemotePci>(chip: &mut Chip<B>) -> Result<bool> {
     if n != 0xFFFF_FFFF {
         chip.mmr_write(RECOVERY_COUNT, n.wrapping_add(1))?;
     }
-    chip.mmr_modify_checked(GPIO_FUNC, |v| v | 0x60)?;
-    chip.mmr_modify_checked(GPIO_DATA, |v| v & !0x60)?;
-    chip.mmr_modify_checked(GPIO_DIR, |v| v | 0x60)?;
+    chip.mmr_modify_checked(GPIO_FUNC, |v| v | SCL | SDA)?;
+    chip.mmr_modify_checked(GPIO_DATA, |v| v & !(SCL | SDA))?;
+    chip.mmr_modify_checked(GPIO_DIR, |v| v | SCL | SDA)?;
     timer_wait(chip, 1)?;
-    for _ in 0..9 {
-        for (mask, set) in [(0x20, true), (0x40, true), (0x20, false), (0x40, false)] {
+    for _ in 0..RECOVERY_CLOCKS {
+        for (mask, set) in [(SCL, true), (SDA, true), (SCL, false), (SDA, false)] {
             chip.mmr_modify_checked(GPIO_DATA, |v| (v & !mask) | if set { mask } else { 0 })?;
             timer_wait(chip, 1)?;
         }
     }
     chip.mmr_read_checked(GPIO_IN)?;
-    chip.mmr_modify_checked(GPIO_FUNC, |v| v & !0x20)?;
+    chip.mmr_modify_checked(GPIO_FUNC, |v| v & !SCL)?;
     timer_wait(chip, 1)?;
-    chip.mmr_modify_checked(GPIO_FUNC, |v| v & !0x40)?;
+    chip.mmr_modify_checked(GPIO_FUNC, |v| v & !SDA)?;
+    // Reset the block: bit 7 of PRESCALE high, then low.
     chip.mmr_modify_checked(PRESCALE, |v| v | 0x80)?;
     timer_wait(chip, 1)?;
     chip.mmr_write(RDATA, 0)?;
@@ -192,12 +204,12 @@ fn wait_done<B: RemotePci>(chip: &mut Chip<B>, ch: u8) -> Result<Option<u32>> {
 
 /// After a NAK on a transaction without STOP, put a STOP on the bus.
 fn put_stop<B: RemotePci>(chip: &mut Chip<B>, ch: u8) -> Result<()> {
-    chip.mmr_modify_checked(INT_ENABLE, |v| v & !0x80)?;
+    chip.mmr_modify_checked(INT_ENABLE, |v| v & !INT_I2C_GPIO)?;
     chip.mmr_write_checked(reg(ch, CTRL), STOP_ONLY)?;
     if wait_done(chip, ch)?.is_none() {
         log::warn!("I2C channel {ch}: STOP after NAK did not complete");
     }
-    chip.mmr_modify_checked(INT_ENABLE, |v| v | 0x80)
+    chip.mmr_modify_checked(INT_ENABLE, |v| v | INT_I2C_GPIO)
 }
 
 /// One transaction of at most 64 bytes on channel `ch`. For a write, `buf`

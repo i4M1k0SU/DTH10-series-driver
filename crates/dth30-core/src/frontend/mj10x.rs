@@ -69,6 +69,21 @@ pub(super) const MJ110_SLEEP: &[(Dev, u8, u8)] = &[
     (T, 0x05, 0x00), (D, 0x1E, 0xA8), (D, 0x1F, 0xA8), (D, 0x1C, 0xAA), (D, 0x03, 0xF0),
 ];
 
+/// Demodulator IF AGC control.
+const IF_AGC_REG: u8 = 0x23;
+/// [`IF_AGC_REG`] with the IF AGC held, during the tuner write.
+const IF_AGC_HOLD: u8 = 0x4D;
+/// [`IF_AGC_REG`] with the IF AGC running.
+const IF_AGC_RUN: u8 = 0x4C;
+/// Tuner register that stops and starts tuning around the frequency write.
+const TUNE_CTRL_REG: u8 = 0x11;
+/// [`TUNE_CTRL_REG`]: stop.
+const TUNE_STOP: u8 = 0x00;
+/// [`TUNE_CTRL_REG`]: start.
+const TUNE_START: u8 = 0x02;
+/// Tuner registers of the frequency word ([`tune_word`]), low byte first.
+const TUNE_WORD_REG: u8 = 0x14;
+
 /// The tuner's frequency word: `(hz·64 + 500000) / 10⁶` (1/64 MHz,
 /// rounded; the same value as the MxL13xRF's tune word of the DTH10
 /// series).
@@ -82,14 +97,14 @@ pub(super) fn tune<B: Bus>(fe: &mut Frontend<B>, hz: u32) -> Result<()> {
     fe.demod.set_ts_output(&mut fe.bus, false)?;
     fe.set_attenuator(true)?;
     fe.dw(0x25, 0x00)?;
-    fe.dw(0x23, 0x4D)?; // IF AGC held
-    fe.tw(0x11, 0x00)?;
+    fe.dw(IF_AGC_REG, IF_AGC_HOLD)?;
+    fe.tw(TUNE_CTRL_REG, TUNE_STOP)?;
     fe.tw(0x13, 0x15)?;
-    fe.tw(0x14, w[0])?;
-    fe.tw(0x15, w[1])?;
-    fe.tw(0x11, 0x02)?;
+    fe.tw(TUNE_WORD_REG, w[0])?;
+    fe.tw(TUNE_WORD_REG + 1, w[1])?;
+    fe.tw(TUNE_CTRL_REG, TUNE_START)?;
     fe.dw(demod::reg::RESYNC, 0x40)?;
-    fe.dw(0x23, 0x4C)?; // IF AGC running
+    fe.dw(IF_AGC_REG, IF_AGC_RUN)?;
     fe.finish_tune(hz, 0x87);
     Ok(())
 }

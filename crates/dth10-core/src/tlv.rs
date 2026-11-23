@@ -15,6 +15,122 @@
 
 use crate::error::{Error, Result};
 
+/// The tags of the device-information blob, named after the field each one
+/// fills.
+pub mod tag {
+    /// The container entry the blob starts with.
+    pub const CONTAINER: u8 = 0x01;
+    /// [`DeviceInfo::str_14`](super::DeviceInfo::str_14).
+    pub const STR_14: u8 = 0x14;
+    /// [`DeviceInfo::str_19`](super::DeviceInfo::str_19).
+    pub const STR_19: u8 = 0x19;
+    /// [`DeviceInfo::str_1a`](super::DeviceInfo::str_1a).
+    pub const STR_1A: u8 = 0x1A;
+    /// [`DeviceInfo::str_1c`](super::DeviceInfo::str_1c).
+    pub const STR_1C: u8 = 0x1C;
+    /// [`TunerDesc::model`](super::TunerDesc::model).
+    pub const MODEL: u8 = 0x1D;
+    /// [`TunerDesc::byte_40`](super::TunerDesc::byte_40).
+    pub const BYTE_40: u8 = 0x40;
+    /// [`TunerDesc::byte_46`](super::TunerDesc::byte_46).
+    pub const BYTE_46: u8 = 0x46;
+    /// [`TunerDesc::byte_47`](super::TunerDesc::byte_47).
+    pub const BYTE_47: u8 = 0x47;
+    /// [`TunerDesc::kit_name`](super::TunerDesc::kit_name).
+    pub const KIT_NAME: u8 = 0x50;
+    /// [`TunerDesc::id`](super::TunerDesc::id).
+    pub const ID: u8 = 0x51;
+    /// [`TunerDesc::flags`](super::TunerDesc::flags).
+    pub const FLAGS: u8 = 0x52;
+    /// [`TunerDesc::gpio_mask_a`](super::TunerDesc::gpio_mask_a).
+    pub const GPIO_MASK_A: u8 = 0x54;
+    /// [`TunerDesc::gpio_mask_b`](super::TunerDesc::gpio_mask_b).
+    pub const GPIO_MASK_B: u8 = 0x55;
+    /// [`TunerDesc::demod_i2c_addr`](super::TunerDesc::demod_i2c_addr).
+    pub const DEMOD_I2C_ADDR: u8 = 0x56;
+    /// [`TunerDesc::tuner_i2c_addr`](super::TunerDesc::tuner_i2c_addr).
+    pub const TUNER_I2C_ADDR: u8 = 0x57;
+    /// [`TunerDesc::stream_param`](super::TunerDesc::stream_param).
+    pub const STREAM_PARAM: u8 = 0x58;
+    /// [`TunerDesc::byte_5c`](super::TunerDesc::byte_5c).
+    pub const BYTE_5C: u8 = 0x5C;
+    /// [`TunerDesc::demod_xtal_hz`](super::TunerDesc::demod_xtal_hz).
+    pub const DEMOD_XTAL: u8 = 0x5D;
+    /// [`TunerDesc::tuner_xtal_hz`](super::TunerDesc::tuner_xtal_hz).
+    pub const TUNER_XTAL: u8 = 0x5E;
+    /// [`TunerDesc::if_freq_hz`](super::TunerDesc::if_freq_hz).
+    pub const IF_FREQ: u8 = 0x5F;
+    /// [`TunerDesc::hw_version`](super::TunerDesc::hw_version).
+    pub const HW_VERSION: u8 = 0x60;
+    /// [`TunerDesc::tuner_opts`](super::TunerDesc::tuner_opts).
+    pub const TUNER_OPTS: u8 = 0x61;
+    /// [`TunerDesc::val_62`](super::TunerDesc::val_62).
+    pub const VAL_62: u8 = 0x62;
+    /// [`TunerDesc::gpio_mask_c`](super::TunerDesc::gpio_mask_c).
+    pub const GPIO_MASK_C: u8 = 0x63;
+    /// [`TunerDesc::gpio_c_open`](super::TunerDesc::gpio_c_open).
+    pub const GPIO_C_OPEN: u8 = 0x64;
+    /// [`TunerDesc::gpio_c_close`](super::TunerDesc::gpio_c_close).
+    pub const GPIO_C_CLOSE: u8 = 0x66;
+    /// [`TunerDesc::val_67`](super::TunerDesc::val_67).
+    pub const VAL_67: u8 = 0x67;
+}
+
+/// Bits of [`DeviceInfo::present`]: which fields the blob carried, as the
+/// original parser sets them.
+pub mod info_present {
+    pub const STR_1C: u32 = 0x01;
+    pub const STR_19: u32 = 0x02;
+    pub const STR_1A: u32 = 0x04;
+    pub const STR_14: u32 = 0x10;
+}
+
+/// Bits of [`TunerDesc::present`]: which fields the blob carried, as the
+/// original parser sets them (the fields of the other tags have none). The
+/// kits test some of them.
+pub mod present {
+    pub const HW_VERSION: u32 = 0x01;
+    pub const ID: u32 = 0x02;
+    pub const MODEL: u32 = 0x04;
+    pub const KIT_NAME: u32 = 0x08;
+    pub const FLAGS: u32 = 0x10;
+    pub const GPIO_MASK_A: u32 = 0x20;
+    pub const GPIO_MASK_B: u32 = 0x80;
+    /// Also set when the parser applies the default of `byte_5c`.
+    pub const BYTE_5C: u32 = 0x800;
+    pub const STREAM_PARAM: u32 = 0x1000;
+    pub const TUNER_XTAL: u32 = 0x2000;
+    pub const IF_FREQ: u32 = 0x4000;
+    pub const TUNER_OPTS: u32 = 0x8000;
+    pub const DEMOD_XTAL: u32 = 0x10000;
+    /// `val_62`, the demodulator IF override.
+    pub const DEMOD_IF: u32 = 0x20000;
+    pub const GPIO_MASK_C: u32 = 0x40000;
+    pub const GPIO_C_CLOSE: u32 = 0x80000;
+    pub const GPIO_C_OPEN: u32 = 0x100000;
+    pub const VAL_67: u32 = 0x200000;
+}
+
+/// Bits of [`TunerDesc::flags`] that the kits test.
+pub mod flag {
+    /// Bit0: read by the MxL13xRF tuner set-up together with its
+    /// `tuner_opts` bit1 (tuner register 0x04 bit0).
+    pub const MXL_REG04: u32 = 0x01;
+    /// Bit3: the tuner sits directly on the bridge's I2C bus.
+    pub const TUNER_DIRECT_I2C: u32 = 0x08;
+    /// Bit5: Init does not power up or configure the chips.
+    pub const SKIP_INIT_CONFIG: u32 = 0x20;
+    /// Bit7: diversity-capable (BQ200X kits).
+    pub const DIVERSITY: u32 = 0x80;
+}
+
+/// [`TunerDesc::hw_version`] of the ISDB-T tuner (tuner #0) of most kits.
+pub const HW_ISDB_T: u32 = 0x102;
+/// [`TunerDesc::hw_version`] of the ISDB-S tuner (tuner #1).
+pub const HW_ISDB_S: u32 = 0x402;
+/// [`TunerDesc::hw_version`] of an ATSC unit (the LGDT3305 kit).
+pub const HW_ATSC: u32 = 0x101;
+
 /// One TLV entry borrowed from the blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry<'a> {
@@ -167,11 +283,11 @@ impl TunerDesc {
     /// Tuner I2C traffic goes directly over the bridge (not through the
     /// demodulator's I2C gate).
     pub fn tuner_direct_i2c(&self) -> bool {
-        self.flags & 0x8 != 0
+        self.flags & flag::TUNER_DIRECT_I2C != 0
     }
     /// Init must not power up / configure the chips (`flags` bit5).
     pub fn skip_init_config(&self) -> bool {
-        self.flags & 0x20 != 0
+        self.flags & flag::SKIP_INIT_CONFIG != 0
     }
     /// Model string starts with the given prefix (the driver uses `strncmp`).
     pub fn model_is(&self, prefix: &str) -> bool {
@@ -192,7 +308,7 @@ pub struct DeviceInformation {
 pub fn parse_device_information(blob: &[u8]) -> Result<DeviceInformation> {
     let mut top = Entries::new(blob);
     let container = top.next().ok_or(Error::InvalidTlv("empty blob"))?;
-    if container.tag != 1 {
+    if container.tag != tag::CONTAINER {
         return Err(Error::InvalidTlv("first entry is not the tag-1 container"));
     }
 
@@ -205,107 +321,107 @@ pub fn parse_device_information(blob: &[u8]) -> Result<DeviceInformation> {
         out.raw_entries.push((e.tag, e.data.to_vec()));
         let d = e.data;
         match e.tag {
-            0x1C => {
+            tag::STR_1C => {
                 info.str_1c = str_field(d, 128);
-                info.present |= 0x01;
+                info.present |= info_present::STR_1C;
             }
-            0x19 => {
+            tag::STR_19 => {
                 info.str_19 = str_field(d, 128);
-                info.present |= 0x02;
+                info.present |= info_present::STR_19;
             }
-            0x1A => {
+            tag::STR_1A => {
                 info.str_1a = str_field(d, 64);
-                info.present |= 0x04;
+                info.present |= info_present::STR_1A;
             }
-            0x14 => {
+            tag::STR_14 => {
                 info.str_14 = str_field(d, 64);
-                info.present |= 0x10;
+                info.present |= info_present::STR_14;
             }
-            0x1D => {
+            tag::MODEL => {
                 desc.model = str_field(d, 32);
-                desc.present |= 0x04;
+                desc.present |= present::MODEL;
             }
-            0x40 => desc.byte_40 = d[0],
-            0x46 => desc.byte_46 = d[0],
-            0x47 => desc.byte_47 = d[0],
-            0x50 => {
+            tag::BYTE_40 => desc.byte_40 = d[0],
+            tag::BYTE_46 => desc.byte_46 = d[0],
+            tag::BYTE_47 => desc.byte_47 = d[0],
+            tag::KIT_NAME => {
                 desc.kit_name = str_field(d, 32);
-                desc.present |= 0x08;
+                desc.present |= present::KIT_NAME;
             }
-            0x51 => {
+            tag::ID => {
                 desc.id = be_int(d);
-                desc.present |= 0x02;
+                desc.present |= present::ID;
             }
-            0x52 => {
+            tag::FLAGS => {
                 desc.flags = be_int(d);
-                desc.present |= 0x10;
+                desc.present |= present::FLAGS;
             }
-            0x54 => {
+            tag::GPIO_MASK_A => {
                 desc.gpio_mask_a = be_int(d);
-                desc.present |= 0x20;
+                desc.present |= present::GPIO_MASK_A;
             }
-            0x55 => {
+            tag::GPIO_MASK_B => {
                 desc.gpio_mask_b = be_int(d);
-                desc.present |= 0x80;
+                desc.present |= present::GPIO_MASK_B;
             }
-            0x56 => desc.demod_i2c_addr = d[0],
-            0x57 => desc.tuner_i2c_addr = d[0],
-            0x58 => {
+            tag::DEMOD_I2C_ADDR => desc.demod_i2c_addr = d[0],
+            tag::TUNER_I2C_ADDR => desc.tuner_i2c_addr = d[0],
+            tag::STREAM_PARAM => {
                 desc.stream_param = be_int(d);
-                desc.present |= 0x1000;
+                desc.present |= present::STREAM_PARAM;
             }
-            0x5C => {
+            tag::BYTE_5C => {
                 desc.byte_5c = d[0];
-                desc.present |= 0x800;
+                desc.present |= present::BYTE_5C;
             }
-            0x5D => {
+            tag::DEMOD_XTAL => {
                 desc.demod_xtal_hz = be_int(d);
-                desc.present |= 0x10000;
+                desc.present |= present::DEMOD_XTAL;
             }
-            0x5E => {
+            tag::TUNER_XTAL => {
                 desc.tuner_xtal_hz = be_int(d);
-                desc.present |= 0x2000;
+                desc.present |= present::TUNER_XTAL;
             }
-            0x5F => {
+            tag::IF_FREQ => {
                 desc.if_freq_hz = be_int(d) as i32;
-                desc.present |= 0x4000;
+                desc.present |= present::IF_FREQ;
             }
-            0x60 => {
+            tag::HW_VERSION => {
                 desc.hw_version = be_int(d);
-                desc.present |= 0x01;
+                desc.present |= present::HW_VERSION;
             }
-            0x61 => {
+            tag::TUNER_OPTS => {
                 desc.tuner_opts = be_int(d);
-                desc.present |= 0x8000;
+                desc.present |= present::TUNER_OPTS;
             }
-            0x62 => {
+            tag::VAL_62 => {
                 desc.val_62 = be_int(d);
-                desc.present |= 0x20000;
+                desc.present |= present::DEMOD_IF;
             }
-            0x63 => {
+            tag::GPIO_MASK_C => {
                 desc.gpio_mask_c = be_int(d);
-                desc.present |= 0x40000;
+                desc.present |= present::GPIO_MASK_C;
             }
-            0x64 => {
+            tag::GPIO_C_OPEN => {
                 desc.gpio_c_open = be_int(d);
-                desc.present |= 0x100000;
+                desc.present |= present::GPIO_C_OPEN;
             }
-            0x66 => {
+            tag::GPIO_C_CLOSE => {
                 desc.gpio_c_close = be_int(d);
-                desc.present |= 0x80000;
+                desc.present |= present::GPIO_C_CLOSE;
             }
-            0x67 => {
+            tag::VAL_67 => {
                 desc.val_67 = be_int(d);
-                desc.present |= 0x200000;
+                desc.present |= present::VAL_67;
             }
             _ => {}
         }
     }
 
     // Defaults applied by the original parser after the loop.
-    if desc.present & 0x800 == 0 {
+    if desc.present & present::BYTE_5C == 0 {
         desc.byte_5c = 1;
-        desc.present |= 0x800;
+        desc.present |= present::BYTE_5C;
     }
     Ok(out)
 }

@@ -27,10 +27,9 @@ pub mod tuner;
 pub use demod::{Pn2031, ber_e9, cnr_mdb_from_raw, cnr_tenth_db_from_raw};
 pub use tuner::Pn2031Tuner;
 
-use core::time::Duration;
 use std::thread::sleep;
 
-use crate::device::Device;
+use crate::device::{self, Device};
 use crate::error::{Error, Result};
 use crate::kit::{SignalStatus, TuneRequest, field};
 use crate::protocol::UsbControl;
@@ -113,11 +112,11 @@ impl<T: UsbControl> Pn2031Kit<T> {
         let (a, b) = (self.desc.gpio_mask_a, self.desc.gpio_mask_b);
         self.dev.gpio_enable(a | b)?;
         self.dev.gpio_clear_bits(a | b)?;
-        sleep(Duration::from_millis(2));
+        sleep(device::POWER_UP_LOW);
         self.dev.gpio_set_bits(a)?;
-        sleep(Duration::from_millis(15));
+        sleep(device::POWER_UP_A_SETTLE);
         self.dev.gpio_set_bits(b)?;
-        sleep(Duration::from_millis(10));
+        sleep(device::POWER_UP_B_SETTLE);
         Ok(())
     }
 

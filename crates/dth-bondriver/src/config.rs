@@ -40,9 +40,12 @@
 
 use std::path::{Path, PathBuf};
 
-use dth_common::stream::{DeviceProgram, StreamModeCfg, parse_num};
+use dth_common::stream::{
+    DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, DeviceProgram, Lnb, StreamModeCfg, parse_num,
+};
 use dth_proto::proto::TunerChoice;
 
+use crate::channels::Space;
 use crate::client::ServerConfig;
 use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
@@ -67,7 +70,7 @@ pub struct Tuning {
     /// `[ISDB-T] Attenuator`
     pub attenuator: bool,
     /// `[ISDB-S] LnbVoltage`: 0, 110 or 150 (x 0.1 V)
-    pub lnb_voltage: u32,
+    pub lnb_voltage: Lnb,
     /// `[ISDB-S] LnbPower`
     pub lnb_power: bool,
     /// `[ISDB-S] Booster`
@@ -85,12 +88,12 @@ impl Default for Tuning {
             stream_mode: StreamModeCfg::Device,
             device_program: DeviceProgram::First,
             app_keys: None,
-            ter_lock_wait_ms: 1200,
+            ter_lock_wait_ms: DEFAULT_TER_LOCK_WAIT_MS,
             attenuator: false,
-            lnb_voltage: 150,
+            lnb_voltage: Lnb::V15,
             lnb_power: false,
             booster: false,
-            sat_lock_wait_ms: 1500,
+            sat_lock_wait_ms: DEFAULT_SAT_LOCK_WAIT_MS,
         }
     }
 }
@@ -102,9 +105,9 @@ pub struct Config {
     pub dll_dir: Option<PathBuf>,
     /// `[Device]`, `[Stream]`, `[ISDB-T]`, `[ISDB-S]` keys.
     pub tuner: Tuning,
-    /// `[Device] Spaces`: the tuning spaces this DLL shows, as indices of
-    /// `channels::space_name` (0 = terrestrial, 1 = BS, 2 = CS110); all by default.
-    pub spaces: Vec<u32>,
+    /// `[Device] Spaces`: the tuning spaces this DLL shows, in order; all by
+    /// default.
+    pub spaces: Vec<Space>,
     /// `[Device] Tuner`: the terrestrial tuner this DLL asks for on a unit with
     /// two (`0`, `1`; `auto` or empty = the first free one). Units with one
     /// terrestrial tuner always use tuner 0.
@@ -122,7 +125,7 @@ impl Default for Config {
             ini_path: None,
             dll_dir: None,
             tuner: Tuning::default(),
-            spaces: vec![0, 1, 2],
+            spaces: Space::ALL.to_vec(),
             ter_tuner: TunerChoice::Auto,
             server: ServerConfig::default(),
             log_level: "warn".into(),
@@ -131,22 +134,30 @@ impl Default for Config {
     }
 }
 
-/// `GR,BS,CS` and the like (also 地デジ / T / CS110) to space indices; empty = all.
-pub fn parse_spaces(s: &str) -> Vec<u32> {
-    let mut v: Vec<u32> = s
+/// `GR,BS,CS` and the like (also 地デジ / T / CS110) to the spaces; empty = all.
+pub fn parse_spaces(s: &str) -> Vec<Space> {
+    let mut v: Vec<Space> = s
         .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
         .filter(|w| !w.is_empty())
         .filter_map(|w| match w.to_ascii_uppercase().as_str() {
-            "GR" | "T" | "UHF" | "ISDB-T" | "地デジ" => Some(0),
-            "BS" => Some(1),
-            "CS" | "CS110" => Some(2),
+            "GR" | "T" | "UHF" | "ISDB-T" | "地デジ" => Some(Space::Terrestrial),
+            "BS" => Some(Space::Bs),
+            "CS" | "CS110" => Some(Space::Cs),
             _ => None,
         })
         .collect();
     v.sort_unstable();
     v.dedup();
-    if v.is_empty() { vec![0, 1, 2] } else { v }
+    if v.is_empty() { Space::ALL.to_vec() } else { v }
 }
+
+/// Room for the DLL's path, in UTF-16 units.
+const MODULE_PATH_LEN: usize = 1024;
+/// Room for one ini value, in UTF-16 units.
+const INI_VALUE_LEN: usize = 512;
+/// The default handed to `GetPrivateProfileStringW`: a value no ini holds, so
+/// that a missing key can be told from an empty one.
+const INI_MISSING: &str = "\u{1}";
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -165,7 +176,7 @@ pub fn module_path(addr: *const ()) -> Option<PathBuf> {
         {
             return None;
         }
-        let mut buf = vec![0u16; 1024];
+        let mut buf = vec![0u16; MODULE_PATH_LEN];
         let n = GetModuleFileNameW(hmod, buf.as_mut_ptr(), buf.len() as u32) as usize;
         if n == 0 {
             return None;
@@ -182,8 +193,8 @@ impl Ini {
     fn get(&self, section: &str, key: &str) -> Option<String> {
         let sec = wide(section);
         let k = wide(key);
-        let def = wide("\u{1}");
-        let mut buf = vec![0u16; 512];
+        let def = wide(INI_MISSING);
+        let mut buf = vec![0u16; INI_VALUE_LEN];
         // SAFETY: plain Win32 call with valid buffers.
         let n = unsafe {
             GetPrivateProfileStringW(
@@ -196,7 +207,7 @@ impl Ini {
             )
         } as usize;
         let s = String::from_utf16_lossy(&buf[..n]);
-        if s == "\u{1}" { None } else { Some(s.trim().to_owned()) }
+        if s == INI_MISSING { None } else { Some(s.trim().to_owned()) }
     }
 
     fn u64(&self, section: &str, key: &str, default: u64) -> u64 {
@@ -251,11 +262,12 @@ impl Config {
         }
         t.ter_lock_wait_ms = f.u64("ISDB-T", "LockWaitMs", t.ter_lock_wait_ms);
         t.attenuator = f.bool("ISDB-T", "Attenuator", t.attenuator);
-        t.lnb_voltage = match f.u64("ISDB-S", "LnbVoltage", t.lnb_voltage as u64) {
-            0 => 0,
-            11 | 110 => 110,
-            15 | 150 => 150,
-            _ => 150,
+        // Volts (11, 15) are taken as well as tenths of a volt.
+        t.lnb_voltage = match f.u64("ISDB-S", "LnbVoltage", u64::from(t.lnb_voltage.tenths())) {
+            0 => Lnb::Off,
+            11 | 110 => Lnb::V11,
+            15 | 150 => Lnb::V15,
+            _ => Lnb::V15,
         };
         t.lnb_power = f.bool("ISDB-S", "LnbPower", t.lnb_power);
         t.booster = f.bool("ISDB-S", "Booster", t.booster);
@@ -274,11 +286,11 @@ mod tests {
 
     #[test]
     fn spaces_parse() {
-        assert_eq!(parse_spaces("GR"), vec![0]);
-        assert_eq!(parse_spaces("BS, CS"), vec![1, 2]);
-        assert_eq!(parse_spaces("CS110;BS;BS"), vec![1, 2]);
-        assert_eq!(parse_spaces(""), vec![0, 1, 2]);
-        assert_eq!(parse_spaces("x"), vec![0, 1, 2]);
+        assert_eq!(parse_spaces("GR"), vec![Space::Terrestrial]);
+        assert_eq!(parse_spaces("BS, CS"), vec![Space::Bs, Space::Cs]);
+        assert_eq!(parse_spaces("CS110;BS;BS"), vec![Space::Bs, Space::Cs]);
+        assert_eq!(parse_spaces(""), Space::ALL.to_vec());
+        assert_eq!(parse_spaces("x"), Space::ALL.to_vec());
     }
 
     /// The DLL `BonDriver_Test.dll` in a folder of its own, with `ini` (if
@@ -302,7 +314,7 @@ mod tests {
         let (c, dir) = load_with("none", None);
         let t = &c.tuner;
         assert_eq!(c.ini_path, None);
-        assert_eq!(c.spaces, vec![0, 1, 2]);
+        assert_eq!(c.spaces, Space::ALL.to_vec());
         assert_eq!(c.ter_tuner, TunerChoice::Auto);
         assert_eq!(
             (t.serial.as_str(), t.stream_mode, t.device_program),
@@ -310,7 +322,7 @@ mod tests {
         );
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")));
         assert_eq!((t.ter_lock_wait_ms, t.sat_lock_wait_ms), (1200, 1500));
-        assert_eq!((t.lnb_voltage, t.lnb_power), (150, false));
+        assert_eq!((t.lnb_voltage, t.lnb_power), (Lnb::V15, false));
         assert_eq!((t.attenuator, t.booster), (false, false));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (5, 5));
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("warn", ""));
@@ -392,12 +404,12 @@ mod tests {
                    [Server]\r\nIdleExitSec=9\r\nStartTimeoutSec=7\r\n";
         let (c, dir) = load_with("keys", Some(ini));
         let t = &c.tuner;
-        assert_eq!((t.serial.as_str(), c.spaces.as_slice()), ("SN1", &[1, 2][..]));
+        assert_eq!((t.serial.as_str(), c.spaces.as_slice()), ("SN1", &[Space::Bs, Space::Cs][..]));
         assert_eq!(c.ter_tuner, TunerChoice::Index(1));
         assert_eq!((t.stream_mode, t.device_program), (StreamModeCfg::Raw, DeviceProgram::Id(0x400)));
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")));
         assert_eq!((t.ter_lock_wait_ms, t.sat_lock_wait_ms), (2000, 2500));
-        assert_eq!((t.lnb_voltage, t.lnb_power), (110, true));
+        assert_eq!((t.lnb_voltage, t.lnb_power), (Lnb::V11, true));
         assert_eq!((t.attenuator, t.booster), (true, true));
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("debug", "C:\\logs\\bon.log"));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (9, 7));
@@ -445,10 +457,10 @@ mod tests {
         {
             let ini = format!("[ISDB-S]\r\nLnbVoltage={value}\r\n");
             let (c, _) = load_with(&format!("lnb-voltage-{index}"), Some(&ini));
-            assert_eq!(c.tuner.lnb_voltage, expected, "LnbVoltage={value}");
+            assert_eq!(c.tuner.lnb_voltage.tenths(), expected, "LnbVoltage={value}");
         }
         let (c, _) = load_with("lnb-voltage-missing", Some("[ISDB-S]\r\nLnbPower=1\r\n"));
-        assert_eq!(c.tuner.lnb_voltage, 150);
+        assert_eq!(c.tuner.lnb_voltage, Lnb::V15);
     }
 
     /// An ini of an older version that still has retired keys (with values

@@ -4,6 +4,14 @@ use std::env;
 
 const AUTHOR: &str = "i4M1k0SU";
 
+// VERSIONINFO values (winver.h), which no crate of the build provides.
+/// `VFT_APP`: the file is an application.
+const VFT_APP: u64 = 1;
+/// `VFT_DLL`: the file is a DLL.
+const VFT_DLL: u64 = 2;
+/// `VS_FF_PRERELEASE`: the file is a development version.
+const VS_FF_PRERELEASE: u64 = 2;
+
 pub fn compile(filename: &str, dll: bool) {
     println!("cargo:rerun-if-changed=../../build/windows.rs");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
@@ -35,9 +43,9 @@ pub fn compile(filename: &str, dll: bool) {
         .set("OriginalFilename", filename)
         .set_version_info(winresource::VersionInfo::FILEVERSION, numeric)
         .set_version_info(winresource::VersionInfo::PRODUCTVERSION, numeric)
-        .set_version_info(winresource::VersionInfo::FILETYPE, if dll { 2 } else { 1 });
+        .set_version_info(winresource::VersionInfo::FILETYPE, if dll { VFT_DLL } else { VFT_APP });
     if !env::var("CARGO_PKG_VERSION_PRE").expect("prerelease component").is_empty() {
-        resource.set_version_info(winresource::VersionInfo::FILEFLAGS, 2); // VS_FF_PRERELEASE
+        resource.set_version_info(winresource::VersionInfo::FILEFLAGS, VS_FF_PRERELEASE);
     }
     resource.compile().expect("compile Windows version resource (Windows SDK / rc.exe required)");
 }

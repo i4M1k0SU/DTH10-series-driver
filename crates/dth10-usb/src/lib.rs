@@ -22,10 +22,28 @@ use dth10_core::error::{Error, Result};
 use dth10_core::protocol::UsbControl;
 use nusb::MaybeFuture;
 use nusb::descriptors::TransferType;
-use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Interrupt, Recipient, TransferError};
+use nusb::transfer::{
+    Buffer, Bulk, ControlIn, ControlOut, ControlType, Direction, In, Interrupt, Recipient, TransferError,
+};
 use nusb::{Endpoint, Interface};
 
 pub use nusb;
+
+/// The interface the bridge's endpoints belong to; claimed at open.
+const INTERFACE: u8 = 0;
+/// The configuration the device runs in.
+const CONFIGURATION: u8 = 1;
+
+/// Bulk (or interrupt) IN endpoint of TS stream #0, as the original driver
+/// assigns it.
+pub const EP_TS0: u8 = 0x81;
+/// The endpoint TS stream #1 normally has (the second bulk IN endpoint).
+pub const EP_TS1: u8 = 0x82;
+
+/// How long `stop` waits for each cancelled transfer to come back.
+const CANCEL_WAIT: Duration = Duration::from_millis(500);
+/// Length of an interrupt (event) read in the original driver, in bytes.
+const EVENT_TRANSFER_LEN: usize = 512;
 
 /// Which recipient field to put in `bmRequestType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,13 +76,13 @@ fn map_io(e: nusb::Error) -> Error {
 /// Endpoint assignment as the original driver makes it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipeMap {
-    /// EP 0x81 (bulk or interrupt IN) → TS stream #0.
+    /// [`EP_TS0`] (bulk or interrupt IN) → TS stream #0.
     pub ts0: Option<(u8, TransferType)>,
-    /// EP 0x82 (or another bulk IN) → TS stream #1.
+    /// [`EP_TS1`] (or another bulk IN) → TS stream #1.
     pub ts1: Option<(u8, TransferType)>,
     /// Bulk OUT pipe (stored by the driver, use unknown).
     pub bulk_out: Option<u8>,
-    /// Interrupt IN pipe other than 0x81/0x82 → event notifications.
+    /// Interrupt IN pipe other than [`EP_TS0`] / [`EP_TS1`] → event notifications.
     pub interrupt_in: Option<u8>,
 }
 
@@ -74,11 +92,11 @@ impl PipeMap {
         let Some(desc) = iface.descriptor() else { return m };
         for ep in desc.endpoints() {
             let addr = ep.address();
-            let is_in = addr & 0x80 != 0;
+            let is_in = ep.direction() == Direction::In;
             match ep.transfer_type() {
                 TransferType::Bulk => {
                     if is_in {
-                        if addr == 0x81 {
+                        if addr == EP_TS0 {
                             m.ts0 = Some((addr, TransferType::Bulk));
                         } else {
                             m.ts1 = Some((addr, TransferType::Bulk));
@@ -88,8 +106,8 @@ impl PipeMap {
                     }
                 }
                 TransferType::Interrupt if is_in => match addr {
-                    0x81 => m.ts0 = Some((addr, TransferType::Interrupt)),
-                    0x82 => m.ts1 = Some((addr, TransferType::Interrupt)),
+                    EP_TS0 => m.ts0 = Some((addr, TransferType::Interrupt)),
+                    EP_TS1 => m.ts1 = Some((addr, TransferType::Interrupt)),
                     _ => m.interrupt_in = Some(addr),
                 },
                 _ => {}
@@ -245,15 +263,15 @@ impl UsbTransport {
         // usbfs leaves the configuration as the kernel chose it; select
         // configuration 1 only when another one is active, as re-selecting the
         // active configuration resets the endpoints.
-        if device.active_configuration().map(|c| c.configuration_value()).ok() != Some(1)
-            && let Err(e) = device.set_configuration(1).wait()
+        if device.active_configuration().map(|c| c.configuration_value()).ok() != Some(CONFIGURATION)
+            && let Err(e) = device.set_configuration(CONFIGURATION).wait()
         {
-            log::debug!("set_configuration(1): {e}");
+            log::debug!("set_configuration({CONFIGURATION}): {e}");
         }
         // Detaching is a no-op on Windows; on Linux it frees interface 0 from a
         // kernel driver that may have bound to it.
         let product_id = device.device_descriptor().product_id();
-        let iface = device.detach_and_claim_interface(0).wait().map_err(map_io)?;
+        let iface = device.detach_and_claim_interface(INTERFACE).wait().map_err(map_io)?;
         let recipient = match mode {
             RecipientMode::Interface => Recipient::Interface,
             RecipientMode::Device => Recipient::Device,
@@ -383,6 +401,11 @@ mod linux {
 
     use super::{Found, is_supported, map_io};
 
+    /// LANGID of US English, the string descriptor language asked for first.
+    const LANG_EN_US: u16 = 0x0409;
+    /// How long a string descriptor read may take.
+    const DESCRIPTOR_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
     /// Wrap the usbfs node `path` in a nusb device.
     pub(super) fn device_from_path(path: &Path) -> Result<nusb::Device> {
         let f = std::fs::OpenOptions::new()
@@ -396,11 +419,12 @@ mod linux {
     /// The serial number string descriptor (English, else the first language).
     pub(super) fn read_serial(device: &nusb::Device) -> Option<String> {
         let idx = device.device_descriptor().serial_number_string_index()?;
-        let timeout = std::time::Duration::from_millis(500);
-        let langs: Vec<u16> =
-            device.get_string_descriptor_supported_languages(timeout).wait().map_or_default(|it| it.collect());
-        let lang = if langs.contains(&0x0409) { 0x0409 } else { langs.first().copied().unwrap_or(0x0409) };
-        device.get_string_descriptor(idx, lang, timeout).wait().ok()
+        let langs: Vec<u16> = device
+            .get_string_descriptor_supported_languages(DESCRIPTOR_TIMEOUT)
+            .wait()
+            .map_or_default(|it| it.collect());
+        let lang = if langs.contains(&LANG_EN_US) { LANG_EN_US } else { langs.first().copied().unwrap_or(LANG_EN_US) };
+        device.get_string_descriptor(idx, lang, DESCRIPTOR_TIMEOUT).wait().ok()
     }
 
     /// Every supported device under `/dev/bus/usb`, found by opening each node
@@ -496,7 +520,7 @@ impl StreamReader {
     pub fn stop(&mut self) {
         self.ep.cancel_all();
         while self.ep.pending() > 0 {
-            if self.ep.wait_next_complete(Duration::from_millis(500)).is_none() {
+            if self.ep.wait_next_complete(CANCEL_WAIT).is_none() {
                 break;
             }
         }
@@ -522,8 +546,8 @@ pub struct EventReader {
 impl EventReader {
     pub fn new(ep: Endpoint<Interrupt, In>) -> Self {
         let mps = ep.max_packet_size().max(1);
-        // 512 rounded up to a multiple of the max packet size.
-        let transfer_len = 512usize.div_ceil(mps) * mps;
+        // Rounded up to a multiple of the max packet size.
+        let transfer_len = EVENT_TRANSFER_LEN.div_ceil(mps) * mps;
         EventReader { ep, transfer_len }
     }
 
@@ -543,7 +567,7 @@ impl EventReader {
     pub fn stop(&mut self) {
         self.ep.cancel_all();
         while self.ep.pending() > 0 {
-            if self.ep.wait_next_complete(Duration::from_millis(500)).is_none() {
+            if self.ep.wait_next_complete(CANCEL_WAIT).is_none() {
                 break;
             }
         }

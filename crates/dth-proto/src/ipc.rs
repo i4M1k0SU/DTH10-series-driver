@@ -25,15 +25,28 @@ pub const DEFAULT_SOCKET: &str = "/run/dth/dth.sock";
 #[cfg(unix)]
 pub const SOCKET_MODE: u32 = 0o660;
 
+/// How many connections the daemon's Unix socket lets wait for `accept`.
+const LISTEN_BACKLOG: std::ffi::c_int = 8;
+
+/// How long a client waits for a TCP connection to the daemon. A refused
+/// loopback connect can take a second or two on Windows (the SYN is
+/// retried); a daemon that is up accepts within milliseconds.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// FNV-1a (64-bit) offset basis, for [`folder_hash`].
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a (64-bit) prime, for [`folder_hash`].
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
 /// A number for the folder `dir`, the same for every spelling Windows takes
 /// as that folder's (FNV-1a of the path, case-folded). It names the server
 /// of the programs in that folder, so that they meet without being told
 /// where, and the servers of two folders are apart.
 pub fn folder_hash(dir: &Path) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h: u64 = FNV_OFFSET_BASIS;
     for b in dir.to_string_lossy().to_lowercase().bytes() {
         h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        h = h.wrapping_mul(FNV_PRIME);
     }
     h
 }
@@ -189,7 +202,7 @@ impl Listener {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
                 }
-                l.listen(8)?;
+                l.listen(LISTEN_BACKLOG)?;
                 l.set_nonblocking(true)?;
                 Ok(Listener::Unix(l))
             }
@@ -251,13 +264,11 @@ impl Conn {
                 Ok(Conn::Unix(s))
             }
             Target::Tcp(addr) => {
-                // A refused loopback connect can take a second or two on Windows
-                // (the SYN is retried); a daemon that is up accepts within ms.
                 let sa: SocketAddr = addr
                     .to_socket_addrs()?
                     .next()
                     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("bad address {addr}")))?;
-                let c = TcpStream::connect_timeout(&sa, Duration::from_millis(500))?;
+                let c = TcpStream::connect_timeout(&sa, TCP_CONNECT_TIMEOUT)?;
                 c.set_nodelay(true)?;
                 Ok(Conn::Tcp(c))
             }

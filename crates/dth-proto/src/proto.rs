@@ -49,11 +49,24 @@
 //! The connection ends after the reply. The text form does not depend on the
 //! platform, so its tests run everywhere.
 
-use dth_common::stream::parse_num;
+use std::time::Duration;
+
+use dth_common::stream::{Lnb, parse_num};
 use dth_common::{Channel, System};
 
 /// The longest line either side reads.
 pub const MAX_LINE: usize = 512;
+
+/// How long a client waits for the reply to a stream request: tuning can
+/// take a few seconds (handshake, PSI learn) before the daemon answers.
+pub const STREAM_REPLY_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// A streaming client's read timeout: how often its read loop looks at its
+/// stop flag while no TS arrives.
+pub const STREAM_READ_POLL: Duration = Duration::from_millis(500);
+
+/// The buffer a streaming client reads the TS into, in bytes.
+pub const STREAM_READ_BUF: usize = 64 * 1024;
 
 /// Which terrestrial tuner a stream request asks for (key `tuner=`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +120,7 @@ pub struct StreamRequest {
     pub client: Option<String>,
     /// Antenna (LNB) supply for this tune: 0 = off, else the voltage (110 /
     /// 150); `None` = the daemon's setting. Used by satellite tunes only.
-    pub lnb: Option<u32>,
+    pub lnb: Option<Lnb>,
     /// Terrestrial attenuator for this tune (key `att=0|1`); `None` = the
     /// daemon's setting. Used by terrestrial tunes only.
     pub attenuator: Option<bool>,
@@ -233,10 +246,8 @@ impl Request {
                 }
                 "client" if !value.is_empty() => client = Some(value.to_owned()),
                 "lnb" => {
-                    lnb = Some(match parse_u32(value)? {
-                        v @ (0 | 110 | 150) => v,
-                        v => return Err(format!("lnb {v}: 0, 110 or 150")),
-                    })
+                    let v = parse_u32(value)?;
+                    lnb = Some(Lnb::from_tenths(v).ok_or_else(|| format!("lnb {v}: 0, 110 or 150"))?);
                 }
                 "att" => attenuator = Some(parse_switch(key, value)?),
                 "boost" => booster = Some(parse_switch(key, value)?),
@@ -497,7 +508,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!((r.lnb, r.lock_wait_ms), (Some(150), Some(2500)));
+        assert_eq!((r.lnb, r.lock_wait_ms), (Some(Lnb::V15), Some(2500)));
         let line = Request::Stream(r.clone()).to_line();
         assert!(line.ends_with(" client=1-1 lnb=150 lock_wait=2500"), "{line}");
         assert_eq!(Request::parse(&line).unwrap(), Request::Stream(r));
@@ -521,7 +532,10 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!((r.lnb, r.attenuator, r.booster, r.lock_wait_ms), (Some(0), Some(false), Some(true), Some(1500)));
+        assert_eq!(
+            (r.lnb, r.attenuator, r.booster, r.lock_wait_ms),
+            (Some(Lnb::Off), Some(false), Some(true), Some(1500))
+        );
         assert_eq!(Request::parse(&Request::Stream(r.clone()).to_line()).unwrap(), Request::Stream(r));
         // absent: the daemon's settings
         let Request::Stream(r) = Request::parse("stream ter=557142857").unwrap() else { panic!() };

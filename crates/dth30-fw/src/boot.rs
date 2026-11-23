@@ -17,6 +17,10 @@ use crate::hw::{FB_BASE, MMR_BASE};
 pub const MAGIC: u32 = 0x3348_5444;
 /// Firmware version (image +0x104, FB 0xC4): major << 16 | minor.
 pub const VERSION: u32 = 0x0000_0001;
+/// Where the running firmware shows its [`MAGIC`] and [`VERSION`] to the
+/// host (FB, SDRAM physical).
+pub const FB_MAGIC: u32 = 0xC0;
+pub const FB_VERSION: u32 = 0xC4;
 
 /// Offsets in the image: the mark and the version, the number of vector
 /// table entries, the table.
@@ -34,9 +38,14 @@ pub const LUI_K0: u32 = 0x3C1A_0000;
 pub const ORI_K0: u32 = 0x375A_0000;
 pub const JR_K0: u32 = 0x0340_0008;
 
+/// The general and the interrupt exception vectors, without and with BEV
+/// (physical addresses), where the firmware puts its own stub once it runs.
+pub const EXCEPTION_VECTORS: [u32; 4] = [0x180, 0x200, 0x380, 0x400];
 /// The exception vectors (physical addresses, and the offsets of their
-/// stubs in the image). The table has the reset vector before them.
-const VECTORS: [u32; 5] = [0x180, 0x200, 0x380, 0x400, 0x480];
+/// stubs in the image): those above and 0x480. The table has the reset
+/// vector before them.
+const VECTORS: [u32; 5] =
+    [EXCEPTION_VECTORS[0], EXCEPTION_VECTORS[1], EXCEPTION_VECTORS[2], EXCEPTION_VECTORS[3], 0x480];
 
 /// CP0 Status while booting: BEV, kernel mode, interrupts off.
 const STATUS_BOOT: u32 = 1 << 22;
@@ -53,10 +62,10 @@ const CACHE_LINE: u32 = 16;
 /// The record of a fatal error, where the vendor's firmware leaves its own
 /// for the host (SDRAM physical): a count of them; the mark, where, `sp`,
 /// the core; the cause code, EPC, Status, Cause, BadVAddr, `ra`.
-const FATAL_COUNT: u32 = 0x520;
-const FATAL_RECORD: u32 = 0x530;
+pub const FATAL_COUNT: u32 = 0x520;
+pub const FATAL_RECORD: u32 = 0x530;
 const FATAL_DETAIL: u32 = 0x560;
-const FATAL_MARK: u32 = 0xDEAD_C0DE;
+pub const FATAL_MARK: u32 = 0xDEAD_C0DE;
 /// All of it.
 pub const FATAL_AREA: Range<u32> = 0x520..0x580;
 

@@ -87,7 +87,7 @@ pub const fn remote_ctl(space: PciSpace, read: bool, byte_enable: u8) -> u16 {
         | space.command_bits()
         | PCI_MST_START
         | if read { PCI_MST_READ } else { 0 }
-        | (byte_enable & 0x0F) as u16
+        | (byte_enable & BE_ALL) as u16
 }
 
 fn header(word0: u16, addr: u32) -> [u8; READ_LEN] {

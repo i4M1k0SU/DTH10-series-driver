@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use dth_common::stream::Lnb;
 use dth_common::{
     Backend, Channel, DeviceProgram, Error, LockExt, Request, Result, Session, StreamModeCfg, System, TsQueue, Unit,
 };
@@ -17,6 +18,7 @@ use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::DeviceInformation;
 use dth10_usb::UsbTransport;
 
+use crate::tuner::DESC_FLAG_TUNER1;
 use crate::{Tuner, TunerConfig};
 
 /// The application key file: `explicit`, `$DTH10_APP_KEYS`, `CoBDACom.dll`
@@ -150,7 +152,7 @@ impl Dth10Backend {
                 let _ = writeln!(s, "firmware: {e}");
             }
         }
-        if di.desc.flags & 1 != 0 {
+        if di.desc.flags & DESC_FLAG_TUNER1 != 0 {
             let dev1 = Device::new(t).with_tuner_index(1);
             match dev1.read_device_information() {
                 Ok(di1) => describe_tuner(&mut s, 1, &di1),
@@ -248,8 +250,8 @@ impl Session for Dth10Session {
     fn set_device_program(&mut self, program: DeviceProgram) {
         self.tuner.set_device_program(program)
     }
-    fn set_lnb(&mut self, volt: u32) {
-        self.tuner.set_lnb(volt)
+    fn set_lnb(&mut self, lnb: Lnb) {
+        self.tuner.set_lnb(lnb)
     }
     fn set_attenuator(&mut self, on: bool) {
         self.tuner.set_attenuator(on)

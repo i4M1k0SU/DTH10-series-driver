@@ -72,7 +72,7 @@ pub const SUPPORTED_PIDS: &[(u16, &str)] = &[
     (0x01FF, "DT-H71/U2"),
     (0x0200, "DT-H70B/PCIE"),
     (0x0202, "DT-F120/U2"),
-    (0x0218, "DT-H30/PCIEM-TS"),
+    (kit::PID_DTH30_PCIEM_TS, "DT-H30/PCIEM-TS"),
     (PID_DTH10_U7, "DT-H10/U7"),
 ];
 
@@ -94,7 +94,7 @@ pub const PID_DTH10_U7: u16 = 0x017B;
 /// tuner kit that is not implemented here. And the DT-H10/U7
 /// ([`PID_DTH10_U7`]), which has a vendor driver of its own and a different
 /// TS slot layout.
-pub const UNVERIFIED_PIDS: &[u16] = &[0x01FF, 0x0200, 0x0202, 0x0218, PID_DTH10_U7];
+pub const UNVERIFIED_PIDS: &[u16] = &[0x01FF, 0x0200, 0x0202, kit::PID_DTH30_PCIEM_TS, PID_DTH10_U7];
 
 /// Returns the marketing name for a supported product ID.
 pub fn product_name(pid: u16) -> Option<&'static str> {

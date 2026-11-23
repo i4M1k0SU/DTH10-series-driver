@@ -20,19 +20,27 @@ pub struct Channel {
     /// ISDB-S: the transport stream ID to select when `slot` is `None` or the
     /// TMCC table has no usable entry for it (ARIB numbering, e.g. 0x4010).
     pub tsid: u16,
-    /// LNB voltage request for BS/CS (0 = backend default).
-    pub lnb_volt: u32,
+    /// LNB supply request for BS/CS (`None` = the backend's setting).
+    pub lnb_volt: Option<crate::stream::Lnb>,
     /// ISDB-S: relative TS number within the transponder (index into the TMCC
     /// TS-ID table), when the channel is named that way.
     pub slot: Option<u8>,
 }
 
+/// The first UHF physical channel.
+pub const UHF_FIRST: u32 = 13;
+/// The last UHF physical channel.
+pub const UHF_LAST: u32 = 62;
+/// Width of a UHF channel in Hz: the raster of the table and the ISDB-T
+/// channel bandwidth.
+pub const UHF_BANDWIDTH_HZ: u32 = 6_000_000;
+
 /// UHF channel centre frequency in Hz (ARIB STD-B31: 473 + 1/7 MHz for ch13).
 pub fn uhf_center_hz(ch: u32) -> Option<u32> {
-    if !(13..=62).contains(&ch) {
+    if !(UHF_FIRST..=UHF_LAST).contains(&ch) {
         return None;
     }
-    Some(473_000_000 + 6_000_000 * (ch - 13) + 142_857)
+    Some(473_000_000 + UHF_BANDWIDTH_HZ * (ch - UHF_FIRST) + 142_857)
 }
 
 /// BS transponder IF centre frequencies (Hz) after a 10.678 GHz LNB, odd
@@ -117,14 +125,21 @@ impl Channel {
             system: System::IsdbT,
             frequency_hz: f,
             tsid: 0,
-            lnb_volt: 0,
+            lnb_volt: None,
             slot: None,
         })
     }
 
     /// ISDB-T at an arbitrary centre frequency.
     pub fn terrestrial_hz(hz: u32) -> Channel {
-        Channel { name: format!("{hz} Hz"), system: System::IsdbT, frequency_hz: hz, tsid: 0, lnb_volt: 0, slot: None }
+        Channel {
+            name: format!("{hz} Hz"),
+            system: System::IsdbT,
+            frequency_hz: hz,
+            tsid: 0,
+            lnb_volt: None,
+            slot: None,
+        }
     }
 
     /// BS transponder (odd 1..23) and relative TS number.
@@ -135,7 +150,7 @@ impl Channel {
             system: System::IsdbS,
             frequency_hz: f,
             tsid: arib_tsid(true, transponder, slot),
-            lnb_volt: 0,
+            lnb_volt: None,
             slot: Some(slot),
         })
     }
@@ -148,7 +163,7 @@ impl Channel {
             system: System::IsdbS,
             frequency_hz: f,
             tsid: arib_tsid(false, transponder, slot),
-            lnb_volt: 0,
+            lnb_volt: None,
             slot: Some(slot),
         })
     }
@@ -164,7 +179,7 @@ impl Channel {
             system: System::IsdbS,
             frequency_hz: if_hz,
             tsid: tsid.unwrap_or(0),
-            lnb_volt: 0,
+            lnb_volt: None,
             slot: if tsid.is_none() { Some(0) } else { None },
         }
     }

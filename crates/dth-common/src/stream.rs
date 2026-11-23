@@ -40,6 +40,53 @@ impl DeviceProgram {
     }
 }
 
+/// Default of the ISDB-T lock wait (`[ISDB-T] LockWaitMs`, `--ter-lock-wait`),
+/// in ms.
+pub const DEFAULT_TER_LOCK_WAIT_MS: u64 = 1200;
+/// Default of the ISDB-S lock wait, for lock and the TMCC TS-ID table
+/// (`[ISDB-S] LockWaitMs`, `--sat-lock-wait`), in ms.
+pub const DEFAULT_SAT_LOCK_WAIT_MS: u64 = 1500;
+
+/// The antenna (LNB) supply of a satellite tuner. The ini
+/// (`[ISDB-S] LnbVoltage`), `--lnb` and the `lnb=` request field give it in
+/// units of 0.1 V ([`Lnb::tenths`]); each reads that number its own way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lnb {
+    /// No supply.
+    Off,
+    /// 11 V.
+    V11,
+    /// 15 V.
+    V15,
+}
+
+impl Lnb {
+    /// The supply in units of 0.1 V: 0, 110 or 150.
+    pub const fn tenths(self) -> u32 {
+        match self {
+            Lnb::Off => 0,
+            Lnb::V11 => 110,
+            Lnb::V15 => 150,
+        }
+    }
+
+    /// The supply for exactly 0, 110 or 150 (0.1 V units).
+    pub fn from_tenths(v: u32) -> Option<Self> {
+        [Lnb::Off, Lnb::V11, Lnb::V15].into_iter().find(|l| l.tenths() == v)
+    }
+}
+
+/// Written as [`Lnb::tenths`], the way it is given.
+impl std::fmt::Display for Lnb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.tenths().fmt(f)
+    }
+}
+
+/// The most bulk IN transfers a stream keeps in flight (`--read-depth` is
+/// clamped to 1..=this).
+pub const MAX_READ_DEPTH: usize = 64;
+
 /// Platform default of the backends' `read_depth` setting (`TunerConfig::read_depth`).
 pub fn default_read_depth() -> usize {
     if cfg!(windows) { 4 } else { 16 }

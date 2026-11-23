@@ -16,16 +16,31 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand};
 use dth30_core::bus::RemotePci;
-use dth30_core::device::{Config, Dth30, StreamInfo};
+use dth30_core::device::{Config, Dth30, FRONTEND_KHZ, StreamInfo};
 use dth30_core::frontend::StdSleep;
 use dth30_core::frontend::regs::{read_regs, write_regs};
 use dth30_core::model;
-use dth30_core::psi::ProgramScanner;
+use dth30_core::net2280::{cfg, reg};
+use dth30_core::psi::{PACKET_188, ProgramScanner, SCRAMBLING_CONTROL, SYNC_BYTE};
 use dth30_core::vixs::stream::{CasMode, card_state, parse_generic_block};
 use dth30_core::vixs::{Firmware, Options, Vixs};
 use dth30_usb::{LocalSpace, Net2280Usb, StreamReader};
 
 type Res<T = ()> = Result<T, Box<dyn Error>>;
+
+/// A channel argument above this is a frequency in Hz.
+const FREQUENCY_MIN_HZ: u32 = 1_000_000;
+/// How often `tune` prints the signal status.
+const STATUS_POLL: Duration = Duration::from_millis(250);
+/// How long the card may take to report itself activated, and how often
+/// that is looked at.
+const CARD_WAIT: Duration = Duration::from_secs(5);
+const CARD_POLL: Duration = Duration::from_millis(20);
+/// How long the Raw stream is read for the service's PAT and PMT.
+const PSI_WAIT: Duration = Duration::from_secs(5);
+/// Timeout of a stream read, and of one that only drains a stream.
+const READ_TIMEOUT: Duration = Duration::from_millis(200);
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(1);
 
 #[derive(Parser)]
 #[command(
@@ -211,7 +226,7 @@ fn run(cli: Cli) -> Res {
         }
         Cmd::I2cRead { fw, addr, reg, count, channel } => {
             let (mut v, _) = bring_up(serial, &fw)?;
-            let mut bus = StdSleep(v.i2c(channel, 400));
+            let mut bus = StdSleep(v.i2c(channel, FRONTEND_KHZ));
             let mut buf = vec![0u8; count as usize];
             read_regs(&mut bus, addr, reg, &mut buf)?;
             println!("i2c 0x{addr:02x} reg 0x{reg:02x}: {}", hex(&buf));
@@ -219,7 +234,7 @@ fn run(cli: Cli) -> Res {
         }
         Cmd::I2cWrite { fw, addr, reg, data, channel } => {
             let (mut v, _) = bring_up(serial, &fw)?;
-            let mut bus = StdSleep(v.i2c(channel, 400));
+            let mut bus = StdSleep(v.i2c(channel, FRONTEND_KHZ));
             write_regs(&mut bus, addr, reg, &data.0)?;
             println!("wrote i2c 0x{addr:02x} reg 0x{reg:02x}: {}", hex(&data.0));
             Ok(())
@@ -267,9 +282,19 @@ fn info(serial: Option<&str>) -> Res {
         );
     }
     // The NET2280's own identity and a few registers: reads only.
-    println!("NET2280 config 0x00 (vendor/device): 0x{:08x}", t.local_read(LocalSpace::Config, 0x00)?);
-    println!("NET2280 config 0x04 (command/status): 0x{:08x}", t.local_read(LocalSpace::Config, 0x04)?);
-    for (off, name) in [(0x00u16, "DEVINIT"), (0x24, "USBIRQENB1"), (0x2C, "IRQSTAT1"), (0x100, "PCIMSTCTL")] {
+    println!("NET2280 config 0x{:02x} (vendor/device): 0x{:08x}", cfg::ID, t.local_read(LocalSpace::Config, cfg::ID)?);
+    println!(
+        "NET2280 config 0x{:02x} (command/status): 0x{:08x}",
+        cfg::COMMAND,
+        t.local_read(LocalSpace::Config, cfg::COMMAND)?
+    );
+    let regs = [
+        (reg::DEVINIT, "DEVINIT"),
+        (reg::USBIRQENB1, "USBIRQENB1"),
+        (reg::IRQSTAT1, "IRQSTAT1"),
+        (reg::PCIMSTCTL, "PCIMSTCTL"),
+    ];
+    for (off, name) in regs {
         println!("NET2280 0x{off:03x} {name}: 0x{:08x}", t.csr_read(off)?);
     }
     Ok(())
@@ -362,7 +387,7 @@ fn report_bring_up(v: &Vixs<Net2280Usb>, usb_id: (u16, u16)) {
 
 fn channel_hz(channel: &str) -> Res<u32> {
     if let Ok(n) = channel.parse::<u32>()
-        && n > 1_000_000
+        && n > FREQUENCY_MIN_HZ
     {
         return Ok(n);
     }
@@ -396,7 +421,7 @@ fn tune(serial: Option<&str>, a: &TuneArgs, cas: CasMode) -> Res<Dth30<Net2280Us
         if Instant::now() >= deadline {
             return Err("no lock".into());
         }
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(STATUS_POLL);
     }
 }
 
@@ -411,7 +436,7 @@ fn reader(d: &mut Dth30<Net2280Usb>, s: &StreamInfo) -> Res<StreamReader> {
 /// Returns the card state of the last block, if any came.
 fn drain_cas(r: &mut StreamReader) -> Res<Option<u32>> {
     let mut card = None;
-    while let Some(b) = r.next(Duration::from_millis(1))? {
+    while let Some(b) = r.next(DRAIN_TIMEOUT)? {
         match parse_generic_block(&b) {
             Some((h, body)) => {
                 log::info!("CAS block kind 0x{:x} card 0x{:x} body {} bytes", h.kind, h.card, body.len());
@@ -435,16 +460,16 @@ impl TsCount {
     fn push(&mut self, data: &[u8]) {
         self.carry.extend_from_slice(data);
         let mut i = 0;
-        while self.carry.len() - i >= 188 {
-            if self.carry[i] != 0x47 {
+        while self.carry.len() - i >= PACKET_188 {
+            if self.carry[i] != SYNC_BYTE {
                 i += 1;
                 continue;
             }
             self.packets += 1;
-            if self.carry[i + 3] & 0xC0 != 0 {
+            if self.carry[i + 3] & SCRAMBLING_CONTROL != 0 {
                 self.scrambled += 1;
             }
-            i += 188;
+            i += PACKET_188;
         }
         self.carry.drain(..i);
     }
@@ -455,11 +480,11 @@ impl TsCount {
 fn open_cas_and_wait(d: &mut Dth30<Net2280Usb>) -> Res<(StreamInfo, StreamReader)> {
     let info = d.open_cas()?;
     let mut r = reader(d, &info)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + CARD_WAIT;
     let mut card = 0;
     while card & card_state::ACTIVATED == 0 && Instant::now() < deadline {
         card = drain_cas(&mut r)?.unwrap_or(card);
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(CARD_POLL);
     }
     if card & card_state::ACTIVATED != 0 {
         println!("B-CAS card activated (state 0x{card:x})");
@@ -523,12 +548,12 @@ fn record_loop(
         println!("recording the Raw stream (EP 0x{:02x}) for {seconds} s", raw_rd.endpoint_address());
     } else {
         let mut scan = ProgramScanner::new(sid);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PSI_WAIT;
         let spec = loop {
             if let Some(r) = cas_rd.as_deref_mut() {
                 drain_cas(r)?;
             }
-            if let Some(b) = raw_rd.next(Duration::from_millis(200))?
+            if let Some(b) = raw_rd.next(READ_TIMEOUT)?
                 && let Some(spec) = scan.push(&b)
             {
                 break spec;
@@ -557,15 +582,15 @@ fn record_loop(
         }
         match prog_rd.as_mut() {
             Some(p) => {
-                if let Some(b) = p.next(Duration::from_millis(200))? {
+                if let Some(b) = p.next(READ_TIMEOUT)? {
                     count.push(&b);
                     out.write_all(&b)?;
                 }
                 // The Raw stream feeds the Program stream: keep it drained.
-                while raw_rd.next(Duration::from_millis(1))?.is_some() {}
+                while raw_rd.next(DRAIN_TIMEOUT)?.is_some() {}
             }
             None => {
-                if let Some(b) = raw_rd.next(Duration::from_millis(200))? {
+                if let Some(b) = raw_rd.next(READ_TIMEOUT)? {
                     count.push(&b);
                     out.write_all(&b)?;
                 }
