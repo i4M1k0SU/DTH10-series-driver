@@ -5,9 +5,10 @@
 
 use crate::device::Device;
 use crate::error::Result;
-use crate::kit::{BER_UNUSED, SignalStatus, field, lock};
+use crate::kit::{BER_UNUSED, SignalStatus, field, lock, ts_pins};
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tc90517::demod::reg;
+use crate::tlv::{TunerDesc, flag};
 
 /// Terrestrial-side I2C address, fixed in the original driver's Open configuration.
 pub const ADDR_TER: u8 = 0x18;
@@ -201,7 +202,7 @@ impl Tc90517Sat {
     /// Open/Init configuration.
     pub fn configure<T: UsbControl>(&mut self, dev: &mut Device<T>, desc: &TunerDesc) -> Result<()> {
         let x_bit = (!(desc.stream_param >> 3) & 0x02) as u8;
-        if desc.flags & 0x20 != 0 {
+        if desc.flags & flag::SKIP_INIT_CONFIG != 0 {
             self.addr = ADDR_TER;
             write_block(dev, ADDR_TER, &BLOCK_A1)?;
             write_block(dev, ADDR_TER, &BLOCK_A2)?;
@@ -224,15 +225,15 @@ impl Tc90517Sat {
 
     /// TS pin control: 0 = output, 1 = stopped, 2 = unused.
     pub fn set_ts_pins<T: UsbControl>(&self, dev: &mut Device<T>, mode: u8) -> Result<()> {
-        let v = self.read1(dev, 0x1C)? & 0x3F;
+        let v = self.read1(dev, reg::TS_PINS_1C)? & 0x3F;
         let (r1c, r1f) = match mode {
-            0 => (v, 0x88),
-            1 => (v | 0x80, 0xAA),
-            2 => (v | 0x40, 0x99),
+            ts_pins::OUTPUT => (v, 0x88),
+            ts_pins::STOPPED => (v | 0x80, 0xAA),
+            ts_pins::THIRD => (v | 0x40, 0x99),
             _ => return Ok(()),
         };
-        dev.i2c_batch_append(self.addr, 0x1C, &[r1c])?;
-        dev.i2c_batch_append(self.addr, 0x1F, &[r1f])?;
+        dev.i2c_batch_append(self.addr, reg::TS_PINS_1C, &[r1c])?;
+        dev.i2c_batch_append(self.addr, reg::TS_PINS_1F, &[r1f])?;
         dev.i2c_batch_flush()
     }
 
@@ -276,8 +277,8 @@ impl Tc90517Sat {
         st.lock = 0;
         st.quality = 0;
         st.ber = [BER_UNUSED; 3];
-        let c3 = self.read1(dev, 0xC3)?;
-        if c3 & 0x10 == 0 {
+        let c3 = self.read1(dev, reg::S_STATUS)?;
+        if c3 & reg::S_UNLOCKED == 0 {
             st.lock = lock::SYNC_STARTED | lock::SIGNAL | lock::LOCKED;
         }
         let mut mask = field::LOCK;
@@ -288,10 +289,10 @@ impl Tc90517Sat {
         if st.lock & lock::LOCKED != 0 {
             st.quality = 60;
             mask |= field::QUALITY;
-            dev.i2c_reg_read(self.addr, 0xC8, &mut st.tmcc_raw)?;
+            dev.i2c_reg_read(self.addr, reg::S_TMCC, &mut st.tmcc_raw)?;
             if requested & field::TSID_TABLE != 0 {
                 let mut ids = [0u8; 16];
-                dev.i2c_reg_read(self.addr, 0xCE, &mut ids)?;
+                dev.i2c_reg_read(self.addr, reg::S_TSID_TABLE, &mut ids)?;
                 let mut n = 0usize;
                 st.tsids = [0; 8];
                 for i in 0..8 {
@@ -306,18 +307,18 @@ impl Tc90517Sat {
             }
         }
         let mut bc = [0u8; 2];
-        dev.i2c_reg_read(self.addr, 0xBC, &mut bc)?;
+        dev.i2c_reg_read(self.addr, reg::S_CNDAT, &mut bc)?;
         let cndat = ((bc[0] as u16) << 8) | bc[1] as u16;
         let cn = cnr_mdb_from_raw(cndat);
         mask |= field::CNR | field::STRENGTH;
         st.cnr_mdb = cn;
         st.strength = 8000 - cn;
         if requested & field::BER_B != 0 {
-            st.ber[1] = self.ber(dev, 0xEB)?;
+            st.ber[1] = self.ber(dev, reg::S_BER_B)?;
             mask |= field::BER_B;
         }
         if requested & field::BER_A != 0 {
-            st.ber[0] = self.ber(dev, 0xF0)?;
+            st.ber[0] = self.ber(dev, reg::S_BER_A)?;
             mask |= field::BER_A;
         }
         if cn > 5000 {

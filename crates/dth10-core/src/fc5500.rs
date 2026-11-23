@@ -29,6 +29,46 @@ use crate::protocol::UsbControl;
 use crate::tlv::TunerDesc;
 use crate::tuner_bus::TunerBus;
 
+/// Tuner option bit1: the LNA switch (register 0x02 bit6) and its follow-up
+/// in the status.
+const OPT_LNA: u32 = 0x2;
+/// Tuner option bit2: register 0x44 bit1 cleared.
+const OPT_REG44: u32 = 0x4;
+
+/// Start of the UHF band (kHz): the band registers switch here.
+const UHF_KHZ: u32 = 450_000;
+
+/// VCO calibration: register 0x0D written [`VCO_CAL_START`] then
+/// [`VCO_CAL_RUN`], [`VCO_CAL_WAIT`], then [`REG_VCO_LOCK`] read, up to
+/// [`VCO_CAL_TRIES`] times.
+const REG_VCO_CAL: u8 = 0x0D;
+const VCO_CAL_START: u8 = 0x7C;
+const VCO_CAL_RUN: u8 = 0x7F;
+const REG_VCO_LOCK: u8 = 0x11;
+const VCO_CAL_TRIES: u32 = 5;
+const VCO_CAL_WAIT: Duration = Duration::from_millis(1);
+/// Wait after the tune writes, before the read-back and the VCO calibration.
+const TUNE_SETTLE: Duration = Duration::from_millis(10);
+
+/// Filter calibration (DT-H30/PCIEM-TS driver): register 0x2E 0x08 starts
+/// it, 0x00 stops it; [`REG_FILTER_CAL_STATUS`] has [`FILTER_CAL_DONE`]
+/// set when it is done, polled up to [`FILTER_CAL_TRIES`] times every
+/// [`FILTER_CAL_WAIT`].
+const REG_FILTER_CAL: u8 = 0x2E;
+const REG_FILTER_CAL_STATUS: u8 = 0x34;
+const FILTER_CAL_DONE: u8 = 0x11;
+const FILTER_CAL_TRIES: u32 = 5;
+const FILTER_CAL_WAIT: Duration = Duration::from_millis(5);
+
+/// [`Fc5500::set_param`]: register 0x06 = 0xB6 (value non-zero) / 0xF6 (zero).
+pub const PARAM_REG06: u32 = 1;
+/// [`Fc5500::set_param`]: wake and standby act only while this is positive.
+pub const PARAM_POWER_CONTROL: u32 = 4;
+/// [`Fc5500::set_param`]: report the level of [`PARAM_LEVEL_VALUE`] instead of the measured one.
+pub const PARAM_LEVEL_FIXED: u32 = 5;
+/// [`Fc5500::set_param`]: the level (dBm) reported while [`PARAM_LEVEL_FIXED`] is set.
+pub const PARAM_LEVEL_VALUE: u32 = 8;
+
 /// The init table, `(register, value)` in write order (before the option bits).
 const INIT_TABLE: [(u8, u8); 84] = [
     (0x4C, 0x02),
@@ -129,10 +169,10 @@ pub fn init_registers(driver: VendorDriver, opts: u32) -> [(u8, u8); 84] {
                 *val &= !0x40;
                 *val |= match driver {
                     VendorDriver::Series => 0x20,
-                    VendorDriver::Dth30 => ((opts & 2) << 5) as u8,
+                    VendorDriver::Dth30 => ((opts & OPT_LNA) << 5) as u8,
                 };
             }
-            0x44 if opts & 4 != 0 => *val &= !0x02,
+            0x44 if opts & OPT_REG44 != 0 => *val &= !0x02,
             0x44 => *val |= 0x02,
             _ => {}
         }
@@ -177,13 +217,13 @@ pub fn pll_words(khz: u32, xtal_hz: u32) -> Option<(u32, u32)> {
 /// the PLL words; 447143 kHz gets its own 0x15 / 0x27 values.
 pub fn tune_writes_series(khz: u32, bw_hz: u32, n: u32, frac: u32) -> [(u8, u8); 13] {
     let (_, code) = band(khz);
-    let uhf = khz >= 450_000;
+    let uhf = khz >= UHF_KHZ;
     let r32 = match bw_hz {
         6_000_000 => 0x54,
         8_000_000 => 0x4E,
         _ => 0x34,
     };
-    let r0a = if khz > 450_000 && khz <= 470_000 { 0x80 } else { 0x40 };
+    let r0a = if khz > UHF_KHZ && khz <= 470_000 { 0x80 } else { 0x40 };
     let (r15, r27) = if khz == 447_143 { (0x06, 0x47) } else { (0x0C, 0x43) };
     [
         (0x02, if uhf { 0x9E } else { 0x1E }),
@@ -206,8 +246,8 @@ pub fn tune_writes_series(khz: u32, bw_hz: u32, n: u32, frac: u32) -> [(u8, u8);
 /// for `khz` with tuner options `opts` (bit1 = the LNA switch of register
 /// 0x02 bit6).
 pub fn band_writes_dth30(khz: u32, opts: u32) -> Vec<(u8, u8)> {
-    let lna = opts & 2 != 0;
-    if khz < 450_000 {
+    let lna = opts & OPT_LNA != 0;
+    if khz < UHF_KHZ {
         let (_, code) = band(khz);
         return vec![(0x02, if lna { 0x5E } else { 0x1E }), (0x0C, 0x30 + code)];
     }
@@ -322,16 +362,16 @@ impl Fc5500 {
 
     fn calibrate<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         self.write(dev, 0x32, 0x54)?;
-        self.write(dev, 0x2E, 0x08)?;
-        for _ in 0..5 {
-            sleep(Duration::from_millis(5));
-            if self.read(dev, 0x34)? & 0x11 == 0x11 {
+        self.write(dev, REG_FILTER_CAL, 0x08)?;
+        for _ in 0..FILTER_CAL_TRIES {
+            sleep(FILTER_CAL_WAIT);
+            if self.read(dev, REG_FILTER_CAL_STATUS)? & FILTER_CAL_DONE == FILTER_CAL_DONE {
                 break;
             }
-            self.write(dev, 0x2E, 0x00)?;
-            self.write(dev, 0x2E, 0x08)?;
+            self.write(dev, REG_FILTER_CAL, 0x00)?;
+            self.write(dev, REG_FILTER_CAL, 0x08)?;
         }
-        self.write(dev, 0x2E, 0x00)
+        self.write(dev, REG_FILTER_CAL, 0x00)
     }
 
     /// Wake (DT-H30/PCIEM-TS driver, only while parameter 4 is positive):
@@ -343,7 +383,7 @@ impl Fc5500 {
         }
         let r02 = self.read(dev, 0x02)?;
         self.read(dev, 0x06)?;
-        let v = (r02 & !0x01) | if self.opts & 2 != 0 { 0x40 } else { 0 };
+        let v = (r02 & !0x01) | if self.opts & OPT_LNA != 0 { 0x40 } else { 0 };
         self.write(dev, 0x02, v)?;
         self.write(dev, 0x06, 0xF6)
     }
@@ -382,11 +422,11 @@ impl Fc5500 {
                 self.write(dev, 0x20, (frac >> 4) as u8)?;
                 self.write(dev, 0x21, (frac << 4) as u8)?;
                 self.write(dev, 0x1E, n as u8)?;
-                for _ in 0..5 {
-                    self.write(dev, 0x0D, 0x7C)?;
-                    self.write(dev, 0x0D, 0x7F)?;
-                    sleep(Duration::from_millis(1));
-                    if self.read(dev, 0x11)? != 0 {
+                for _ in 0..VCO_CAL_TRIES {
+                    self.write(dev, REG_VCO_CAL, VCO_CAL_START)?;
+                    self.write(dev, REG_VCO_CAL, VCO_CAL_RUN)?;
+                    sleep(VCO_CAL_WAIT);
+                    if self.read(dev, REG_VCO_LOCK)? != 0 {
                         break;
                     }
                 }
@@ -395,17 +435,18 @@ impl Fc5500 {
                 }
             }
         }
-        sleep(Duration::from_millis(10));
+        sleep(TUNE_SETTLE);
         for reg in [0x1E, 0x1F, 0x20, 0x21, 0x03] {
             let _ = self.read(dev, reg);
         }
-        for _ in 0..5 {
-            let r = self.write(dev, 0x0D, 0x7C).and_then(|()| self.write(dev, 0x0D, 0x7F));
+        for _ in 0..VCO_CAL_TRIES {
+            let r =
+                self.write(dev, REG_VCO_CAL, VCO_CAL_START).and_then(|()| self.write(dev, REG_VCO_CAL, VCO_CAL_RUN));
             if r.is_err() {
                 break;
             }
-            sleep(Duration::from_millis(1));
-            if self.read(dev, 0x11).is_err() {
+            sleep(VCO_CAL_WAIT);
+            if self.read(dev, REG_VCO_LOCK).is_err() {
                 break;
             }
         }
@@ -430,7 +471,7 @@ impl Fc5500 {
             }
             VendorDriver::Dth30 => {
                 let level = if self.level_fixed { self.level_value } else { level_dth30(r71, r72, r73, r74) };
-                let level = if self.opts & 2 != 0 {
+                let level = if self.opts & OPT_LNA != 0 {
                     let (level, switch) = lna_dth30(level, r02);
                     if let Some([v02, v5f]) = switch {
                         let _ = self.write(dev, 0x02, v02).and_then(|()| self.write(dev, 0x5F, v5f));
@@ -457,10 +498,10 @@ impl Fc5500 {
             return Ok(false);
         }
         match mode {
-            1 => self.write(dev, 0x06, if value != 0 { 0xB6 } else { 0xF6 })?,
-            4 => self.power_control = value as u8 as i8,
-            5 => self.level_fixed = value as u8 != 0,
-            8 => self.level_value = value as i32,
+            PARAM_REG06 => self.write(dev, 0x06, if value != 0 { 0xB6 } else { 0xF6 })?,
+            PARAM_POWER_CONTROL => self.power_control = value as u8 as i8,
+            PARAM_LEVEL_FIXED => self.level_fixed = value as u8 != 0,
+            PARAM_LEVEL_VALUE => self.level_value = value as i32,
             _ => return Ok(false),
         }
         Ok(true)

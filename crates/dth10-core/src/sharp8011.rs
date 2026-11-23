@@ -21,16 +21,15 @@ pub mod tuner;
 
 pub use tuner::{SatPll, SatTuner, TerTuner, sat_pll, ter_pll_bytes};
 
-use core::time::Duration;
 use std::thread::sleep;
 
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
-use crate::kit::{SignalStatus, TuneRequest};
+use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TuneRequest, ts_pins};
 use crate::lj101::Tc90517Sat;
 use crate::protocol::UsbControl;
 use crate::tc90517::{Tc90517, TerVariant};
-use crate::tlv::TunerDesc;
+use crate::tlv::{HW_ISDB_S, HW_ISDB_T, TunerDesc};
 use crate::tuner_bus::{TunerBus, TunerPath};
 
 /// The kit name both kits report.
@@ -60,7 +59,7 @@ pub struct Sharp8011Kit<T: UsbControl> {
 impl<T: UsbControl> Sharp8011Kit<T> {
     /// Whether `desc` names this kit.
     pub fn supports(desc: &TunerDesc) -> bool {
-        desc.kit_name == KIT_NAME && desc.hw_version == 0x102
+        desc.kit_name == KIT_NAME && desc.hw_version == HW_ISDB_T
     }
 
     pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
@@ -182,7 +181,7 @@ pub struct Sharp8011SatKit<T: UsbControl> {
 impl<T: UsbControl> Sharp8011SatKit<T> {
     /// Whether `desc` names this kit.
     pub fn supports(desc: &TunerDesc) -> bool {
-        desc.kit_name == KIT_NAME && desc.hw_version == 0x402
+        desc.kit_name == KIT_NAME && desc.hw_version == HW_ISDB_S
     }
 
     pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
@@ -203,7 +202,7 @@ impl<T: UsbControl> Sharp8011SatKit<T> {
 
     /// Sleep: TS output stopped, `0x17 <- 1`.
     fn sleep(&mut self) -> Result<()> {
-        self.demod.set_ts_pins(&mut self.dev, 1)?;
+        self.demod.set_ts_pins(&mut self.dev, ts_pins::STOPPED)?;
         self.demod.sleep(&mut self.dev)
     }
 
@@ -232,7 +231,7 @@ impl<T: UsbControl> Sharp8011SatKit<T> {
                 self.dev.power_up(&self.desc)?;
                 demod::configure_sat(&mut self.dev, self.demod.addr, &self.desc)?;
             } else {
-                if let Err(e) = self.demod.set_ts_pins(&mut self.dev, 0) {
+                if let Err(e) = self.demod.set_ts_pins(&mut self.dev, ts_pins::OUTPUT) {
                     log::debug!("SHARP_8011 satellite Open, TS pins: {e}");
                 }
                 self.demod.wake(&mut self.dev)?;
@@ -267,13 +266,13 @@ impl<T: UsbControl> Sharp8011SatKit<T> {
         if !self.is_open() {
             return Err(Error::Protocol("kit is not open"));
         }
-        self.demod.set_ts_pins(&mut self.dev, 1)?;
+        self.demod.set_ts_pins(&mut self.dev, ts_pins::STOPPED)?;
         self.tuner.set_frequency(&mut self.dev, if_hz)?;
-        sleep(Duration::from_millis(100));
+        sleep(SAT_PLL_SETTLE);
         let r = self.demod.restart(&mut self.dev);
-        sleep(Duration::from_millis(150));
+        sleep(SAT_RESTART_SETTLE);
         r?;
-        self.demod.set_ts_pins(&mut self.dev, 0)
+        self.demod.set_ts_pins(&mut self.dev, ts_pins::OUTPUT)
     }
 
     /// Select the transport stream by TSID.

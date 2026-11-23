@@ -232,6 +232,13 @@ fn rd64(b: &[u8], o: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?))
 }
 
+/// Optional-header magic of a PE32 image.
+const PE32_MAGIC: u16 = 0x10B;
+/// Optional-header magic of a PE32+ (64-bit) image.
+const PE32_PLUS_MAGIC: u16 = 0x20B;
+/// Size of one entry of the PE section table.
+const SECTION_HEADER_LEN: usize = 40;
+
 fn parse_pe(b: &[u8]) -> std::result::Result<Pe, &'static str> {
     if b.get(..2) != Some(b"MZ") {
         return Err("not a PE file (no MZ header)");
@@ -245,14 +252,14 @@ fn parse_pe(b: &[u8]) -> std::result::Result<Pe, &'static str> {
     let opt = pe + 24;
     let magic = rd16(b, opt).ok_or("truncated optional header")?;
     let image_base = match magic {
-        0x10B => rd32(b, opt + 28).ok_or("truncated optional header")? as u64,
-        0x20B => rd64(b, opt + 24).ok_or("truncated optional header")?,
+        PE32_MAGIC => rd32(b, opt + 28).ok_or("truncated optional header")? as u64,
+        PE32_PLUS_MAGIC => rd64(b, opt + 24).ok_or("truncated optional header")?,
         _ => return Err("unknown optional header magic"),
     };
     let mut sections = Vec::with_capacity(nsec);
     for i in 0..nsec {
-        let o = opt + opt_size + i * 40;
-        let hdr = b.get(o..o + 40).ok_or("truncated section table")?;
+        let o = opt + opt_size + i * SECTION_HEADER_LEN;
+        let hdr = b.get(o..o + SECTION_HEADER_LEN).ok_or("truncated section table")?;
         let mut name = [0u8; 8];
         name.copy_from_slice(&hdr[..8]);
         sections.push(Section {

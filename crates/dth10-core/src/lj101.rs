@@ -14,14 +14,13 @@ pub mod tuner;
 pub use demod::Tc90517Sat;
 pub use tuner::{Lj101Tuner, PllWords, pll_words};
 
-use core::time::Duration;
 use std::thread::sleep;
 
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
-use crate::kit::SignalStatus;
+use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, ts_pins};
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tlv::{HW_ISDB_S, TunerDesc};
 
 /// The ISDB-S kit: open/close/tune/status orchestration.
 pub struct Lj101Kit<T: UsbControl> {
@@ -35,7 +34,7 @@ pub struct Lj101Kit<T: UsbControl> {
 impl<T: UsbControl> Lj101Kit<T> {
     /// Whether `desc` names this kit (`SMT_LJ101` hw 0x402).
     pub fn supports(desc: &TunerDesc) -> bool {
-        desc.kit_name.starts_with("SMT_LJ101") && desc.hw_version == 0x402
+        desc.kit_name.starts_with("SMT_LJ101") && desc.hw_version == HW_ISDB_S
     }
 
     pub fn new(dev: Device<T>, desc: TunerDesc) -> Result<Self> {
@@ -117,12 +116,12 @@ impl<T: UsbControl> Lj101Kit<T> {
         if !self.is_open() {
             return Err(Error::Protocol("kit is not open"));
         }
-        self.demod.set_ts_pins(&mut self.dev, 1)?;
+        self.demod.set_ts_pins(&mut self.dev, ts_pins::STOPPED)?;
         self.tuner.set_frequency(&mut self.dev, self.demod.addr, if_hz)?;
-        sleep(Duration::from_millis(100));
+        sleep(SAT_PLL_SETTLE);
         self.demod.restart(&mut self.dev)?;
-        sleep(Duration::from_millis(150));
-        self.demod.set_ts_pins(&mut self.dev, 0)
+        sleep(SAT_RESTART_SETTLE);
+        self.demod.set_ts_pins(&mut self.dev, ts_pins::OUTPUT)
     }
 
     /// Select the transport stream by TSID (a kit operation separate from tuning).

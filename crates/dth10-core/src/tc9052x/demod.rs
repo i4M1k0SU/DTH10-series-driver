@@ -6,9 +6,10 @@
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::kit::VendorDriver;
+use crate::kit::{VendorDriver, ts_pins};
 use crate::lj101::demod::write_block;
 use crate::protocol::UsbControl;
+use crate::tc90517::demod::reg;
 use crate::tlv::TunerDesc;
 
 /// The series driver's configuration, first block.
@@ -213,18 +214,18 @@ fn if_registers(desc: &TunerDesc) -> Result<[(u8, u8); 6]> {
 /// Another mode only sends the batch.
 pub fn set_ts_pins<T: UsbControl>(dev: &mut Device<T>, addr: u8, mode: u8) -> Result<()> {
     let r1d = match mode {
-        0 => 0x00,
-        1 => 0xA8,
-        2 => 0x54,
+        ts_pins::OUTPUT => 0x00,
+        ts_pins::STOPPED => 0xA8,
+        ts_pins::THIRD => 0x54,
         _ => return dev.i2c_batch_flush(),
     };
     let mut v = [0u8; 1];
-    dev.i2c_reg_read(addr, 0x1D, &mut v)?;
-    dev.i2c_batch_append(addr, 0x1D, &[(v[0] & 0x03) | r1d])?;
-    dev.i2c_reg_read(addr, 0x1E, &mut v)?;
-    dev.i2c_batch_append(addr, 0x1E, &[(v[0] & 0xEF) | 0x20])?;
-    dev.i2c_reg_read(addr, 0x1F, &mut v)?;
-    dev.i2c_batch_append(addr, 0x1F, &[(v[0] & 0x03) | 0xA8])?;
+    dev.i2c_reg_read(addr, reg::TS_PINS_1D, &mut v)?;
+    dev.i2c_batch_append(addr, reg::TS_PINS_1D, &[(v[0] & 0x03) | r1d])?;
+    dev.i2c_reg_read(addr, reg::TS_PINS_1E, &mut v)?;
+    dev.i2c_batch_append(addr, reg::TS_PINS_1E, &[(v[0] & 0xEF) | 0x20])?;
+    dev.i2c_reg_read(addr, reg::TS_PINS_1F, &mut v)?;
+    dev.i2c_batch_append(addr, reg::TS_PINS_1F, &[(v[0] & 0x03) | 0xA8])?;
     dev.i2c_batch_flush()
 }
 

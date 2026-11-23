@@ -7,6 +7,8 @@
 use core::time::Duration;
 use std::thread::sleep;
 
+use dth_common::stream::{LNB_11V, LNB_15V, LNB_OFF};
+
 use crate::error::{Error, Result};
 use crate::protocol::{self, UsbControl, cmd};
 use crate::tlv::{self, DeviceInformation, TunerDesc};
@@ -23,6 +25,23 @@ pub enum StreamMode {
 
 /// Maximum size of the I2C batch buffer (the original driver's limit, checked when queueing).
 pub const I2C_BATCH_MAX: usize = 256;
+
+/// Size of the device-information read (the largest IN transfer).
+const DEVICE_INFO_LEN: usize = protocol::MAX_IN_LEN;
+
+/// Byte 3 of the stream-control payload: 0xBC = 188, the size of a TS packet.
+const STREAM_CTRL_PACKET_SIZE: u8 = crate::ts_slot::TS_PACKET as u8;
+
+/// Header of a PID-filter table: program number, PID count, reserved
+/// (u32 LE each); the PIDs follow as u32 LE.
+const PID_TABLE_HEADER_LEN: usize = 12;
+
+/// Power-up sequence: how long the GPIO masks A and B are held low.
+pub(crate) const POWER_UP_LOW: Duration = Duration::from_millis(2);
+/// Power-up sequence: wait after asserting GPIO mask A.
+pub(crate) const POWER_UP_A_SETTLE: Duration = Duration::from_millis(15);
+/// Power-up sequence: wait after asserting GPIO mask B.
+pub(crate) const POWER_UP_B_SETTLE: Duration = Duration::from_millis(10);
 
 /// A tuner bridge reachable through a [`UsbControl`] transport.
 pub struct Device<T: UsbControl> {
@@ -86,14 +105,14 @@ impl<T: UsbControl> Device<T> {
 
     /// Read and parse the device-information blob (first start-up step).
     pub fn read_device_information(&self) -> Result<DeviceInformation> {
-        let mut blob = vec![0u8; 0x1000];
+        let mut blob = vec![0u8; DEVICE_INFO_LEN];
         let n = self.read(0, cmd::SYS, cmd::SYS_DEVICE_INFO, &mut blob)?;
         tlv::parse_device_information(&blob[..n])
     }
 
     /// Raw device-information blob, for diagnostics.
     pub fn read_device_information_raw(&self) -> Result<Vec<u8>> {
-        let mut blob = vec![0u8; 0x1000];
+        let mut blob = vec![0u8; DEVICE_INFO_LEN];
         let n = self.read(0, cmd::SYS, cmd::SYS_DEVICE_INFO, &mut blob)?;
         blob.truncate(n);
         Ok(blob)
@@ -158,11 +177,11 @@ impl<T: UsbControl> Device<T> {
         let c = desc.gpio_mask_c;
         self.gpio_enable(a | b | c)?;
         self.gpio_clear_bits(a | b)?;
-        sleep(Duration::from_millis(2));
+        sleep(POWER_UP_LOW);
         self.gpio_set_bits(a)?;
-        sleep(Duration::from_millis(15));
+        sleep(POWER_UP_A_SETTLE);
         self.gpio_set_bits(b)?;
-        sleep(Duration::from_millis(10));
+        sleep(POWER_UP_B_SETTLE);
         Ok(())
     }
 
@@ -270,7 +289,7 @@ impl<T: UsbControl> Device<T> {
         p[0] = byte0;
         p[1] = 1;
         p[2] = 1;
-        p[3] = 0xBC;
+        p[3] = STREAM_CTRL_PACKET_SIZE;
         p[4..8].copy_from_slice(&desc.stream_param.to_le_bytes());
         p[10] = if desc.id == 0 { 0 } else { 2 };
         self.write(cmd::CBDA, cmd::CBDA_STREAM_CTRL, &p)
@@ -291,7 +310,7 @@ impl<T: UsbControl> Device<T> {
     pub fn stream_disable_byte0(&self, byte0: u8) -> Result<()> {
         let mut p = [0u8; 16];
         p[0] = byte0;
-        p[3] = 0xBC;
+        p[3] = STREAM_CTRL_PACKET_SIZE;
         self.write(cmd::CBDA, cmd::CBDA_STREAM_CTRL, &p)
     }
 
@@ -300,7 +319,7 @@ impl<T: UsbControl> Device<T> {
     /// (wValue 0xCBDA, wIndex 0x1000). Whether the device passes all PIDs when
     /// no table was sent is not known (docs/20 §6).
     pub fn set_program_pids(&self, program_number: u32, pids: &[u16]) -> Result<()> {
-        let mut t = Vec::with_capacity(12 + 4 * pids.len());
+        let mut t = Vec::with_capacity(PID_TABLE_HEADER_LEN + 4 * pids.len());
         t.extend_from_slice(&program_number.to_le_bytes());
         t.extend_from_slice(&(pids.len() as u32).to_le_bytes());
         t.extend_from_slice(&0u32.to_le_bytes());
@@ -312,11 +331,11 @@ impl<T: UsbControl> Device<T> {
 
     /// Send a raw PID-filter table (12 + 4n bytes, `n` = u32 LE at byte 4).
     pub fn set_pid_filter_raw(&self, table: &[u8]) -> Result<()> {
-        if table.len() < 12 {
+        if table.len() < PID_TABLE_HEADER_LEN {
             return Err(Error::Protocol("PID filter table shorter than 12 bytes"));
         }
         let n = u32::from_le_bytes([table[4], table[5], table[6], table[7]]) as usize;
-        let expect = 12 + 4 * n;
+        let expect = PID_TABLE_HEADER_LEN + 4 * n;
         if table.len() < expect {
             return Err(Error::Protocol("PID filter table shorter than its count implies"));
         }
@@ -328,6 +347,16 @@ impl<T: UsbControl> Device<T> {
         self.read(flags, cmd::CBDA, index, buf)
     }
 }
+
+/// How long [`lnb_set`] waits before it checks the supply status.
+const LNB_SETTLE: Duration = Duration::from_millis(150);
+
+/// Offset of the GPIO output bits (u32 LE) in the [`Device::gpio_read`] block.
+const GPIO_STATUS_OUTPUT: usize = 8;
+/// Offset of the LNB supply status byte in the [`Device::gpio_read`] block.
+const GPIO_STATUS_LNB: usize = 12;
+/// LNB supply status bit: the supply is healthy (no over-current).
+const LNB_STATUS_OK: u8 = 0x01;
 
 /// The bridge GPIO bits that switch the antenna (LNB) supply, which depend on
 /// the model string: "h70b" uses its own bits, other "h70" models the older
@@ -366,18 +395,18 @@ impl LnbGpio {
 /// `Ok(false)` when it was switched off again because the status bit was clear.
 pub fn lnb_set<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio, volt: u32) -> Result<bool> {
     let bits: u32 = match volt {
-        150 => gpio.all(),
-        110 => gpio.power,
+        LNB_15V => gpio.all(),
+        LNB_11V => gpio.power,
         _ => 0,
     };
     dev.gpio_write(gpio.all() & !bits, 0)?;
     dev.gpio_write(bits, bits)?;
-    if volt == 0 {
+    if volt == LNB_OFF {
         return Ok(true);
     }
-    sleep(Duration::from_millis(150));
+    sleep(LNB_SETTLE);
     let st = dev.gpio_read()?;
-    if st[12] & 1 == 0 {
+    if st[GPIO_STATUS_LNB] & LNB_STATUS_OK == 0 {
         dev.gpio_write(gpio.all(), 0)?;
         return Ok(false);
     }
@@ -387,13 +416,13 @@ pub fn lnb_set<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio, volt: u32) -> Resu
 /// Read back the LNB state from the bridge GPIO bits `gpio`: 0, 110 or 150.
 pub fn lnb_get<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio) -> Result<u32> {
     let st = dev.gpio_read()?;
-    let v = u32::from_le_bytes([st[8], st[9], st[10], st[11]]);
+    let v = u32::from_le_bytes(*st[GPIO_STATUS_OUTPUT..].first_chunk().unwrap());
     if v & gpio.power == 0 {
-        Ok(0)
+        Ok(LNB_OFF)
     } else if v & gpio.v15 != 0 {
-        Ok(150)
+        Ok(LNB_15V)
     } else {
-        Ok(110)
+        Ok(LNB_11V)
     }
 }
 

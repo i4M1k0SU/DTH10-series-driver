@@ -23,34 +23,39 @@ pub struct Event {
     pub payload: Vec<u8>,
 }
 
+/// Size of the event header; the payload follows it.
+const HEADER_LEN: usize = 8;
+
 /// Known event codes.
 pub mod code {
+    use crate::protocol::cmd::{CBDA, SYS};
+
     /// class 0x0000: LNB over-current check request (models "h70" / "h70b"); the driver
     /// re-reads wIndex 0x1010 and switches the LNB supply off if bit0 of byte
     /// 12 is clear.
-    pub const LNB_CHECK: (u16, u16) = (0x0000, 0x1011);
+    pub const LNB_CHECK: (u16, u16) = (SYS, 0x1011);
     /// class 0xCBDA: smart-card (B-CAS) status changed.
-    pub const CA_SMART_CARD_STATUS: (u16, u16) = (0xCBDA, 0xCACD);
+    pub const CA_SMART_CARD_STATUS: (u16, u16) = (CBDA, 0xCACD);
     /// class 0xCBDA: PBDA event pending (no payload).
-    pub const PBDA_EVENT_PENDING: (u16, u16) = (0xCBDA, 0xBDDE);
+    pub const PBDA_EVENT_PENDING: (u16, u16) = (CBDA, 0xBDDE);
     /// class 0xCBDA: PBDA event with payload (tuner event + record).
-    pub const PBDA_EVENT_RECORD: (u16, u16) = (0xCBDA, 0xCA02);
+    pub const PBDA_EVENT_RECORD: (u16, u16) = (CBDA, 0xCA02);
     /// class 0xCBDA: register an EMM PID hook (payload = u16 LE PID).
-    pub const EMM_PID: (u16, u16) = (0xCBDA, 0xBCED);
+    pub const EMM_PID: (u16, u16) = (CBDA, 0xBCED);
 }
 
 impl Event {
     /// Parse one interrupt transfer. Returns `None` for truncated buffers.
     pub fn parse(buf: &[u8]) -> Option<Event> {
-        if buf.len() < 8 {
+        if buf.len() < HEADER_LEN {
             return None;
         }
         let targets = buf[1] & 0x03;
         let class = u16::from_le_bytes([buf[2], buf[3]]);
         let code = u16::from_le_bytes([buf[4], buf[5]]);
         let len = u16::from_le_bytes([buf[6], buf[7]]) as usize;
-        let end = (8 + len).min(buf.len());
-        Some(Event { targets, class, code, payload: buf[8..end].to_vec() })
+        let end = (HEADER_LEN + len).min(buf.len());
+        Some(Event { targets, class, code, payload: buf[HEADER_LEN..end].to_vec() })
     }
 
     pub fn kind(&self) -> (u16, u16) {

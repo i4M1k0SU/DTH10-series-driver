@@ -28,6 +28,9 @@ use crate::protocol::UsbControl;
 use crate::tlv::TunerDesc;
 use crate::tuner_bus::TunerBus;
 
+/// Wait at the end of a tune.
+const TUNE_SETTLE: Duration = Duration::from_millis(1);
+
 /// The init table of the series driver.
 pub const INIT_SERIES: [(u8, u8); 36] = [
     (0x20, 0x0B),
@@ -238,7 +241,7 @@ impl Mtv600 {
         self.update(dev, 0x31, 0x01, ((v >> 28) & 1) as u8)?;
         self.update(dev, 0x20, 0x1F, ((v >> 23) & 0x1F) as u8)?;
         self.write(dev, 0x21, (v >> 15) as u8)?;
-        sleep(Duration::from_millis(1));
+        sleep(TUNE_SETTLE);
         Ok(())
     }
 
@@ -264,7 +267,7 @@ impl Mtv600 {
         self.update(dev, 0x31, 0x01, ((v >> 28) & 1) as u8)?;
         self.update(dev, 0x20, 0x1F, ((v >> 23) & 0x1F) as u8)?;
         self.write(dev, 0x21, (v >> 15) as u8)?;
-        sleep(Duration::from_millis(1));
+        sleep(TUNE_SETTLE);
         Ok(())
     }
 }

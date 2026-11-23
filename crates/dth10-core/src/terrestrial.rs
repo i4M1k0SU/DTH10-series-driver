@@ -29,7 +29,7 @@ use crate::sharp8011::Sharp8011Kit;
 use crate::tc9052x::Tc9052xKit;
 use crate::tc90517::Tc90517Kit;
 use crate::tc90527::Tc90527Kit;
-use crate::tlv::TunerDesc;
+use crate::tlv::{HW_ISDB_T, TunerDesc};
 
 pub enum TerrestrialKit<T: UsbControl> {
     Tc90517(Tc90517Kit<T>),
@@ -70,7 +70,7 @@ impl<T: UsbControl> TerrestrialKit<T> {
                 | "BQ200X_MxL135RF"
                 | "BQ200X_E4005"
                 | "LGDT3305_MxL5007T"
-        ) || (desc.kit_name == "SMT_LJ101" && desc.hw_version == 0x102)
+        ) || (desc.kit_name == "SMT_LJ101" && desc.hw_version == HW_ISDB_T)
             || Sharp8011Kit::<T>::supports(desc)
             || Tc9052xKit::<T>::supports(desc)
             || Tc90527Kit::<T>::supports(desc)
@@ -82,8 +82,8 @@ impl<T: UsbControl> TerrestrialKit<T> {
         let name = desc.kit_name.as_str();
         Ok(match name {
             "TC90517_MxL131RF" | "TC90517_MxL135RF" => TerrestrialKit::Tc90517(Tc90517Kit::new(dev, desc)?),
-            "SMT_LJ101" if desc.hw_version == 0x102 => TerrestrialKit::Tc90517(Tc90517Kit::new(dev, desc)?),
-            "SHARP_8011" if desc.hw_version == 0x102 => TerrestrialKit::Sharp8011(Sharp8011Kit::new(dev, desc)?),
+            "SMT_LJ101" if desc.hw_version == HW_ISDB_T => TerrestrialKit::Tc90517(Tc90517Kit::new(dev, desc)?),
+            "SHARP_8011" if desc.hw_version == HW_ISDB_T => TerrestrialKit::Sharp8011(Sharp8011Kit::new(dev, desc)?),
             _ if Tc9052xKit::<T>::supports(&desc) => TerrestrialKit::Tc9052x(Tc9052xKit::new(dev, desc, pid)?),
             "TC90527_FC5500" | "TC90527_MTV808" => TerrestrialKit::Tc90527(Tc90527Kit::new(dev, desc, pid)?),
             "PN2031_MxL135RF" => TerrestrialKit::Pn2031(Pn2031Kit::new(dev, desc, Pn2031Variant::for_product(pid))?),

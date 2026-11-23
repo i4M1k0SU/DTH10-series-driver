@@ -37,7 +37,7 @@ use crate::kit::{SignalStatus, TuneRequest, VendorDriver};
 use crate::mtv808::Mtv808;
 use crate::protocol::UsbControl;
 use crate::tc90517::{Tc90517, TerVariant};
-use crate::tlv::TunerDesc;
+use crate::tlv::{HW_ISDB_S, HW_ISDB_T, TunerDesc};
 use crate::tuner_bus::{TunerBus, TunerPath};
 
 /// The vendor driver whose code the kit for `desc` follows on the model with
@@ -46,10 +46,10 @@ use crate::tuner_bus::{TunerBus, TunerPath};
 /// that both know follows the driver of the model.
 pub fn driver_for(desc: &TunerDesc, pid: u16) -> Option<VendorDriver> {
     match (desc.kit_name.as_str(), desc.hw_version) {
-        ("TC90522_FC5500" | "TC90532_FC5500" | "TC90522_MTV808", 0x102) => Some(VendorDriver::Dth30),
-        ("TC90522_MTV600", 0x402) => Some(VendorDriver::Dth30),
-        ("TC90532_MTV808", 0x102) | ("TC90532_MTV600", 0x402) => Some(VendorDriver::for_product(pid)),
-        ("TC90532_MTV600", 0x102) | ("TC90532_MTV808", 0x402) => Some(VendorDriver::Series),
+        ("TC90522_FC5500" | "TC90532_FC5500" | "TC90522_MTV808", HW_ISDB_T) => Some(VendorDriver::Dth30),
+        ("TC90522_MTV600", HW_ISDB_S) => Some(VendorDriver::Dth30),
+        ("TC90532_MTV808", HW_ISDB_T) | ("TC90532_MTV600", HW_ISDB_S) => Some(VendorDriver::for_product(pid)),
+        ("TC90532_MTV600", HW_ISDB_T) | ("TC90532_MTV808", HW_ISDB_S) => Some(VendorDriver::Series),
         _ => None,
     }
 }
@@ -86,7 +86,7 @@ pub struct Tc9052xKit<T: UsbControl> {
 impl<T: UsbControl> Tc9052xKit<T> {
     /// Whether `desc` names this kit (a TC90522 / TC90532 name with hw 0x102).
     pub fn supports(desc: &TunerDesc) -> bool {
-        desc.hw_version == 0x102 && driver_for(desc, 0).is_some()
+        desc.hw_version == HW_ISDB_T && driver_for(desc, 0).is_some()
     }
 
     /// The kit for `desc` on the model with USB product ID `pid`
@@ -94,7 +94,7 @@ impl<T: UsbControl> Tc9052xKit<T> {
     /// MTV808 (the series driver's kit also for `TC90532_MTV600`).
     pub fn new(dev: Device<T>, desc: TunerDesc, pid: u16) -> Result<Self> {
         let driver = match driver_for(&desc, pid) {
-            Some(d) if desc.hw_version == 0x102 => d,
+            Some(d) if desc.hw_version == HW_ISDB_T => d,
             _ => {
                 return Err(Error::Unsupported(format!(
                     "terrestrial tuner kit {} hw 0x{:x} is not a TC90522 / TC90532 hw 0x102 kit",

@@ -10,10 +10,10 @@ use std::thread::sleep;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::kit::{BER_UNUSED, SignalStatus, VendorDriver, field, lock};
+use crate::kit::{BER_UNUSED, SignalStatus, VendorDriver, field, lock, ts_pins};
 use crate::lj101::demod::module_chip;
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tlv::{TunerDesc, flag};
 
 /// Which terrestrial kit drives the demodulator; selects the register
 /// sequences that differ between `TC90517_MxL13xRF` and `SMT_LJ101` hw 0x102
@@ -43,6 +43,57 @@ pub struct Tc90517 {
 
 /// Highest C/N the newer vendor drivers report for this demodulator [0.001 dB].
 const CNR_MAX_MDB: i32 = 35_000;
+
+/// Registers of the TC90517 family (TC90517 / TC90522 / TC90527 / TC90532)
+/// that the kits' control logic reads or switches; the configuration blocks
+/// write many more as data. `S_` = the ISDB-S side (TC90522-compatible
+/// register map), the others the ISDB-T side.
+pub(crate) mod reg {
+    /// TS pin control: bits 7:6 on the ISDB-S side (with 0x1F).
+    pub const TS_PINS_1C: u8 = 0x1C;
+    /// TS pin control of the TC90522 / TC90527 kits (with 0x1E / 0x1F).
+    pub const TS_PINS_1D: u8 = 0x1D;
+    /// TS pin control (with 0x1F, and 0x1D on the TC90522 / TC90527 kits).
+    pub const TS_PINS_1E: u8 = 0x1E;
+    /// TS pin control (both sides).
+    pub const TS_PINS_1F: u8 = 0x1F;
+    /// IF-AGC control; bit0 ([`IFAGC_HOLD`]) holds the IF AGC while tuning.
+    pub const IFAGC: u8 = 0x23;
+    /// [`IFAGC`] bit: IF AGC held.
+    pub const IFAGC_HOLD: u8 = 0x01;
+    /// Error flags; [`ERR_UNLOCKED`] clear when fully locked.
+    pub const ERR_FLAGS: u8 = 0x80;
+    /// [`ERR_FLAGS`] bits 5 and 3: set while not locked.
+    pub const ERR_UNLOCKED: u8 = 0x28;
+    /// Status register whose bit7 is reported as `lock::REG81_BIT7`.
+    pub const STATUS_81: u8 = 0x81;
+    /// C/N raw value, 24 bits big-endian.
+    pub const CNDAT: u8 = 0x8B;
+    /// TS sync state in bits 3:0 (see the [`SYNC_SIGNAL`] / [`SYNC_LOCKED`] steps).
+    pub const SYNC_STATE: u8 = 0xB0;
+    /// [`SYNC_STATE`] above this: signal detected.
+    pub const SYNC_SIGNAL: u8 = 2;
+    /// [`SYNC_STATE`] from this on: synchronised (locked with [`ERR_UNLOCKED`] clear).
+    pub const SYNC_LOCKED: u8 = 8;
+
+    /// ISDB-S C/N raw value, 16 bits big-endian.
+    pub const S_CNDAT: u8 = 0xBC;
+    /// ISDB-S status; [`S_UNLOCKED`] clear when locked.
+    pub const S_STATUS: u8 = 0xC3;
+    /// [`S_STATUS`] bit4: not locked.
+    pub const S_UNLOCKED: u8 = 0x10;
+    /// ISDB-S TMCC: 8 bytes 0xC8..0xCF (modulation modes, slot counts, first TS-ID).
+    pub const S_TMCC: u8 = 0xC8;
+    /// ISDB-S TS-ID table: 8 TS-IDs, 16 bits big-endian each, 0xFFFF = none.
+    pub const S_TSID_TABLE: u8 = 0xCE;
+    /// ISDB-S BER reported as layer B: error count (24 bits) and period (16 bits).
+    pub const S_BER_B: u8 = 0xEB;
+    /// ISDB-S BER reported as layer A, laid out as [`S_BER_B`].
+    pub const S_BER_A: u8 = 0xF0;
+}
+
+/// Post-tune: wait before the TS output is switched on.
+const POST_TUNE_SETTLE: Duration = Duration::from_millis(20);
 
 /// C/N in 0.001 dB from the 24-bit raw value of register 0x8B.
 ///
@@ -93,7 +144,7 @@ impl Tc90517 {
     /// With bit5 set the original first rewrites the satellite side (0x19)
     /// as well; that path is not reproduced here.
     fn configure_lj101_kit<T: UsbControl>(&self, dev: &mut Device<T>, desc: &TunerDesc) -> Result<()> {
-        if desc.flags & 0x20 != 0 {
+        if desc.flags & flag::SKIP_INIT_CONFIG != 0 {
             return Err(Error::Unsupported("SMT_LJ101 config with flags bit5 set".into()));
         }
         let a = self.addr;
@@ -151,18 +202,18 @@ impl Tc90517 {
     /// TC90527 kits: [`crate::tc90527::demod::set_ts_pins`].
     pub fn set_ts_mode<T: UsbControl>(&self, dev: &mut Device<T>, mode: u8) -> Result<()> {
         let (r1e, r1f) = match (self.variant, mode) {
-            (TerVariant::Tc90517Mxl, 0) => (0x80, 0x08),
-            (TerVariant::Tc90517Mxl, 1) => (0xA8, 0xA8),
-            (TerVariant::Tc90517Mxl, 2) => (0x94, 0x58),
-            (TerVariant::SmtLj101, 0) => (0xA2, 0x08),
-            (TerVariant::SmtLj101, 1) => (0xAA, 0xA8),
-            (TerVariant::SmtLj101, 2) => (0xA6, 0x58),
+            (TerVariant::Tc90517Mxl, ts_pins::OUTPUT) => (0x80, 0x08),
+            (TerVariant::Tc90517Mxl, ts_pins::STOPPED) => (0xA8, 0xA8),
+            (TerVariant::Tc90517Mxl, ts_pins::THIRD) => (0x94, 0x58),
+            (TerVariant::SmtLj101, ts_pins::OUTPUT) => (0xA2, 0x08),
+            (TerVariant::SmtLj101, ts_pins::STOPPED) => (0xAA, 0xA8),
+            (TerVariant::SmtLj101, ts_pins::THIRD) => (0xA6, 0x58),
             (TerVariant::Tc9052x(_), _) => return crate::tc9052x::demod::set_ts_pins(dev, self.addr, mode),
             (TerVariant::Tc90527(_), _) => return crate::tc90527::demod::set_ts_pins(dev, self.addr, mode),
             _ => return dev.i2c_batch_flush(),
         };
-        dev.i2c_batch_append(self.addr, 0x1E, &[r1e])?;
-        dev.i2c_batch_append(self.addr, 0x1F, &[r1f])?;
+        dev.i2c_batch_append(self.addr, reg::TS_PINS_1E, &[r1e])?;
+        dev.i2c_batch_append(self.addr, reg::TS_PINS_1F, &[r1f])?;
         dev.i2c_batch_flush()
     }
 
@@ -181,7 +232,7 @@ impl Tc90517 {
 
     /// Standby: TS stop, `0x1C |= 0x80`, `0x03 ← 0x90`.
     pub fn standby<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
-        self.set_ts_mode(dev, 1)?;
+        self.set_ts_mode(dev, ts_pins::STOPPED)?;
         let v = self.read1(dev, 0x1C)?;
         dev.i2c_batch_append(self.addr, 0x1C, &[(v & 0x3F) | 0x80])?;
         dev.i2c_batch_append(self.addr, 0x03, &[0x90])?;
@@ -190,10 +241,10 @@ impl Tc90517 {
 
     /// Pre-tune: TS stop, `0x25 ← 00`, `0x23 |= 1` (IF-AGC hold).
     pub fn pre_tune<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
-        self.set_ts_mode(dev, 1)?;
-        let v = self.read1(dev, 0x23)?;
+        self.set_ts_mode(dev, ts_pins::STOPPED)?;
+        let v = self.read1(dev, reg::IFAGC)?;
         dev.i2c_batch_append(self.addr, 0x25, &[0x00])?;
-        dev.i2c_batch_append(self.addr, 0x23, &[v | 0x01])?;
+        dev.i2c_batch_append(self.addr, reg::IFAGC, &[v | reg::IFAGC_HOLD])?;
         dev.i2c_batch_flush()
     }
 
@@ -202,19 +253,19 @@ impl Tc90517 {
     /// `0x23 &= ~1` (immediate), 20 ms, TS on.
     pub fn post_tune<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         dev.i2c_reg_write(self.addr, 0x01, &[0x40])?;
-        let v = self.read1(dev, 0x23)?;
+        let v = self.read1(dev, reg::IFAGC)?;
         match self.variant {
             TerVariant::Tc90517Mxl | TerVariant::Tc90527(_) => {
-                dev.i2c_batch_append(self.addr, 0x23, &[v & !0x01])?;
+                dev.i2c_batch_append(self.addr, reg::IFAGC, &[v & !reg::IFAGC_HOLD])?;
                 dev.i2c_batch_append(self.addr, 0x76, &[0x8F])?;
                 dev.i2c_batch_flush()?;
             }
             TerVariant::SmtLj101 | TerVariant::Tc9052x(_) => {
-                dev.i2c_reg_write(self.addr, 0x23, &[v & !0x01])?;
+                dev.i2c_reg_write(self.addr, reg::IFAGC, &[v & !reg::IFAGC_HOLD])?;
             }
         }
-        sleep(Duration::from_millis(20));
-        self.set_ts_mode(dev, 0)
+        sleep(POST_TUNE_SETTLE);
+        self.set_ts_mode(dev, ts_pins::OUTPUT)
     }
 
     /// The chip that this demodulator's `0x0F[3:2]` selects for the
@@ -253,19 +304,19 @@ impl Tc90517 {
     /// lock, strength, quality and C/N are always produced.
     pub fn status<T: UsbControl>(&self, dev: &mut Device<T>, st: &mut SignalStatus) -> Result<()> {
         let requested = st.mask;
-        let b0 = self.read1(dev, 0xB0)?;
-        let r80 = self.read1(dev, 0x80)?;
-        let r81 = self.read1(dev, 0x81)?;
+        let b0 = self.read1(dev, reg::SYNC_STATE)?;
+        let r80 = self.read1(dev, reg::ERR_FLAGS)?;
+        let r81 = self.read1(dev, reg::STATUS_81)?;
         let s = b0 & 0x0F;
         st.sync_state = s;
         let mut lk = 0u32;
         if s != 0 {
             lk |= lock::SYNC_STARTED;
         }
-        if s > 2 {
+        if s > reg::SYNC_SIGNAL {
             lk |= lock::SIGNAL;
         }
-        if s >= 8 && r80 & 0x28 == 0 {
+        if s >= reg::SYNC_LOCKED && r80 & reg::ERR_UNLOCKED == 0 {
             lk |= lock::LOCKED;
         }
         if r81 & 0x80 != 0 {
@@ -282,7 +333,7 @@ impl Tc90517 {
             q = 60;
         }
         let mut raw = [0u8; 3];
-        dev.i2c_reg_read(self.addr, 0x8B, &mut raw)?;
+        dev.i2c_reg_read(self.addr, reg::CNDAT, &mut raw)?;
         let cndat = ((raw[0] as u32) << 16) | ((raw[1] as u32) << 8) | raw[2] as u32;
         let cnr = cnr_mdb_from_raw(cndat);
         st.cnr_mdb = cnr;

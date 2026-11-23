@@ -61,6 +61,24 @@ pub struct SignalStatus {
 /// Value reported for a layer that is not in use.
 pub const BER_UNUSED: u32 = 0xFFFF_FFFF;
 
+/// Modes of the demodulators' TS pin control, as the vendor driver numbers
+/// them for every kit; each demodulator maps them onto its own registers.
+pub mod ts_pins {
+    /// TS output on.
+    pub const OUTPUT: u8 = 0;
+    /// TS output stopped (around tuning and at standby).
+    pub const STOPPED: u8 = 1;
+    /// Third pin state (not used by the kits).
+    pub const THIRD: u8 = 2;
+}
+
+/// Satellite kits' tune sequence: wait after setting the PLL, before the
+/// demodulator restart.
+pub const SAT_PLL_SETTLE: core::time::Duration = core::time::Duration::from_millis(100);
+/// Satellite kits' tune sequence: wait after the demodulator restart, before
+/// the TS output is switched on.
+pub const SAT_RESTART_SETTLE: core::time::Duration = core::time::Duration::from_millis(150);
+
 /// The 24-byte tune request the original driver's filter layer builds from
 /// the BDA tuning request and hands to the kit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

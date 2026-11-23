@@ -10,12 +10,10 @@ use std::thread::sleep;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::kit::VendorDriver;
+use crate::kit::{VendorDriver, ts_pins};
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
-
-/// Presence bit of the descriptor's demodulator IF (`val_62`).
-const PRESENT_DEMOD_IF: u32 = 0x20000;
+use crate::tc90517::demod::reg;
+use crate::tlv::{TunerDesc, present};
 
 /// Registers 0x11 / 0x12 by demodulator crystal (Hz).
 const XTAL_REGS: [(u32, u8, u8); 6] = [
@@ -55,7 +53,7 @@ pub fn configure<T: UsbControl>(dev: &mut Device<T>, addr: u8, desc: &TunerDesc,
         3_000_000 | 4_000_000 => {}
         0 => {
             let inverted =
-                driver == VendorDriver::Dth30 && desc.present & PRESENT_DEMOD_IF != 0 && (desc.val_62 as i32) < 0;
+                driver == VendorDriver::Dth30 && desc.present & present::DEMOD_IF != 0 && (desc.val_62 as i32) < 0;
             for (r, v) in ZERO_IF_BLOCK_1 {
                 dev.i2c_batch_append(addr, r, &[v])?;
             }
@@ -80,13 +78,13 @@ pub fn configure<T: UsbControl>(dev: &mut Device<T>, addr: u8, desc: &TunerDesc,
 /// only sends the batch.
 pub fn set_ts_pins<T: UsbControl>(dev: &mut Device<T>, addr: u8, mode: u8) -> Result<()> {
     let (r1d, r1e) = match mode {
-        0 => (0x01, 0x15),
-        1 => (0xA9, 0x95),
-        2 => (0x55, 0x55),
+        ts_pins::OUTPUT => (0x01, 0x15),
+        ts_pins::STOPPED => (0xA9, 0x95),
+        ts_pins::THIRD => (0x55, 0x55),
         _ => return dev.i2c_batch_flush(),
     };
-    dev.i2c_batch_append(addr, 0x1D, &[r1d])?;
-    dev.i2c_batch_append(addr, 0x1E, &[r1e])?;
+    dev.i2c_batch_append(addr, reg::TS_PINS_1D, &[r1d])?;
+    dev.i2c_batch_append(addr, reg::TS_PINS_1E, &[r1e])?;
     dev.i2c_batch_flush()
 }
 
@@ -118,7 +116,7 @@ pub fn wake<T: UsbControl>(dev: &mut Device<T>, addr: u8, driver: VendorDriver, 
 /// `1F &= F3` (see `switches_1f`; else 0x1F is written back as read),
 /// immediate writes; the first failure ends it.
 pub fn standby<T: UsbControl>(dev: &mut Device<T>, addr: u8, driver: VendorDriver, kit_name: &str) -> Result<()> {
-    set_ts_pins(dev, addr, 1)?;
+    set_ts_pins(dev, addr, ts_pins::STOPPED)?;
     dev.i2c_reg_write(addr, 0x03, &[0x10])?;
     let v = read1(dev, addr, 0x04)?;
     dev.i2c_reg_write(addr, 0x04, &[v | 0x28])?;
@@ -187,10 +185,10 @@ mod tests {
     #[test]
     fn zero_if_adds_a_block() {
         for (driver, val_62, present, r30) in [
-            (VendorDriver::Series, -4_000_000i32, PRESENT_DEMOD_IF, 0x21u8),
-            (VendorDriver::Dth30, -4_000_000, PRESENT_DEMOD_IF, 0x29),
+            (VendorDriver::Series, -4_000_000i32, present::DEMOD_IF, 0x21u8),
+            (VendorDriver::Dth30, -4_000_000, present::DEMOD_IF, 0x29),
             (VendorDriver::Dth30, -4_000_000, 0, 0x21),
-            (VendorDriver::Dth30, 4_000_000, PRESENT_DEMOD_IF, 0x21),
+            (VendorDriver::Dth30, 4_000_000, present::DEMOD_IF, 0x21),
         ] {
             let d = TunerDesc { val_62: val_62 as u32, present, ..desc(25_400_000, 0, 0) };
             let mut dev = Device::new(RegMock::default());

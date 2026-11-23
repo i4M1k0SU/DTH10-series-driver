@@ -28,12 +28,14 @@ pub mod ec;
 pub use appkeys::AppKeys;
 
 use std::collections::HashMap;
+use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aes::Aes128;
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use cmac::{Cmac, Mac};
+use dth_common::ts::{NULL_PID, SCRAMBLING_CONTROL, SYNC_BYTE, TS_PACKET};
 use sha1::{Digest, Sha1};
 
 use crate::error::{Error, Result};
@@ -80,6 +82,19 @@ pub fn load_set(path: &std::path::Path) -> Vec<(u8, Handshake)> {
 
 /// Key packet types.
 pub const KEYPKT_SESSION: u8 = 0xEC;
+/// Key packet types of the content blobs.
+const KEYPKT_CONTENT: RangeInclusive<u8> = 0xC0..=0xCF;
+
+/// Byte offsets in a key packet (the whole 188-byte TS packet): the type
+/// byte, the 16-byte blob id, the 20-byte device identity of a session
+/// announcement, the 64-byte content blob (starting with the id) and the two
+/// counter words of [`ctr_iv`].
+const KEYPKT_TYPE: usize = 7;
+const KEYPKT_ID: Range<usize> = 24..40;
+const KEYPKT_IDENT: Range<usize> = 40..60;
+const KEYPKT_CONTENT_BLOB: Range<usize> = 24..88;
+const KEYPKT_DW1: Range<usize> = 88..92;
+const KEYPKT_DW2: Range<usize> = 92..96;
 
 /// `KDF(secret, c) = SHA-1(secret ‖ 00×12 ‖ 00 00 00 (c+1))`.
 pub fn kdf(secret: &[u8; 20], counter: u8) -> [u8; 20] {
@@ -202,15 +217,15 @@ fn vendor<T: UsbControl + ?Sized>(t: &T, flags: u8, step: u16, out: &[u8], inbuf
 /// How long the device may take to compute a handshake response (ECDSA on
 /// the bridge MCU); the IN stage STALLs until the answer is ready.
 const RESPONSE_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+/// Pause between two IN attempts while the device STALLs.
 const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-const TIMEOUT_IN: std::time::Duration = std::time::Duration::from_secs(7);
 
 /// IN stage with retry while the device answers STALL (`request` already
 /// carries the stage bits).
 fn control_in_retry<T: UsbControl + ?Sized>(t: &T, request: u8, step: u16, buf: &mut [u8]) -> Result<usize> {
     let deadline = std::time::Instant::now() + RESPONSE_WAIT;
     loop {
-        match t.control_in(request, CMD_CEPM, step, buf, TIMEOUT_IN) {
+        match t.control_in(request, CMD_CEPM, step, buf, protocol::TIMEOUT_IN) {
             Err(Error::Usb(msg)) if std::time::Instant::now() < deadline => {
                 log::trace!("cepm/{step}: {msg}, retrying");
                 std::thread::sleep(RETRY_INTERVAL);
@@ -220,18 +235,21 @@ fn control_in_retry<T: UsbControl + ?Sized>(t: &T, request: u8, step: u16, buf: 
     }
 }
 
+/// Default of [`step_delay`] in ms.
+const STEP_DELAY_MS: u64 = 400;
+
 /// Delay before the first IN attempt of a step: the bridge drops the
 /// handshake when it is polled before the previous step was processed
 /// (ECDSA verification on the MCU). Overridable with `DTH10_CEPM_DELAY_MS`.
 fn step_delay() -> std::time::Duration {
-    let ms = std::env::var("DTH10_CEPM_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(400u64);
+    let ms = std::env::var("DTH10_CEPM_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(STEP_DELAY_MS);
     std::time::Duration::from_millis(ms)
 }
 
 /// IN-only step (bRequest = flags | 0x01) after [`step_delay`], with retry.
 fn vendor_in<T: UsbControl + ?Sized>(t: &T, flags: u8, step: u16, buf: &mut [u8]) -> Result<usize> {
     std::thread::sleep(step_delay());
-    control_in_retry(t, (flags & 0xFC) | protocol::FLAG_IN, step, buf)
+    control_in_retry(t, (flags & protocol::CALLER_FLAGS) | protocol::FLAG_IN, step, buf)
 }
 
 /// Result of the 0xDEAF/1..6 handshake.
@@ -552,12 +570,12 @@ impl Decryptor {
     /// on this device's output, so the tag is not needed.
     pub fn is_key_packet(p: &[u8]) -> bool {
         p.len() >= 120
-            && p[0] == 0x47
+            && p[0] == SYNC_BYTE
             && (p[3] & 0x30) == 0x20
             && p[4] == 0xB7
             && p[5] == 0x02
             && p[6] == 0xB5
-            && (p[7] == KEYPKT_SESSION || (0xC0..=0xCF).contains(&p[7]))
+            && (p[KEYPKT_TYPE] == KEYPKT_SESSION || KEYPKT_CONTENT.contains(&p[KEYPKT_TYPE]))
     }
 
     /// Process one 188-byte packet in place. `Ok(true)` means the packet is
@@ -565,23 +583,23 @@ impl Decryptor {
     /// consumed (key packet) or has to be dropped (no key yet).
     pub fn process<T: UsbControl + ?Sized>(&mut self, t: &T, flags: u8, p: &mut [u8]) -> Result<bool> {
         self.stats.packets += 1;
-        if p.len() < 188 || p[0] != 0x47 {
+        if p.len() < TS_PACKET || p[0] != SYNC_BYTE {
             return Ok(true);
         }
         let pid = ((p[1] as u16 & 0x1F) << 8) | p[2] as u16;
-        if pid == 0x1FFF {
+        if pid == NULL_PID {
             self.stats.clear += 1;
             return Ok(true);
         }
         if Self::is_key_packet(p) {
             self.stats.key_packets += 1;
-            let id: [u8; 16] = p[24..40].try_into().unwrap();
-            if p[7] == KEYPKT_SESSION {
+            let id: [u8; 16] = p[KEYPKT_ID].try_into().unwrap();
+            if p[KEYPKT_TYPE] == KEYPKT_SESSION {
                 // As in the application, the blob is only processed when its id differs
                 // from the current session's id ("no session" compares as all
                 // zeros, so the device's initial null announcement is skipped).
                 let current = self.session.as_ref().map_or([0u8; 16], |s| s.id);
-                let ident: [u8; 20] = p[40..60].try_into().unwrap();
+                let ident: [u8; 20] = p[KEYPKT_IDENT].try_into().unwrap();
                 if self.last_announce != (id, ident) {
                     self.last_announce = (id, ident);
                     self.foreign_announcements = 0;
@@ -589,8 +607,8 @@ impl Decryptor {
                         "cepm: 0xEC id {} ident {} dw1 {} dw2 0x{:08x} tail {}",
                         hex(&id),
                         hex(&ident),
-                        u32::from_le_bytes(p[88..92].try_into().unwrap()),
-                        u32::from_le_bytes(p[92..96].try_into().unwrap()),
+                        u32::from_le_bytes(p[KEYPKT_DW1].try_into().unwrap()),
+                        u32::from_le_bytes(p[KEYPKT_DW2].try_into().unwrap()),
                         hex(&p[96..120])
                     );
                 }
@@ -657,14 +675,14 @@ impl Decryptor {
                 return Ok(false);
             };
             if self.content_key.is_none() || self.content_id != id {
-                let Some(iv) = self.keys.find_content_iv(&sess.k3(), &p[24..88]) else {
+                let Some(iv) = self.keys.find_content_iv(&sess.k3(), &p[KEYPKT_CONTENT_BLOB]) else {
                     self.stats.errors += 1;
                     if self.stats.errors <= 3 || self.stats.errors.is_multiple_of(1000) {
                         log::warn!("cepm{}: content IV not found in {} (wrong file?)", self.label, self.keys.source);
                     }
                     return Ok(false);
                 };
-                match sess.unwrap_content(&iv, &p[24..88]) {
+                match sess.unwrap_content(&iv, &p[KEYPKT_CONTENT_BLOB]) {
                     Ok(d) => {
                         self.stats.content_unwraps += 1;
                         self.content_key = Some(d[16..32].try_into().unwrap());
@@ -677,7 +695,7 @@ impl Decryptor {
                         log::warn!(
                             "cepm{}: content unwrap failed: {e} (key packet pid 0x{pid:04x} type 0x{:02x}, content id {})",
                             self.label,
-                            p[7],
+                            p[KEYPKT_TYPE],
                             hex(&id)
                         );
                         return Ok(false);
@@ -685,22 +703,22 @@ impl Decryptor {
                 }
             }
             let key = self.content_key.unwrap();
-            let dw1 = u32::from_le_bytes(p[88..92].try_into().unwrap());
-            let dw2 = u32::from_le_bytes(p[92..96].try_into().unwrap());
+            let dw1 = u32::from_le_bytes(p[KEYPKT_DW1].try_into().unwrap());
+            let dw2 = u32::from_le_bytes(p[KEYPKT_DW2].try_into().unwrap());
             let cpid = context_pid(pid);
             self.ctx.insert(cpid, Ctr::new(&key, ctr_iv(cpid, dw1, dw2)));
-            log::trace!("cepm: key packet pid 0x{pid:04x} type 0x{:02x} dw1 {dw1} dw2 0x{dw2:08x}", p[7]);
+            log::trace!("cepm: key packet pid 0x{pid:04x} type 0x{:02x} dw1 {dw1} dw2 0x{dw2:08x}", p[KEYPKT_TYPE]);
             return Ok(false);
         }
-        if p[3] & 0xC0 == 0 {
+        if p[3] & SCRAMBLING_CONTROL == 0 {
             self.stats.clear += 1;
             return Ok(true);
         }
         let key = if self.ctx.contains_key(&pid) { pid } else { 0 };
         match self.ctx.get_mut(&key) {
             Some(c) => {
-                c.apply(&mut p[4..188]);
-                p[3] &= 0x3F;
+                c.apply(&mut p[4..TS_PACKET]);
+                p[3] &= !SCRAMBLING_CONTROL;
                 self.stats.decrypted += 1;
                 Ok(true)
             }

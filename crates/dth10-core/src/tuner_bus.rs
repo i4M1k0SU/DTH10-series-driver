@@ -12,6 +12,10 @@ use crate::device::Device;
 use crate::error::Result;
 use crate::protocol::UsbControl;
 
+/// The TC90517's I2C repeater register: a raw write starting with it and
+/// the tuner's 8-bit address passes the rest on to the tuner.
+pub const REG_REPEATER: u8 = 0xFE;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunerPath {
     Direct,
@@ -31,7 +35,7 @@ impl TunerBus {
             TunerPath::Direct => dev.i2c_write(self.tuner_addr, data),
             TunerPath::ViaDemod { demod_addr } => {
                 let mut buf = Vec::with_capacity(data.len() + 2);
-                buf.push(0xFE);
+                buf.push(REG_REPEATER);
                 buf.push(self.tuner_addr << 1);
                 buf.extend_from_slice(data);
                 dev.i2c_write(demod_addr, &buf)
@@ -43,7 +47,7 @@ impl TunerBus {
         match self.path {
             TunerPath::Direct => dev.i2c_read(self.tuner_addr, buf),
             TunerPath::ViaDemod { demod_addr } => {
-                dev.i2c_write(demod_addr, &[0xFE, (self.tuner_addr << 1) | 1])?;
+                dev.i2c_write(demod_addr, &[REG_REPEATER, (self.tuner_addr << 1) | 1])?;
                 dev.i2c_read(demod_addr, buf)
             }
         }

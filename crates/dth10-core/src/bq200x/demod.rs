@@ -28,7 +28,7 @@ use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::kit::{SignalStatus, field};
 use crate::protocol::UsbControl;
-use crate::tlv::TunerDesc;
+use crate::tlv::{TunerDesc, present};
 
 /// Lock flag bits of [`SignalStatus::lock`] as the BQ200X kits fill them
 /// (same bit positions as the TC90517 kits, which the filter layer reads).
@@ -47,6 +47,61 @@ pub mod lock {
 /// Crystal value that selects the second set of clock constants; every other
 /// crystal value gets the first set.
 pub const XTAL_19M2: u32 = 19_200_000;
+
+/// Tuner I2C gate of the master: [`GATE_CLOSED`] cleared = open.
+const REG_GATE: u8 = 0x02;
+const GATE_CLOSED: u8 = 0x02;
+/// Acquisition status: bit7 clear = [`lock::REG3A_BIT7_CLEAR`], [`ACQ_DONE`]
+/// ends the poll of an acquisition restart.
+const REG_ACQ: u8 = 0x3A;
+const ACQ_BIT7: u8 = 0x80;
+const ACQ_DONE: u8 = 0x40;
+/// Bit7 = signal present; bits 3:0 the high bits of the carrier offset.
+const REG_SIGNAL: u8 = 0x70;
+const SIGNAL_PRESENT: u8 = 0x80;
+/// Bit0 = demodulator locked.
+const REG_LOCK: u8 = 0x92;
+const LOCK_DEMOD: u8 = 0x01;
+/// Diversity status: [`DIV_LOCKED`] = frame lock of the pair (master);
+/// [`DIV_BIT3`] clear for too long = the 0x01 pulses of that chip.
+const REG_DIV_STATUS: u8 = 0xAB;
+const DIV_LOCKED: u8 = 0x02;
+const DIV_BIT3: u8 = 0x08;
+/// Layer A error flag in bit2 ([`ERR_LAYER_A`]).
+const REG_ERR_FLAGS: u8 = 0xD9;
+const ERR_LAYER_A: u8 = 0x04;
+/// Bit6 = TMCC locked (single chip); the other bits hold TMCC layer fields.
+const REG_TMCC_LOCK: u8 = 0xDB;
+const TMCC_LOCKED: u8 = 0x40;
+/// Bits 3:0 = number of segments of layer A.
+const REG_SEGMENTS: u8 = 0xDE;
+/// Bit0 is reported as [`lock::REGEC_BIT0`].
+const REG_EC: u8 = 0xEC;
+
+/// How long the reset (0x1D bit5) and acquisition-restart (0x01 bit4)
+/// pulses are held low.
+const PULSE_LOW: Duration = Duration::from_millis(20);
+/// Acquisition restart: polls of [`ACQ_DONE`] and the interval between them.
+const ACQ_POLLS: u32 = 30;
+const ACQ_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Unlocked this long after a tune: the status reports the lock flags only.
+const UNLOCKED_GRACE: Duration = Duration::from_secs(3);
+/// Unlocked status reads after [`UNLOCKED_GRACE`] beyond which every read
+/// restarts the acquisition.
+const UNLOCKED_POLLS_MAX: u8 = 6;
+/// Error watchdog: consecutive bad polls tolerated, and the layer A error
+/// count from which a poll is bad.
+const WD_POLLS_MAX: u8 = 15;
+const WD_ERROR_COUNT: u32 = 50;
+/// Diversity: polls with [`DIV_BIT3`] clear tolerated before the 0x01 pulses.
+const DIV_POLLS_MAX: u8 = 4;
+/// Carrier-offset drift from the reference that moves 0x69:0x6A one step.
+const AFC_DRIFT_MAX: i32 = 256;
+/// Number of segments of an ISDB-T channel: all of them in layer A = a
+/// single-layer broadcast.
+const ALL_SEGMENTS: u8 = 13;
+/// The C/N of layer B is reported above this (0.001 dB), else that of layer A.
+const LAYER_B_CNR_MIN_MDB: i32 = 15_000;
 
 /// Base clock constant of the clock / PLL words: 2^46 / 1000 for the default
 /// crystal, 2^46 / 853.33 for 19.2 MHz.
@@ -283,14 +338,14 @@ pub struct TunerGate {
 impl TunerGate {
     pub fn open<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         match self.demod {
-            Some(a) => Bq200x::rmw(dev, a, 0x02, |v| v & 0xFD),
+            Some(a) => Bq200x::rmw(dev, a, REG_GATE, |v| v & !GATE_CLOSED),
             None => Ok(()),
         }
     }
 
     pub fn close<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         match self.demod {
-            Some(a) => Bq200x::rmw(dev, a, 0x02, |v| v | 0x02),
+            Some(a) => Bq200x::rmw(dev, a, REG_GATE, |v| v | GATE_CLOSED),
             None => Ok(()),
         }
     }
@@ -375,11 +430,11 @@ impl Bq200x {
     /// Configuration (Init / Open). Requires the IF in the descriptor; tag 'b'
     /// (`val_62`), when present, replaces it as the IF the chip is set to.
     pub fn configure<T: UsbControl>(&mut self, dev: &mut Device<T>, desc: &TunerDesc) -> Result<()> {
-        if desc.present & 0x4000 == 0 {
+        if desc.present & present::IF_FREQ == 0 {
             return Err(Error::Unsupported("BQ200X needs the IF frequency in the descriptor".into()));
         }
         let mut if_hz = desc.if_freq_hz.wrapping_abs();
-        if desc.present & 0x20000 != 0 {
+        if desc.present & present::DEMOD_IF != 0 {
             if_hz = desc.val_62 as i32;
         }
         let if_khz = if_hz / 1000;
@@ -407,7 +462,7 @@ impl Bq200x {
     fn reset_pulse<T: UsbControl>(dev: &mut Device<T>, addr: u8) -> Result<()> {
         let v = Self::rd(dev, addr, 0x1D)?;
         Self::wr(dev, addr, 0x1D, v & 0xDF)?;
-        sleep(Duration::from_millis(20));
+        sleep(PULSE_LOW);
         Self::wr(dev, addr, 0x1D, v | 0x20)
     }
 
@@ -535,13 +590,13 @@ impl Bq200x {
         Self::wr(dev, a, 0x29, 0x68)?;
         Self::wr(dev, a, 0x2A, 0xAB)?;
         Self::wr(dev, a, 0x01, r01 & 0xEF)?;
-        sleep(Duration::from_millis(20));
+        sleep(PULSE_LOW);
         Self::wr(dev, a, 0x01, r01 | 0x10)?;
         self.wd_flag = 0;
         self.wd_errors = 0;
-        for _ in 0..30 {
-            sleep(Duration::from_millis(10));
-            if Self::rd(dev, a, 0x3A)? & 0x40 != 0 {
+        for _ in 0..ACQ_POLLS {
+            sleep(ACQ_POLL_INTERVAL);
+            if Self::rd(dev, a, REG_ACQ)? & ACQ_DONE != 0 {
                 Self::rmw(dev, a, 0x45, |v| v | 0x20)?;
                 Self::wr(dev, a, 0x29, 0x66)?;
                 return Self::wr(dev, a, 0x2A, 0x66);
@@ -580,8 +635,8 @@ impl Bq200x {
 
     fn tmcc_locked<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<bool> {
         Ok(match self.slave {
-            None => Self::rd(dev, self.addr, 0xDB)? & 0x40 != 0,
-            Some(_) => Self::rd(dev, self.addr, 0xAB)? & 0x02 != 0,
+            None => Self::rd(dev, self.addr, REG_TMCC_LOCK)? & TMCC_LOCKED != 0,
+            Some(_) => Self::rd(dev, self.addr, REG_DIV_STATUS)? & DIV_LOCKED != 0,
         })
     }
 
@@ -634,11 +689,11 @@ impl Bq200x {
     /// Writes 0xBE from the code rate of layer A (single-layer broadcast) or B once
     /// 0xDB bit6 is set. Returns `true` while it still has to be done.
     fn fix_code_rate<T: UsbControl>(dev: &mut Device<T>, a: u8) -> Result<bool> {
-        if Self::rd(dev, a, 0xDB)? & 0x40 == 0 {
+        if Self::rd(dev, a, REG_TMCC_LOCK)? & TMCC_LOCKED == 0 {
             return Ok(true);
         }
-        let segments = Self::rd(dev, a, 0xDE)? & 0x0F;
-        let rate = Self::layer_code_rate(dev, a, if segments == 13 { 0 } else { 1 })?;
+        let segments = Self::rd(dev, a, REG_SEGMENTS)? & 0x0F;
+        let rate = Self::layer_code_rate(dev, a, if segments == ALL_SEGMENTS { 0 } else { 1 })?;
         let v = match rate {
             0..=2 => 0x38,
             3 => 0x32,
@@ -663,11 +718,11 @@ impl Bq200x {
     /// more than 15 consecutive polls with 0xD9 bit2 set or with >= 50 errors
     /// restart the acquisition.
     fn watchdog<T: UsbControl>(&mut self, dev: &mut Device<T>, layer_a: bool, err_a: u32) -> Result<()> {
-        let d9 = Self::rd(dev, self.addr, 0xD9)?;
+        let d9 = Self::rd(dev, self.addr, REG_ERR_FLAGS)?;
         if layer_a {
-            self.wd_flag = if d9 & 0x04 != 0 { self.wd_flag.wrapping_add(1) } else { 0 };
-            self.wd_errors = if err_a >= 50 { self.wd_errors.wrapping_add(1) } else { 0 };
-            if self.wd_flag > 15 || self.wd_errors > 15 {
+            self.wd_flag = if d9 & ERR_LAYER_A != 0 { self.wd_flag.wrapping_add(1) } else { 0 };
+            self.wd_errors = if err_a >= WD_ERROR_COUNT { self.wd_errors.wrapping_add(1) } else { 0 };
+            if self.wd_flag > WD_POLLS_MAX || self.wd_errors > WD_POLLS_MAX {
                 // The result of the recovery is not checked by the original.
                 let _ = self.resync(dev);
                 self.master_ab = 0;
@@ -693,15 +748,15 @@ impl Bq200x {
                 if self.code_rate_pending {
                     self.code_rate_pending = Self::fix_code_rate(dev, self.addr)?;
                 }
-                let m = Self::rd(dev, self.addr, 0xAB)? & 0x08 != 0;
+                let m = Self::rd(dev, self.addr, REG_DIV_STATUS)? & DIV_BIT3 != 0;
                 self.master_ab = if m { 0 } else { self.master_ab.wrapping_add(1) };
-                let s = Self::rd(dev, slave, 0xAB)? & 0x08 != 0;
+                let s = Self::rd(dev, slave, REG_DIV_STATUS)? & DIV_BIT3 != 0;
                 self.slave_ab = if s { 0 } else { self.slave_ab.wrapping_add(1) };
-                if self.slave_ab > 4 {
+                if self.slave_ab > DIV_POLLS_MAX {
                     self.slave_ab = 0;
                     Self::pulse_01(dev, slave)?;
                 }
-                if self.master_ab > 4 {
+                if self.master_ab > DIV_POLLS_MAX {
                     self.master_ab = 0;
                     Self::pulse_01(dev, self.addr)?;
                 }
@@ -715,7 +770,7 @@ impl Bq200x {
     /// of 0x69:0x6A one step against it.
     fn track_offset<T: UsbControl>(&mut self, dev: &mut Device<T>) -> Result<()> {
         let a = self.addr;
-        let r70 = Self::rd(dev, a, 0x70)?;
+        let r70 = Self::rd(dev, a, REG_SIGNAL)?;
         let r71 = Self::rd(dev, a, 0x71)?;
         let off = carrier_offset(r70, r71);
         if self.afc_capture {
@@ -725,7 +780,7 @@ impl Bq200x {
         }
         let d = self.afc_ref.wrapping_sub(off);
         self.afc_drifting = true;
-        if d > 256 {
+        if d > AFC_DRIFT_MAX {
             let lo = Self::rd(dev, a, 0x6A)?;
             if lo != 0 {
                 Self::wr(dev, a, 0x6A, lo - 1)
@@ -734,7 +789,7 @@ impl Bq200x {
                 Self::wr(dev, a, 0x69, hi.wrapping_sub(1))?;
                 Self::wr(dev, a, 0x6A, 0xFF)
             }
-        } else if d >= -256 {
+        } else if d >= -AFC_DRIFT_MAX {
             self.afc_drifting = false;
             Ok(())
         } else {
@@ -759,10 +814,10 @@ impl Bq200x {
         st.mask = 0;
         st.lock = 0;
         st.quality = 0;
-        if Self::rd(dev, a, 0x3A)? & 0x80 == 0 {
+        if Self::rd(dev, a, REG_ACQ)? & ACQ_BIT7 == 0 {
             st.lock |= lock::REG3A_BIT7_CLEAR;
         }
-        if Self::rd(dev, a, 0x70)? & 0x80 != 0 {
+        if Self::rd(dev, a, REG_SIGNAL)? & SIGNAL_PRESENT != 0 {
             st.lock |= lock::SIGNAL;
         }
         st.mask |= field::LOCK;
@@ -770,7 +825,7 @@ impl Bq200x {
             st.quality = 20;
             st.mask |= field::QUALITY;
         }
-        if Self::rd(dev, a, 0x92)? & 0x01 != 0 && self.tmcc_locked(dev)? {
+        if Self::rd(dev, a, REG_LOCK)? & LOCK_DEMOD != 0 && self.tmcc_locked(dev)? {
             st.lock |= lock::LOCKED;
         }
         if st.lock & lock::LOCKED != 0 {
@@ -778,28 +833,28 @@ impl Bq200x {
             st.quality = 60;
         } else {
             let elapsed = self.tuned_at.map_or(Duration::MAX, |t| t.elapsed());
-            if elapsed > Duration::from_secs(3) {
+            if elapsed > UNLOCKED_GRACE {
                 self.unlocked_polls = self.unlocked_polls.wrapping_add(1);
-                if self.unlocked_polls > 6 {
+                if self.unlocked_polls > UNLOCKED_POLLS_MAX {
                     let _ = self.resync(dev);
                 }
                 return Ok(());
             }
         }
-        if Self::rd(dev, a, 0xEC)? & 0x01 != 0 {
+        if Self::rd(dev, a, REG_EC)? & 0x01 != 0 {
             st.lock |= lock::REGEC_BIT0;
         }
         self.track_offset(dev)?;
 
         // Layer A holding all 13 segments: single-layer broadcast, C/N of layer A;
         // otherwise layer B's C/N unless it is 15 dB or less.
-        let segments = Self::rd(dev, a, 0xDE)? & 0x0F;
+        let segments = Self::rd(dev, a, REG_SEGMENTS)? & 0x0F;
         st.sync_state = segments;
-        let (cn, layers) = if segments == 13 {
+        let (cn, layers) = if segments == ALL_SEGMENTS {
             (Self::cnr(dev, a, 0)?, 4u8)
         } else {
             let b = Self::cnr(dev, a, 1)?;
-            (if b <= 15000 { Self::cnr(dev, a, 0)? } else { b }, 6u8)
+            (if b <= LAYER_B_CNR_MIN_MDB { Self::cnr(dev, a, 0)? } else { b }, 6u8)
         };
         st.mask |= field::STRENGTH | field::CNR;
         st.cnr_mdb = cn;

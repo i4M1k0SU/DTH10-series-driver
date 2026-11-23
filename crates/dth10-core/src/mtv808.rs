@@ -249,6 +249,31 @@ const COMP_BASE: [u32; 14] = [2, 2, 65, 65, 65, 120, 62, 120, 60, 117, 109, 26, 
 const COMP_SLOPE: [u32; 14] = [0, 0, 90, 77, 77, 78, 40, 118, 48, 75, 70, 53, 25, 6];
 const COMP_MAX: [i32; 14] = [0, 0, 127, 127, 127, 255, 127, 255, 127, 255, 511, 127, 127, 31];
 
+/// Highest frequency (kHz) of the low filter table; also where the divider
+/// registers switch the filter selection.
+const FILTER_EDGE_KHZ: u32 = 325_000;
+
+/// IF mode registers: the default, and the one for a 4 MHz IF
+/// (DT-H30/PCIEM-TS driver), see [`Mtv808::set_mode`].
+const IF_MODE_DEFAULT: u8 = 0;
+const IF_MODE_4MHZ: u8 = 5;
+
+/// The register the calibration approximates, and the one that judges each
+/// step (below 0x80: keep the bit), read [`CAL_STEP_WAIT`] after the step.
+const REG_CAL: u8 = 0x8B;
+const REG_CAL_SENSE: u8 = 0x0A;
+const CAL_STEP_WAIT: Duration = Duration::from_millis(10);
+
+/// VCO code in bits 5:3, chosen by the lock reading of [`REG_VCO_LOCK`]
+/// [`VCO_SETTLE`] after the divider write.
+const REG_VCO: u8 = 0x51;
+const REG_VCO_LOCK: u8 = 0x06;
+const VCO_SETTLE: Duration = Duration::from_millis(1);
+
+/// Power: [`POWER_DOWN`] set = standby (DT-H30/PCIEM-TS driver).
+const REG_POWER: u8 = 0x33;
+const POWER_DOWN: u8 = 0x40;
+
 /// What the two drivers do differently.
 struct Profile {
     init: &'static [(u8, u8)],
@@ -319,7 +344,7 @@ pub fn divider(driver: VendorDriver, khz: u32) -> Option<(u8, u32)> {
 /// (the last register with bit0 set). `None` outside the tuning range.
 pub fn divider_registers(driver: VendorDriver, khz: u32) -> Option<[(u8, u8); 5]> {
     let (band, v) = divider(driver, khz)?;
-    let sel: u8 = if khz <= 325_000 { 3 } else { 1 };
+    let sel: u8 = if khz <= FILTER_EDGE_KHZ { 3 } else { 1 };
     Some([
         (0x26, ((sel * 8 + band) * 4).wrapping_add((v >> 28) as u8)),
         (0x27, (v >> 20) as u8),
@@ -420,11 +445,11 @@ impl Mtv808 {
                 if let Err(e) = table {
                     log::debug!("MTV808 init table: {e}");
                 }
-                0
+                IF_MODE_DEFAULT
             }
             VendorDriver::Dth30 => {
                 table?;
-                if desc.if_freq_hz == 4_000_000 { 5 } else { 0 }
+                if desc.if_freq_hz == 4_000_000 { IF_MODE_4MHZ } else { IF_MODE_DEFAULT }
             }
         };
         self.set_mode(dev, mode)?;
@@ -437,18 +462,18 @@ impl Mtv808 {
     fn calibrate<T: UsbControl>(&self, dev: &mut Device<T>) -> Result<()> {
         self.write_all(dev, &[(0x7F, 0x36), (0x80, 0xA0), (0x2F, 0x00), (0x3D, 0xBA)])?;
         let mut v: u8 = 0x1F;
-        self.write(dev, 0x8B, v)?;
+        self.write(dev, REG_CAL, v)?;
         for bit in (0..6u8).rev() {
-            sleep(Duration::from_millis(10));
-            if self.read(dev, 0x0A)? < 0x80 {
+            sleep(CAL_STEP_WAIT);
+            if self.read(dev, REG_CAL_SENSE)? < 0x80 {
                 v |= 1 << bit;
             }
-            self.write(dev, 0x8B, v)?;
+            self.write(dev, REG_CAL, v)?;
             if bit == 0 {
                 break;
             }
             v &= 0x3F - (1 << (bit - 1));
-            self.write(dev, 0x8B, v)?;
+            self.write(dev, REG_CAL, v)?;
         }
         self.write_all(dev, &[(0x2F, 0x01), (0x3D, 0x3A), (0x7F, 0xF6), (0x80, 0x20), (0x89, 0x27)])
     }
@@ -456,7 +481,7 @@ impl Mtv808 {
     /// The IF mode registers: mode 0 = `24=00 30=2E 39=00`, mode 5 =
     /// `25=A2 88=00 24=09 30=0E 39=80 5E=5D 60=4C`.
     fn set_mode<T: UsbControl>(&mut self, dev: &mut Device<T>, mode: u8) -> Result<()> {
-        if mode == 0 {
+        if mode == IF_MODE_DEFAULT {
             self.write_all(dev, &[(0x24, 0x00), (0x30, 0x2E), (0x39, 0x00)])?;
         } else {
             self.write_all(
@@ -526,14 +551,14 @@ impl Mtv808 {
         let dth30 = self.driver == VendorDriver::Dth30;
         // Only the DT-H30/PCIEM-TS driver looks at the result of some writes.
         let checked = |r: Result<()>| if dth30 { r } else { Ok(()) };
-        if let Err(e) = self.select_filter(dev, if khz <= 325_000 { 0 } else { 1 }) {
+        if let Err(e) = self.select_filter(dev, if khz <= FILTER_EDGE_KHZ { 0 } else { 1 }) {
             log::debug!("MTV808 filter table: {e}");
         }
         checked(self.write(dev, 0x61, if khz > p.r61_edge { 0x50 } else { 0x63 }))?;
         // The series driver puts the IF mode back to 0; the other driver keeps
         // the one of the Init.
-        if !dth30 && self.mode != 0 {
-            self.set_mode(dev, 0)?;
+        if !dth30 && self.mode != IF_MODE_DEFAULT {
+            self.set_mode(dev, IF_MODE_DEFAULT)?;
         }
         if !self.compensated {
             let r = self.write_comp(dev);
@@ -553,19 +578,19 @@ impl Mtv808 {
         }
         let regs = divider_registers(self.driver, khz)
             .ok_or_else(|| Error::Unsupported(format!("MTV808 tuner frequency {khz} kHz")))?;
-        let keep = self.read(dev, 0x51)? & 0x87;
-        checked(self.write(dev, 0x51, keep | (p.vco[0] << 3)))?;
+        let keep = self.read(dev, REG_VCO)? & 0x87;
+        checked(self.write(dev, REG_VCO, keep | (p.vco[0] << 3)))?;
         checked(self.write(dev, 0x53, reg53(khz)))?;
         for (r, v) in regs {
             checked(self.write(dev, r, v))?;
         }
-        sleep(Duration::from_millis(1));
-        let vco = match self.read(dev, 0x06)? {
+        sleep(VCO_SETTLE);
+        let vco = match self.read(dev, REG_VCO_LOCK)? {
             0..=0x1F => p.vco[1],
             0x20..=0x7F => p.vco[2],
             _ => p.vco[3],
         };
-        self.write(dev, 0x51, keep | (vco << 3))
+        self.write(dev, REG_VCO, keep | (vco << 3))
     }
 
     /// Wake (Open without descriptor flags bit5): register 0x33 bit6 cleared
@@ -574,8 +599,8 @@ impl Mtv808 {
         if self.driver == VendorDriver::Series {
             return Ok(());
         }
-        let v = self.read(dev, 0x33)?;
-        self.write(dev, 0x33, v & !0x40)
+        let v = self.read(dev, REG_POWER)?;
+        self.write(dev, REG_POWER, v & !POWER_DOWN)
     }
 
     /// Standby (end of Init, Close): register 0x33 bit6 set (DT-H30/PCIEM-TS
@@ -584,8 +609,8 @@ impl Mtv808 {
         if self.driver == VendorDriver::Series {
             return Ok(());
         }
-        let v = self.read(dev, 0x33)?;
-        self.write(dev, 0x33, v | 0x40)
+        let v = self.read(dev, REG_POWER)?;
+        self.write(dev, REG_POWER, v | POWER_DOWN)
     }
 
     /// The tuner's part of the signal status, after the demodulator's: the

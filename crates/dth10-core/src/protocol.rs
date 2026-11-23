@@ -41,6 +41,9 @@ pub const MAX_IN_LEN: usize = 0x1000;
 pub const FLAG_OUT: u8 = 0x02;
 /// bRequest bit: the request carries an IN data stage.
 pub const FLAG_IN: u8 = 0x01;
+/// bRequest bits taken from the caller's flags (bits 2..7, `0xFC`); [`send`]
+/// adds the data-stage bits.
+pub const CALLER_FLAGS: u8 = !(FLAG_OUT | FLAG_IN);
 
 /// Minimal vendor-control-transfer interface a transport must provide.
 ///
@@ -143,7 +146,7 @@ pub fn send<T: UsbControl + ?Sized>(
         return Err(Error::TooLarge { limit: u16::MAX as usize, actual: out.len() });
     }
 
-    let mut request = flags & 0xFC;
+    let mut request = flags & CALLER_FLAGS;
     let do_out = !out.is_empty() || want_in == 0;
     let do_in = want_in != 0;
     if do_out {
