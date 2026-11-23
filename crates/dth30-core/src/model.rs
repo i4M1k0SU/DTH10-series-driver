@@ -2,13 +2,18 @@
 //!
 //! The USB product ID names the product; which tuner board it carries is
 //! only known from the ViXS board-ID register (see [`crate::vixs`]). Checked
-//! on hardware: the DT-H30/U2 with PID 0x0128 (board 0xB3) and the
-//! DT-H50/U2 (PID 0x0129, board 0xB4); the others are unverified.
+//! on hardware: the DT-H30/U2 and the DT-H45/U2, both with PID 0x0128
+//! (board 0xB3), and the DT-H50/U2 (PID 0x0129, board 0xB4); the others are
+//! unverified.
 
 /// BUFFALO's USB vendor ID.
 pub const VENDOR_ID: u16 = 0x0411;
 
 /// The products the vendor driver (BufFsUSB 1.4.1.9) binds to, by USB product ID.
+///
+/// The DT-H45/U2 has PID 0x0128 as well (its product string is "BUFFALO
+/// DT-H30/U2 v110 Loader", bcdDevice 0x0100) and is listed as a DT-H30/U2,
+/// as the vendor software does.
 pub const PRODUCTS: &[(u16, &str)] =
     &[(0x0128, "DT-H30/U2"), (0x0129, "DT-H50/U2"), (0x012A, "DT-H50/U2W"), (0x0144, "DT-H30/U2")];
 

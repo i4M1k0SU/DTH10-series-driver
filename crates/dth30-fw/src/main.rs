@@ -1,6 +1,6 @@
 //! Firmware for the ViXS XCode2 chip of the BUFFALO DTH30 series of USB TV
-//! tuners (DT-H30/U2, DT-H50/U2), written from scratch to stand in for the
-//! one inside the vendor's driver.
+//! tuners (DT-H30/U2, DT-H45/U2, DT-H50/U2), written from scratch to stand in
+//! for the one inside the vendor's driver.
 //!
 //! One core, no interrupts: after the start-up handshake the firmware
 //! polls the host's requests, the DMA engine and the stream's ring in a

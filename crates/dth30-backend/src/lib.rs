@@ -1,5 +1,5 @@
-//! The DTH30 series (DT-H30/U2, DT-H50/U2: a ViXS XCode2 behind a PLX
-//! NET2280, `dth30-core`) behind [`dth_common`]'s [`Backend`]
+//! The DTH30 series (DT-H30/U2, DT-H45/U2, DT-H50/U2: a ViXS XCode2 behind
+//! a PLX NET2280, `dth30-core`) behind [`dth_common`]'s [`Backend`]
 //! ([`Dth30Backend`]) and [`Session`] ([`Dth30Tuner`]).
 //!
 //! The family has one terrestrial tuner. Its two TS outputs map to the
@@ -15,9 +15,9 @@
 //!   is opened (and the card reset) on the first device-mode tune and stays
 //!   open until [`Session::close`].
 //!
-//! A unit is named by its USB serial number; the DT-H30/U2 and DT-H50/U2
-//! have none, so such a unit is named by its product and the USB port it is
-//! plugged in, `DTH30-<product ID>-<bus>-<ports>` ([`list`],
+//! A unit is named by its USB serial number; the DT-H30/U2, DT-H45/U2 and
+//! DT-H50/U2 have none, so such a unit is named by its product and the USB
+//! port it is plugged in, `DTH30-<product ID>-<bus>-<ports>` ([`list`],
 //! [`dth30_usb::unit_name`]).
 
 use std::fmt::Write as _;

@@ -1,6 +1,6 @@
-//! The SONY SMT-MJ100 kit (DT-H30/U2 board 0xB3): demodulator 0x20 and a
-//! register-map tuner at 0xC0, written directly with a trailing 0xFE byte
-//! after the data (docs/26 4-tuning §4).
+//! The SONY SMT-MJ100 kit (board 0xB3 of the DT-H30/U2 and DT-H45/U2):
+//! demodulator 0x20 and a register-map tuner at 0xC0, written directly with
+//! a trailing 0xFE byte after the data (docs/26 4-tuning §4).
 //!
 //! The tuner has a fractional-N PLL on a 16 MHz reference (VCO = f·2^m in
 //! 450–900 MHz: 7-bit integer, 18-bit fraction), a second synthesiser at
@@ -10,11 +10,11 @@
 //! [`tune_regs`] does the same (the float rounding of the frequency shows
 //! in the PLL fraction).
 //!
-//! Checked on hardware with a DT-H30/U2 (PID 0x0128, board 0xB3): UHF
-//! channels tune and lock (C/N about 29 dB) and the TS is error-free. The
-//! worked examples in the tests come from re-deriving the formulas (docs/26
-//! `tune_ref.py`), not from vendor output; VHF and the attenuator are
-//! unverified.
+//! Checked on hardware with a DT-H30/U2 and a DT-H45/U2 (both PID 0x0128,
+//! board 0xB3): UHF channels tune and lock (C/N 27–31 dB) and the TS is
+//! error-free. The worked examples in the tests come from re-deriving the
+//! formulas (docs/26 `tune_ref.py`), not from vendor output; VHF and the
+//! attenuator are unverified.
 
 use crate::Result;
 
