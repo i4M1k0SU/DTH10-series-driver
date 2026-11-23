@@ -16,6 +16,8 @@ pub use tuner::{Lj101Tuner, PllWords, pll_words};
 
 use std::thread::sleep;
 
+use dth_common::stream::Lnb;
+
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
 use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TsPins};
@@ -158,9 +160,9 @@ impl<T: UsbControl> Lj101Kit<T> {
     /// vendor driver. Returns whether the bridge reported the supply as healthy
     /// (`false` = switched off again by the over-current check, see
     /// `device::lnb_set`). The booster is a separate switch ([`set_booster`](Self::set_booster)).
-    pub fn lnb_power(&mut self, volt: u32) -> Result<bool> {
+    pub fn lnb_power(&mut self, lnb: Lnb) -> Result<bool> {
         if let Some(gpio) = device::LnbGpio::of(&self.desc) {
-            return device::lnb_set(&self.dev, gpio, volt);
+            return device::lnb_set(&self.dev, gpio, lnb);
         }
         Ok(true)
     }
@@ -226,13 +228,13 @@ mod tests {
     fn lnb_power_does_not_touch_the_booster() {
         // another model: no effect at all
         let mut k = kit("", &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0x0A)]);
-        assert!(k.lnb_power(150).unwrap());
-        assert!(k.lnb_power(0).unwrap());
+        assert!(k.lnb_power(Lnb::V15).unwrap());
+        assert!(k.lnb_power(Lnb::Off).unwrap());
         assert_eq!(k.dev.transport().take(), vec![]);
         // models "h70" / "h70b": the bridge GPIO only, no I2C
         for model in ["h70", "h70b"] {
             let mut k = kit(model, &[(0x18, 0x0F, 0x34), (0x19, 0x1C, 0x0A)]);
-            let _ = k.lnb_power(150).unwrap();
+            let _ = k.lnb_power(Lnb::V15).unwrap();
             let ops = k.dev.transport().take();
             assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, Op::Other)), "{model}: {ops:?}");
             assert_eq!(k.dev.transport().reg(0x19, 0x1C), 0x0A);

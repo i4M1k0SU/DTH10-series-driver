@@ -23,6 +23,8 @@ pub use tuner::{SatPll, SatTuner, TerTuner, sat_pll, ter_pll_bytes};
 
 use std::thread::sleep;
 
+use dth_common::stream::Lnb;
+
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
 use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TsPins, TuneRequest};
@@ -288,9 +290,9 @@ impl<T: UsbControl> Sharp8011SatKit<T> {
 
     /// Antenna (LNB) power, as with the SMT_LJ101 hw 0x402 kit: the bridge
     /// GPIO supply of the models that switch it there, no effect on others.
-    pub fn lnb_power(&mut self, volt: u32) -> Result<bool> {
+    pub fn lnb_power(&mut self, lnb: Lnb) -> Result<bool> {
         if let Some(gpio) = device::LnbGpio::of(&self.desc) {
-            return device::lnb_set(&self.dev, gpio, volt);
+            return device::lnb_set(&self.dev, gpio, lnb);
         }
         Ok(true)
     }
@@ -475,12 +477,12 @@ mod tests {
     #[test]
     fn satellite_lnb_power_follows_the_model() {
         let mut k = Sharp8011SatKit::new(Device::new(RegMock::default()), desc(0x402, 0)).unwrap();
-        assert!(k.lnb_power(150).unwrap());
+        assert!(k.lnb_power(Lnb::V15).unwrap());
         assert_eq!(k.dev.transport().take(), vec![]);
         let mut d = desc(0x402, 0);
         d.model = "h70".into();
         let mut k = Sharp8011SatKit::new(Device::new(RegMock::default()), d).unwrap();
-        let _ = k.lnb_power(150).unwrap();
+        let _ = k.lnb_power(Lnb::V15).unwrap();
         let ops = k.dev.transport().take();
         assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, Op::Other)), "{ops:?}");
     }

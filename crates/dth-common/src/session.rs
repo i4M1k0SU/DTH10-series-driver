@@ -18,7 +18,7 @@ pub trait Session: Send {
     fn set_stream_mode(&mut self, mode: StreamModeCfg);
     fn set_device_program(&mut self, program: DeviceProgram);
     /// Antenna supply for BS/CS (units without one ignore it).
-    fn set_lnb(&mut self, _volt: u32) {}
+    fn set_lnb(&mut self, _lnb: crate::stream::Lnb) {}
     fn set_attenuator(&mut self, _on: bool) {}
     fn set_booster(&mut self, _on: bool) {}
     fn set_lock_wait_ms(&mut self, system: System, ms: u64);

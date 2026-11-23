@@ -20,8 +20,8 @@ pub struct Channel {
     /// ISDB-S: the transport stream ID to select when `slot` is `None` or the
     /// TMCC table has no usable entry for it (ARIB numbering, e.g. 0x4010).
     pub tsid: u16,
-    /// LNB voltage request for BS/CS (0 = backend default).
-    pub lnb_volt: u32,
+    /// LNB supply request for BS/CS (`None` = the backend's setting).
+    pub lnb_volt: Option<crate::stream::Lnb>,
     /// ISDB-S: relative TS number within the transponder (index into the TMCC
     /// TS-ID table), when the channel is named that way.
     pub slot: Option<u8>,
@@ -125,14 +125,21 @@ impl Channel {
             system: System::IsdbT,
             frequency_hz: f,
             tsid: 0,
-            lnb_volt: 0,
+            lnb_volt: None,
             slot: None,
         })
     }
 
     /// ISDB-T at an arbitrary centre frequency.
     pub fn terrestrial_hz(hz: u32) -> Channel {
-        Channel { name: format!("{hz} Hz"), system: System::IsdbT, frequency_hz: hz, tsid: 0, lnb_volt: 0, slot: None }
+        Channel {
+            name: format!("{hz} Hz"),
+            system: System::IsdbT,
+            frequency_hz: hz,
+            tsid: 0,
+            lnb_volt: None,
+            slot: None,
+        }
     }
 
     /// BS transponder (odd 1..23) and relative TS number.
@@ -143,7 +150,7 @@ impl Channel {
             system: System::IsdbS,
             frequency_hz: f,
             tsid: arib_tsid(true, transponder, slot),
-            lnb_volt: 0,
+            lnb_volt: None,
             slot: Some(slot),
         })
     }
@@ -156,7 +163,7 @@ impl Channel {
             system: System::IsdbS,
             frequency_hz: f,
             tsid: arib_tsid(false, transponder, slot),
-            lnb_volt: 0,
+            lnb_volt: None,
             slot: Some(slot),
         })
     }
@@ -172,7 +179,7 @@ impl Channel {
             system: System::IsdbS,
             frequency_hz: if_hz,
             tsid: tsid.unwrap_or(0),
-            lnb_volt: 0,
+            lnb_volt: None,
             slot: if tsid.is_none() { Some(0) } else { None },
         }
     }

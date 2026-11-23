@@ -41,8 +41,7 @@
 use std::path::{Path, PathBuf};
 
 use dth_common::stream::{
-    DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, DeviceProgram, LNB_11V, LNB_15V, LNB_OFF, StreamModeCfg,
-    parse_num,
+    DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, DeviceProgram, Lnb, StreamModeCfg, parse_num,
 };
 use dth_proto::proto::TunerChoice;
 
@@ -71,7 +70,7 @@ pub struct Tuning {
     /// `[ISDB-T] Attenuator`
     pub attenuator: bool,
     /// `[ISDB-S] LnbVoltage`: 0, 110 or 150 (x 0.1 V)
-    pub lnb_voltage: u32,
+    pub lnb_voltage: Lnb,
     /// `[ISDB-S] LnbPower`
     pub lnb_power: bool,
     /// `[ISDB-S] Booster`
@@ -91,7 +90,7 @@ impl Default for Tuning {
             app_keys: None,
             ter_lock_wait_ms: DEFAULT_TER_LOCK_WAIT_MS,
             attenuator: false,
-            lnb_voltage: LNB_15V,
+            lnb_voltage: Lnb::V15,
             lnb_power: false,
             booster: false,
             sat_lock_wait_ms: DEFAULT_SAT_LOCK_WAIT_MS,
@@ -264,11 +263,11 @@ impl Config {
         t.ter_lock_wait_ms = f.u64("ISDB-T", "LockWaitMs", t.ter_lock_wait_ms);
         t.attenuator = f.bool("ISDB-T", "Attenuator", t.attenuator);
         // Volts (11, 15) are taken as well as tenths of a volt.
-        t.lnb_voltage = match f.u64("ISDB-S", "LnbVoltage", t.lnb_voltage as u64) {
-            0 => LNB_OFF,
-            11 | 110 => LNB_11V,
-            15 | 150 => LNB_15V,
-            _ => LNB_15V,
+        t.lnb_voltage = match f.u64("ISDB-S", "LnbVoltage", u64::from(t.lnb_voltage.tenths())) {
+            0 => Lnb::Off,
+            11 | 110 => Lnb::V11,
+            15 | 150 => Lnb::V15,
+            _ => Lnb::V15,
         };
         t.lnb_power = f.bool("ISDB-S", "LnbPower", t.lnb_power);
         t.booster = f.bool("ISDB-S", "Booster", t.booster);
@@ -323,7 +322,7 @@ mod tests {
         );
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")));
         assert_eq!((t.ter_lock_wait_ms, t.sat_lock_wait_ms), (1200, 1500));
-        assert_eq!((t.lnb_voltage, t.lnb_power), (150, false));
+        assert_eq!((t.lnb_voltage, t.lnb_power), (Lnb::V15, false));
         assert_eq!((t.attenuator, t.booster), (false, false));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (5, 5));
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("warn", ""));
@@ -410,7 +409,7 @@ mod tests {
         assert_eq!((t.stream_mode, t.device_program), (StreamModeCfg::Raw, DeviceProgram::Id(0x400)));
         assert_eq!(t.app_keys, Some(dir.join("CoBDACom.dll")));
         assert_eq!((t.ter_lock_wait_ms, t.sat_lock_wait_ms), (2000, 2500));
-        assert_eq!((t.lnb_voltage, t.lnb_power), (110, true));
+        assert_eq!((t.lnb_voltage, t.lnb_power), (Lnb::V11, true));
         assert_eq!((t.attenuator, t.booster), (true, true));
         assert_eq!((c.log_level.as_str(), c.log_file.as_str()), ("debug", "C:\\logs\\bon.log"));
         assert_eq!((c.server.idle_exit_secs, c.server.start_timeout_secs), (9, 7));
@@ -458,10 +457,10 @@ mod tests {
         {
             let ini = format!("[ISDB-S]\r\nLnbVoltage={value}\r\n");
             let (c, _) = load_with(&format!("lnb-voltage-{index}"), Some(&ini));
-            assert_eq!(c.tuner.lnb_voltage, expected, "LnbVoltage={value}");
+            assert_eq!(c.tuner.lnb_voltage.tenths(), expected, "LnbVoltage={value}");
         }
         let (c, _) = load_with("lnb-voltage-missing", Some("[ISDB-S]\r\nLnbPower=1\r\n"));
-        assert_eq!(c.tuner.lnb_voltage, 150);
+        assert_eq!(c.tuner.lnb_voltage, Lnb::V15);
     }
 
     /// An ini of an older version that still has retired keys (with values

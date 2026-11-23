@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Args;
-use dth_common::stream::{DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, MAX_READ_DEPTH, default_read_depth};
+use dth_common::stream::{DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, Lnb, MAX_READ_DEPTH, default_read_depth};
 use dth_common::{
     Backend, DeviceProgram, LockExt, Request as UnitRequest, Session, StreamModeCfg, System, TsQueue, default_tuner,
 };
@@ -113,7 +113,7 @@ pub struct ServeArgs {
 
 /// What a request that does not say gets: the daemon's options.
 struct Defaults {
-    lnb_voltage: u32,
+    lnb_voltage: Lnb,
     lnb_power: bool,
     attenuator: bool,
     booster: bool,
@@ -507,9 +507,9 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
             // values do not stay behind for the next.
             let d = &unit.defaults;
             t.set_lnb(match req.lnb {
-                Some(v) => lnb_of(v).0,
+                Some(lnb) => lnb,
                 None if d.lnb_power => d.lnb_voltage,
-                None => 0,
+                None => Lnb::Off,
             });
             t.set_attenuator(req.attenuator.unwrap_or(d.attenuator));
             t.set_booster(req.booster.unwrap_or(d.booster));

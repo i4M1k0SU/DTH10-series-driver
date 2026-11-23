@@ -22,6 +22,8 @@
 use std::thread::sleep;
 
 use super::mtv600::Mtv600;
+use dth_common::stream::Lnb;
+
 use crate::device::{self, Device};
 use crate::error::{Error, Result};
 use crate::kit::{SAT_PLL_SETTLE, SAT_RESTART_SETTLE, SignalStatus, TsPins, VendorDriver};
@@ -300,9 +302,9 @@ impl<T: UsbControl> Tc9052xSatKit<T> {
 
     /// Antenna (LNB) power: the bridge GPIO supply of the models that switch
     /// it there, no effect on others (both drivers hand it to the bridge).
-    pub fn lnb_power(&mut self, volt: u32) -> Result<bool> {
+    pub fn lnb_power(&mut self, lnb: Lnb) -> Result<bool> {
         if let Some(gpio) = device::LnbGpio::of(&self.desc) {
-            return device::lnb_set(&self.dev, gpio, volt);
+            return device::lnb_set(&self.dev, gpio, lnb);
         }
         Ok(true)
     }
@@ -582,12 +584,12 @@ mod tests {
     #[test]
     fn lnb_power_follows_the_model() {
         let mut k = kit(VendorDriver::Series, 0);
-        assert!(k.lnb_power(150).unwrap());
+        assert!(k.lnb_power(Lnb::V15).unwrap());
         assert_eq!(k.dev.transport().take(), vec![]);
         let mut d = desc("TC90522_MTV600", 0x402, 0);
         d.model = "h70b".into();
         let mut k = Tc9052xSatKit::new(Device::new(RegMock::default()), d, VendorDriver::Dth30).unwrap();
-        let _ = k.lnb_power(110).unwrap();
+        let _ = k.lnb_power(Lnb::V11).unwrap();
         let ops = k.dev.transport().take();
         assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, Op::Other)), "{ops:?}");
     }

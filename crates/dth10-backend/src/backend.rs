@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use dth_common::stream::Lnb;
 use dth_common::{
     Backend, Channel, DeviceProgram, Error, LockExt, Request, Result, Session, StreamModeCfg, System, TsQueue, Unit,
 };
@@ -249,8 +250,8 @@ impl Session for Dth10Session {
     fn set_device_program(&mut self, program: DeviceProgram) {
         self.tuner.set_device_program(program)
     }
-    fn set_lnb(&mut self, volt: u32) {
-        self.tuner.set_lnb(volt)
+    fn set_lnb(&mut self, lnb: Lnb) {
+        self.tuner.set_lnb(lnb)
     }
     fn set_attenuator(&mut self, on: bool) {
         self.tuner.set_attenuator(on)

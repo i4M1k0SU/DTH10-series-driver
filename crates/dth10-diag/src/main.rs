@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dth_common::channels::{UHF_BANDWIDTH_HZ, UHF_FIRST, UHF_LAST, uhf_center_hz};
-use dth_common::stream::{LNB_11V, LNB_15V, LNB_OFF, parse_num};
+use dth_common::stream::{Lnb, parse_num};
 use dth_common::{Channel, System};
 use dth10_core::cepm;
 use dth10_core::device::FLAG_TUNER1;
@@ -282,8 +282,8 @@ struct TuneSatArgs {
     no_start: bool,
     /// Antenna (LNB) supply: 0 (off), 110 (11 V) or 150 (15 V). The DT-H70/U2 has no such supply
     /// (the setting is for family models that have one).
-    #[arg(long, value_name = "V", default_value_t = 0, value_parser = parse_lnb)]
-    lnb: u32,
+    #[arg(long, value_name = "V", default_value_t = Lnb::Off, value_parser = parse_lnb)]
+    lnb: Lnb,
     /// Switch the booster on before tuning (separate from --lnb).
     #[arg(long)]
     booster: bool,
@@ -341,13 +341,8 @@ fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
-fn parse_lnb(s: &str) -> Result<u32, String> {
-    match s.trim() {
-        "0" => Ok(LNB_OFF),
-        "110" => Ok(LNB_11V),
-        "150" => Ok(LNB_15V),
-        _ => Err("0, 110 or 150 expected".into()),
-    }
+fn parse_lnb(s: &str) -> Result<Lnb, String> {
+    s.trim().parse().ok().and_then(Lnb::from_tenths).ok_or_else(|| "0, 110 or 150 expected".into())
 }
 
 /// `tune`'s channel: a UHF channel name (13..62, `27ch`) or a frequency in Hz.
@@ -921,8 +916,8 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
     }
     kit.open()?;
     let r = sat_probe(&mut kit, &ch, a);
-    if a.lnb != 0
-        && let Err(e) = kit.lnb_power(0)
+    if a.lnb != Lnb::Off
+        && let Err(e) = kit.lnb_power(Lnb::Off)
     {
         log::warn!("LNB off: {e}");
     }
@@ -933,14 +928,15 @@ fn tune_sat(o: &Opener, a: &TuneSatArgs) -> Res {
 }
 
 fn sat_probe(kit: &mut SatelliteKit<UsbTransport>, ch: &Channel, a: &TuneSatArgs) -> Res {
-    if a.lnb != 0 {
+    if a.lnb != Lnb::Off {
         let healthy = kit.lnb_power(a.lnb)?;
         let st = kit.dev_ref().gpio_read()?;
         println!(
             "LNB {}: healthy={healthy} gpio status {:02x?} readback {:?}",
             a.lnb,
             &st[8..13],
-            dth10_core::device::LnbGpio::of(kit.desc()).map(|g| dth10_core::device::lnb_get(kit.dev_ref(), g))
+            dth10_core::device::LnbGpio::of(kit.desc())
+                .map(|g| dth10_core::device::lnb_get(kit.dev_ref(), g).map(Lnb::tenths))
         );
     }
     let applied = kit.set_booster(a.booster)?;
@@ -1227,7 +1223,7 @@ mod tests {
         assert!(parse_hex_bytes("abc").is_err());
         assert!(parse_hex_bytes("zz").is_err());
         assert!(parse_hex_bytes("éé").is_err());
-        assert_eq!(parse_lnb("150"), Ok(150));
+        assert_eq!(parse_lnb("150"), Ok(Lnb::V15));
         assert!(parse_lnb("15").is_err());
     }
 
@@ -1275,7 +1271,7 @@ mod tests {
     #[test]
     fn tune_sat_defaults_and_options() {
         let Cmd::TuneSat(a) = parse(&["tune-sat", "BS15"]).unwrap().cmd else { panic!("not tune-sat") };
-        assert_eq!((a.i2c_tuner, a.lnb, a.tsid, a.lock_wait), (0, 0, None, 1500));
+        assert_eq!((a.i2c_tuner, a.lnb, a.tsid, a.lock_wait), (0, Lnb::Off, None, 1500));
         let Cmd::TuneSat(a) = parse(&["tune-sat", "1613000000", "--tsid", "6020", "--i2c-tuner", "1"]).unwrap().cmd
         else {
             panic!("not tune-sat")

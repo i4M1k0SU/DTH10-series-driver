@@ -7,7 +7,7 @@
 use core::time::Duration;
 use std::thread::sleep;
 
-use dth_common::stream::{LNB_11V, LNB_15V, LNB_OFF};
+use dth_common::stream::Lnb;
 
 use crate::error::{Error, Result};
 use crate::protocol::{self, UsbControl, cmd};
@@ -393,15 +393,15 @@ impl LnbGpio {
 /// `volt` is 150 (15 V), 110 (11 V) or 0 (off). Returns `Ok(true)` when the
 /// bridge reported the supply as healthy (status bit set after 150 ms) and
 /// `Ok(false)` when it was switched off again because the status bit was clear.
-pub fn lnb_set<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio, volt: u32) -> Result<bool> {
-    let bits: u32 = match volt {
-        LNB_15V => gpio.all(),
-        LNB_11V => gpio.power,
-        _ => 0,
+pub fn lnb_set<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio, lnb: Lnb) -> Result<bool> {
+    let bits: u32 = match lnb {
+        Lnb::V15 => gpio.all(),
+        Lnb::V11 => gpio.power,
+        Lnb::Off => 0,
     };
     dev.gpio_write(gpio.all() & !bits, 0)?;
     dev.gpio_write(bits, bits)?;
-    if volt == LNB_OFF {
+    if lnb == Lnb::Off {
         return Ok(true);
     }
     sleep(LNB_SETTLE);
@@ -413,16 +413,16 @@ pub fn lnb_set<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio, volt: u32) -> Resu
     Ok(true)
 }
 
-/// Read back the LNB state from the bridge GPIO bits `gpio`: 0, 110 or 150.
-pub fn lnb_get<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio) -> Result<u32> {
+/// Read back the LNB state from the bridge GPIO bits `gpio`.
+pub fn lnb_get<T: UsbControl>(dev: &Device<T>, gpio: LnbGpio) -> Result<Lnb> {
     let st = dev.gpio_read()?;
     let v = u32::from_le_bytes(*st[GPIO_STATUS_OUTPUT..].first_chunk().unwrap());
     if v & gpio.power == 0 {
-        Ok(LNB_OFF)
+        Ok(Lnb::Off)
     } else if v & gpio.v15 != 0 {
-        Ok(LNB_15V)
+        Ok(Lnb::V15)
     } else {
-        Ok(LNB_11V)
+        Ok(Lnb::V11)
     }
 }
 
@@ -547,16 +547,16 @@ mod tests {
         for (m, power, v15) in [("h70", 0x20, 0x2000), ("h70b", 0x10000, 0x4000)] {
             let g = LnbGpio::of(&model(m)).unwrap();
             let dev = Device::new(Mock { input: gpio_status(0, true), ..Default::default() });
-            assert!(lnb_set(&dev, g, 150).unwrap(), "{m}");
+            assert!(lnb_set(&dev, g, Lnb::V15).unwrap(), "{m}");
             // nothing to clear first (a zero mask is not sent)
             assert_eq!(gpio_ops(&dev), vec![(power | v15, power | v15), READ], "{m} 15 V");
 
             let dev = Device::new(Mock { input: gpio_status(0, true), ..Default::default() });
-            assert!(lnb_set(&dev, g, 110).unwrap(), "{m}");
+            assert!(lnb_set(&dev, g, Lnb::V11).unwrap(), "{m}");
             assert_eq!(gpio_ops(&dev), vec![(v15, 0), (power, power), READ], "{m} 11 V");
 
             let dev = Device::new(Mock::default());
-            assert!(lnb_set(&dev, g, 0).unwrap(), "{m}");
+            assert!(lnb_set(&dev, g, Lnb::Off).unwrap(), "{m}");
             assert_eq!(gpio_ops(&dev), vec![(power | v15, 0)], "{m} off: no status check");
         }
     }
@@ -566,7 +566,7 @@ mod tests {
         for (m, all) in [("h70", 0x2020), ("h70b", 0x14000)] {
             let g = LnbGpio::of(&model(m)).unwrap();
             let dev = Device::new(Mock { input: gpio_status(all, false), ..Default::default() });
-            assert!(!lnb_set(&dev, g, 150).unwrap(), "{m}");
+            assert!(!lnb_set(&dev, g, Lnb::V15).unwrap(), "{m}");
             assert_eq!(gpio_ops(&dev), vec![(all, all), READ, (all, 0)], "{m}");
         }
     }
@@ -577,7 +577,13 @@ mod tests {
         let h70b = LnbGpio::of(&model("h70b")).unwrap();
         let get =
             |g, out| lnb_get(&Device::new(Mock { input: gpio_status(out, true), ..Default::default() }), g).unwrap();
-        assert_eq!([get(h70, 0x2020), get(h70, 0x20), get(h70, 0x2000), get(h70, 0x14000)], [150, 110, 0, 0]);
-        assert_eq!([get(h70b, 0x14000), get(h70b, 0x10000), get(h70b, 0x4000), get(h70b, 0x2020)], [150, 110, 0, 0]);
+        assert_eq!(
+            [get(h70, 0x2020), get(h70, 0x20), get(h70, 0x2000), get(h70, 0x14000)],
+            [Lnb::V15, Lnb::V11, Lnb::Off, Lnb::Off]
+        );
+        assert_eq!(
+            [get(h70b, 0x14000), get(h70b, 0x10000), get(h70b, 0x4000), get(h70b, 0x2020)],
+            [Lnb::V15, Lnb::V11, Lnb::Off, Lnb::Off]
+        );
     }
 }

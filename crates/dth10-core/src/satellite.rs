@@ -13,6 +13,8 @@
 //! (`dev`) is shared by all of them. A new kit goes into `Which` (the
 //! table above), the enum and the `each!` dispatch.
 
+use dth_common::stream::Lnb;
+
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::kit::SignalStatus;
@@ -146,8 +148,8 @@ impl<T: UsbControl> SatelliteKit<T> {
 
     /// Antenna (LNB) power (0 / 110 / 150 = off / 11 V / 15 V). Returns
     /// whether the bridge reported the supply as healthy.
-    pub fn lnb_power(&mut self, volt: u32) -> Result<bool> {
-        each!(self, k => k.lnb_power(volt))
+    pub fn lnb_power(&mut self, lnb: Lnb) -> Result<bool> {
+        each!(self, k => k.lnb_power(lnb))
     }
 
     /// The booster. `Ok(false)`: not switched.

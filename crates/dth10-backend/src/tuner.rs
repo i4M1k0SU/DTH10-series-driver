@@ -19,7 +19,7 @@ use dth10_usb::{EP_TS1, StreamReader, UsbTransport};
 
 use dth_common::channels::{Channel, System, default_tuner};
 use dth_common::queue::TsQueue;
-use dth_common::stream::{DeviceProgram, StreamModeCfg};
+use dth_common::stream::{DeviceProgram, Lnb, StreamModeCfg};
 use dth_common::ts::{NULL_PID, SYNC_BYTE, TS_PACKET};
 
 use crate::config::TunerConfig;
@@ -403,7 +403,7 @@ struct Satellite {
     stream_dev: Device<UsbTransport>,
     info: DeviceInformation,
     endpoint: u8,
-    lnb_volt: u32,
+    lnb: Lnb,
     /// The kit's `init` has run (at open; on first use when that failed).
     initialised: bool,
     /// The command path of the satellite kit's I2C and GPIO.
@@ -633,7 +633,7 @@ impl Tuner {
                                 stream_dev: Device::new(transport.clone()).with_tuner_index(cfg.sat_stream_path),
                                 info: info1,
                                 endpoint,
-                                lnb_volt: 0,
+                                lnb: Lnb::Off,
                                 initialised: false,
                                 i2c_path,
                             })
@@ -819,12 +819,12 @@ impl Tuner {
     }
 
     /// Change the antenna (LNB) supply for the following satellite tunes:
-    /// 0 = off, else the voltage (110 / 150). A running satellite stream keeps
-    /// its supply; the next satellite tune switches it.
-    pub fn set_lnb(&mut self, volt: u32) {
-        self.cfg.lnb_power = volt != 0;
-        if volt != 0 {
-            self.cfg.lnb_voltage = volt;
+    /// off, or on at the given voltage. A running satellite stream keeps its
+    /// supply; the next satellite tune switches it.
+    pub fn set_lnb(&mut self, lnb: Lnb) {
+        self.cfg.lnb_power = lnb != Lnb::Off;
+        if lnb != Lnb::Off {
+            self.cfg.lnb_voltage = lnb;
         }
     }
 
@@ -1034,9 +1034,9 @@ impl Tuner {
             {
                 log::warn!("satellite kit close: {e}");
             }
-            if sat.lnb_volt != 0 {
-                let _ = sat.kit.lnb_power(0);
-                sat.lnb_volt = 0;
+            if sat.lnb != Lnb::Off {
+                let _ = sat.kit.lnb_power(Lnb::Off);
+                sat.lnb = Lnb::Off;
             }
         }
         if let Some(ter1) = self.second.as_mut()
@@ -1317,13 +1317,13 @@ impl Tuner {
                 if self.cfg.exclusive {
                     let _ = self.terrestrial.close();
                 }
-                let lnb_volt = if self.cfg.lnb_power { self.cfg.lnb_voltage } else { 0 };
+                let lnb = if self.cfg.lnb_power { self.cfg.lnb_voltage } else { Lnb::Off };
                 let sat_wait = Duration::from_millis(self.cfg.sat_lock_wait_ms);
                 let lnb_was_cut = self.lnb_cut.swap(false, Ordering::Relaxed);
                 let sat = self.satellite.as_mut().ok_or(Error::Unsupported("no ISDB-S tuner on this device".into()))?;
                 if lnb_was_cut {
                     // switched off after an over-current report: on again below
-                    sat.lnb_volt = 0;
+                    sat.lnb = Lnb::Off;
                 }
                 let ep = sat.endpoint;
                 if !sat.initialised {
@@ -1335,11 +1335,11 @@ impl Tuner {
                 if !sat.kit.is_open() {
                     sat.kit.open()?;
                 }
-                if sat.lnb_volt != lnb_volt {
-                    if !sat.kit.lnb_power(lnb_volt)? {
+                if sat.lnb != lnb {
+                    if !sat.kit.lnb_power(lnb)? {
                         log::warn!("LNB supply reported unhealthy (over-current?), switched off");
                     }
-                    sat.lnb_volt = lnb_volt;
+                    sat.lnb = lnb;
                 }
                 // Like the vendor application, on every tune after the supply:
                 // the chip keeps it only until the next kit Init.

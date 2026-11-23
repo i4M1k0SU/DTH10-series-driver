@@ -37,9 +37,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dth_common::channels::UHF_BANDWIDTH_HZ;
-use dth_common::stream::{
-    DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, LNB_11V, LNB_15V, LNB_OFF, MAX_READ_DEPTH, default_read_depth,
-};
+use dth_common::stream::{DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, Lnb, MAX_READ_DEPTH, default_read_depth};
 use dth_common::ts::TS_PACKET;
 use dth_common::{
     Backend, Channel, DeviceProgram, Request, Session, StreamModeCfg, System, TsQueue, Unit, default_tuner,
@@ -452,14 +450,14 @@ pub(crate) fn tuner_of(tuner: Option<u8>, system: System) -> Result<usize, Strin
     }
 }
 
-/// The LNB option: (voltage, on).
-pub(crate) fn lnb_of(v: u32) -> (u32, bool) {
-    let volt = match v {
-        LNB_OFF => LNB_OFF,
-        v if v <= LNB_11V => LNB_11V,
-        _ => LNB_15V,
+/// The LNB option (0.1 V units, rounded up to the next supply): (supply, on).
+pub(crate) fn lnb_of(v: u32) -> (Lnb, bool) {
+    let lnb = match v {
+        0 => Lnb::Off,
+        v if v <= Lnb::V11.tenths() => Lnb::V11,
+        _ => Lnb::V15,
     };
-    (volt, v != LNB_OFF)
+    (lnb, lnb != Lnb::Off)
 }
 
 fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
@@ -615,9 +613,9 @@ mod tests {
 
     #[test]
     fn lnb_values() {
-        assert_eq!(lnb_of(0), (0, false));
-        assert_eq!(lnb_of(11), (110, true));
-        assert_eq!(lnb_of(150), (150, true));
+        assert_eq!(lnb_of(0), (Lnb::Off, false));
+        assert_eq!(lnb_of(11), (Lnb::V11, true));
+        assert_eq!(lnb_of(150), (Lnb::V15, true));
     }
 
     #[test]

@@ -44,6 +44,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dth_common::LockExt;
+use dth_common::stream::Lnb;
 use dth_common::ts::TS_PACKET;
 use dth_common::{Channel, DeviceProgram, StreamModeCfg, System, TsQueue};
 use dth_proto::ipc::{self, Conn, Target};
@@ -152,7 +153,7 @@ struct Inner {
     /// This DLL's `[ISDB-S] LnbPower` / `LnbVoltage` (0 = off), `[ISDB-T]
     /// Attenuator`, `[ISDB-S] Booster` and lock waits, sent with every stream
     /// request: they apply to this DLL's unit only, whichever DLL started the server.
-    lnb: u32,
+    lnb: Lnb,
     attenuator: bool,
     booster: bool,
     ter_lock_wait_ms: u64,
@@ -538,7 +539,7 @@ impl Client {
             unit: (!cfg.tuner.serial.is_empty()).then(|| cfg.tuner.serial.clone()),
             program: program_text(cfg.tuner.device_program),
             raw: cfg.tuner.stream_mode == StreamModeCfg::Raw,
-            lnb: if cfg.tuner.lnb_power { cfg.tuner.lnb_voltage } else { 0 },
+            lnb: if cfg.tuner.lnb_power { cfg.tuner.lnb_voltage } else { Lnb::Off },
             attenuator: cfg.tuner.attenuator,
             booster: cfg.tuner.booster,
             ter_lock_wait_ms: cfg.tuner.ter_lock_wait_ms,
@@ -777,7 +778,7 @@ mod tests {
         // (request kind, unit, client id) of every request the fake server got
         type Seen = Arc<Mutex<Vec<(&'static str, Option<String>, Option<String>)>>>;
         let seen: Seen = Arc::default();
-        type Lnbs = Arc<Mutex<Vec<(Option<String>, Option<u32>, Option<u64>, Option<bool>, Option<bool>)>>>;
+        type Lnbs = Arc<Mutex<Vec<(Option<String>, Option<Lnb>, Option<u64>, Option<bool>, Option<bool>)>>>;
         let lnbs: Lnbs = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
         let server = {
@@ -851,8 +852,8 @@ mod tests {
         );
         // each DLL's own LNB, switches and lock wait went with its own requests
         let lnbs = lnbs.locked();
-        assert_eq!(lnbs[0], (Some("SN-A".into()), Some(0), Some(1500), Some(false), Some(false)));
-        assert_eq!(lnbs[1], (Some("SN-B".into()), Some(150), Some(2500), Some(false), Some(true)));
+        assert_eq!(lnbs[0], (Some("SN-A".into()), Some(Lnb::Off), Some(1500), Some(false), Some(false)));
+        assert_eq!(lnbs[1], (Some("SN-B".into()), Some(Lnb::V15), Some(2500), Some(false), Some(true)));
     }
 
     /// A unit with two terrestrial tuners: the DLL's `[Device] Tuner` goes with
