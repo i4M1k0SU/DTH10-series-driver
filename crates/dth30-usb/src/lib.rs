@@ -337,7 +337,7 @@ pub struct Found {
 impl Found {
     /// The product name (or the product ID for an unknown one).
     pub fn product_label(&self) -> String {
-        model::product_label(self.product_id)
+        model::product_label(self.vendor_id, self.product_id)
     }
 
     /// Open this device and claim interface 0.
@@ -360,6 +360,7 @@ pub struct Net2280Usb {
     device: nusb::Device,
     ifaces: Vec<Interface>,
     serial: Option<String>,
+    vendor_id: u16,
     product_id: u16,
     endpoints: Vec<EndpointInfo>,
     timeout: Duration,
@@ -486,7 +487,10 @@ impl Net2280Usb {
         {
             log::debug!("set_configuration({wanted}): {e}");
         }
-        let product_id = device.device_descriptor().product_id();
+        let (vendor_id, product_id) = {
+            let d = device.device_descriptor();
+            (d.vendor_id(), d.product_id())
+        };
         // Detaching is a no-op on Windows; on Linux it frees an interface from
         // a kernel driver that may have bound to it.
         let numbers: Vec<u8> = match device.active_configuration() {
@@ -534,6 +538,7 @@ impl Net2280Usb {
             device,
             ifaces,
             serial,
+            vendor_id,
             product_id,
             endpoints,
             timeout: REGISTER_TIMEOUT,
@@ -562,9 +567,15 @@ impl Net2280Usb {
         self.product_id
     }
 
-    /// The product name (or the product ID for an unknown one).
+    /// The device's USB vendor and product ID (the kit on board 0xB2
+    /// depends on them, [`model::kit_for_board`]).
+    pub fn usb_id(&self) -> (u16, u16) {
+        (self.vendor_id, self.product_id)
+    }
+
+    /// The product name (or the IDs for an unknown one).
     pub fn product_label(&self) -> String {
-        model::product_label(self.product_id)
+        model::product_label(self.vendor_id, self.product_id)
     }
 
     /// The endpoints of every claimed interface (alternate setting 0).
@@ -960,6 +971,7 @@ mod tests {
         }
         assert!(!model::is_supported(0x0411, 0x0199));
         assert!(!model::is_supported(0x0525, 0x0128));
+        assert!(model::is_supported(0xEEEE, 0xEEEE));
     }
 
     #[test]

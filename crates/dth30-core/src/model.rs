@@ -1,7 +1,8 @@
 //! The products of the family and how a board maps to a front-end kit.
 //!
-//! The USB product ID names the product; which tuner board it carries is
-//! only known from the ViXS board-ID register (see [`crate::vixs`]).
+//! The USB vendor and product IDs name the product; which tuner board it
+//! carries is only known from the ViXS board-ID register (see
+//! [`crate::vixs`]).
 
 /// BUFFALO's USB vendor ID.
 pub const VENDOR_ID: u16 = 0x0411;
@@ -14,21 +15,33 @@ pub const VENDOR_ID: u16 = 0x0411;
 pub const PRODUCTS: &[(u16, &str)] =
     &[(0x0128, "DT-H30/U2"), (0x0129, "DT-H50/U2"), (0x012A, "DT-H50/U2W"), (0x0144, "DT-H30/U2")];
 
+/// The USB vendor and product IDs of a unit whose NET2280 EEPROM is left
+/// unprogrammed (inferred). The vendor INF binds it too
+/// (`USB\VID_EEEE&PID_EEEE`, named a DT-H30/U2), and the vendor's model
+/// table gives board 0xB2 with these IDs the MJ102 kit ([`kit_for_board`]).
+pub const BLANK_USB_ID: (u16, u16) = (0xEEEE, 0xEEEE);
+
 /// Whether `vid:pid` is a product of this family.
 pub fn is_supported(vid: u16, pid: u16) -> bool {
-    vid == VENDOR_ID && PRODUCTS.iter().any(|&(p, _)| p == pid)
+    product_name(vid, pid).is_some()
 }
 
-/// The product name of a USB product ID of this family.
-pub fn product_name(pid: u16) -> Option<&'static str> {
+/// The product name of a USB vendor and product ID of this family.
+pub fn product_name(vid: u16, pid: u16) -> Option<&'static str> {
+    if (vid, pid) == BLANK_USB_ID {
+        return Some("DT-H30/U2");
+    }
+    if vid != VENDOR_ID {
+        return None;
+    }
     PRODUCTS.iter().find(|&&(p, _)| p == pid).map(|&(_, n)| n)
 }
 
-/// The product name, or the ID in hex for an unknown one.
-pub fn product_label(pid: u16) -> String {
-    match product_name(pid) {
+/// The product name, or the IDs in hex for an unknown one.
+pub fn product_label(vid: u16, pid: u16) -> String {
+    match product_name(vid, pid) {
         Some(n) => n.to_owned(),
-        None => format!("unknown product {pid:04x}"),
+        None => format!("unknown product {vid:04x}:{pid:04x}"),
     }
 }
 
@@ -97,25 +110,26 @@ impl KitKind {
     }
 }
 
-/// The subsystem IDs that select the MJ102 kit on board 0xB2.
-pub const SUBSYSTEM_MJ102: (u16, u16) = (0xEEEE, 0xEEEE);
-
-/// The kit on a board, from the board ID ([`board_id`]) and the two
-/// subsystem ID words the board-info command reports (only board 0xB2 looks
-/// at them: [`SUBSYSTEM_MJ102`] selects the MJ102 kit, anything else the
-/// MJ110 kit). `None` for a board the vendor's model table does not list.
+/// The kit on a board, from the board ID ([`board_id`]) and the unit's USB
+/// vendor and product IDs (`usb_id`). Only board 0xB2 looks at the IDs:
+/// [`BLANK_USB_ID`] selects the MJ102 kit, anything else the MJ110 kit.
+/// `None` for a board the vendor's model table does not list.
+///
+/// The vendor's filter gets the IDs from the kernel driver, which takes them
+/// from the USB device descriptor, along with the board ID, and matches them
+/// against the two ID columns of its model table (docs/26 4-tuning §2.1).
 ///
 /// This follows the user-mode filter's model table (docs/26 4-tuning §0,
 /// §2.1). The kernel driver's own board table (3-ioctl-frontend §3.2, see
 /// [`board_class`]) differs in two places, and the user-mode table wins for
-/// the kit choice since it is the one that tunes: board 0xB2 without the
-/// MJ102 subsystem is an MJ110 kit (demodulator 0x30, tuner 0xC6) although
+/// the kit choice since it is the one that tunes: board 0xB2 without
+/// [`BLANK_USB_ID`] is an MJ110 kit (demodulator 0x30, tuner 0xC6) although
 /// the kernel files it under MJ102, and the kernel's "anything else is
 /// TOSHIBA" fallback is not applied.
-pub fn kit_for_board(board_id: u8, subsystem: (u16, u16)) -> Option<KitKind> {
+pub fn kit_for_board(board_id: u8, usb_id: (u16, u16)) -> Option<KitKind> {
     match board_id {
         0xA2 | 0xA3 | 0xB3 | 0xBE => Some(KitKind::Mj100),
-        0xB2 if subsystem == SUBSYSTEM_MJ102 => Some(KitKind::Mj102),
+        0xB2 if usb_id == BLANK_USB_ID => Some(KitKind::Mj102),
         0xB5 | 0xBF | 0xC1 => Some(KitKind::Mj102),
         0xB2 | 0xC6 => Some(KitKind::Mj110),
         0xB4 | 0xB7 | 0xB8 | 0xBA | 0xBB | 0xBC => Some(KitKind::Toshiba),
@@ -178,8 +192,12 @@ mod tests {
         assert!(is_supported(0x0411, 0x0129));
         assert!(!is_supported(0x0411, 0x0199));
         assert!(!is_supported(0x0525, 0x0128));
-        assert_eq!(product_name(0x0144), Some("DT-H30/U2"));
-        assert_eq!(product_label(0x1234), "unknown product 1234");
+        assert!(is_supported(0xEEEE, 0xEEEE));
+        assert!(!is_supported(0x0411, 0xEEEE));
+        assert!(!is_supported(0xEEEE, 0x0128));
+        assert_eq!(product_name(0x0411, 0x0144), Some("DT-H30/U2"));
+        assert_eq!(product_name(0xEEEE, 0xEEEE), Some("DT-H30/U2"));
+        assert_eq!(product_label(0x0411, 0x1234), "unknown product 0411:1234");
     }
 
     #[test]
@@ -192,13 +210,14 @@ mod tests {
 
     #[test]
     fn kits_by_board() {
-        const ANY: (u16, u16) = (0x1234, 0x5678);
+        const ANY: (u16, u16) = (0x0411, 0x0128);
         assert_eq!(kit_for_board(0xB3, ANY), Some(KitKind::Mj100));
-        assert_eq!(kit_for_board(0xB2, SUBSYSTEM_MJ102), Some(KitKind::Mj102));
+        assert_eq!(kit_for_board(0xB3, BLANK_USB_ID), Some(KitKind::Mj100));
+        assert_eq!(kit_for_board(0xB2, BLANK_USB_ID), Some(KitKind::Mj102));
         assert_eq!(kit_for_board(0xB2, ANY), Some(KitKind::Mj110));
-        assert_eq!(kit_for_board(0xB2, (0xEEEE, 0)), Some(KitKind::Mj110));
+        assert_eq!(kit_for_board(0xB2, (0xEEEE, 0x0128)), Some(KitKind::Mj110));
         assert_eq!(kit_for_board(0xB4, ANY), Some(KitKind::Toshiba));
-        assert_eq!(kit_for_board(0xB4, SUBSYSTEM_MJ102), Some(KitKind::Toshiba));
+        assert_eq!(kit_for_board(0xB4, BLANK_USB_ID), Some(KitKind::Toshiba));
         assert_eq!(kit_for_board(0xC6, ANY), Some(KitKind::Mj110));
         for id in [0xA2, 0xA3, 0xBE] {
             assert_eq!(kit_for_board(id, ANY), Some(KitKind::Mj100));

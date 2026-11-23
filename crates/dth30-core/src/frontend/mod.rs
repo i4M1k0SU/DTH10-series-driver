@@ -121,8 +121,8 @@ impl<B: Bus> Frontend<B> {
     }
 
     /// The front end of a board ([`crate::model::kit_for_board`]).
-    pub fn for_board(bus: B, board_id: u8, subsystem: (u16, u16)) -> Result<Self> {
-        match kit_for_board(board_id, subsystem) {
+    pub fn for_board(bus: B, board_id: u8, usb_id: (u16, u16)) -> Result<Self> {
+        match kit_for_board(board_id, usb_id) {
             Some(kind) => Ok(Self::new(bus, kind)),
             None => Err(Error::Unsupported(format!("board ID {board_id:#04x}"))),
         }

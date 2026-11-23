@@ -83,14 +83,14 @@ pub struct UnitInfo {
 /// touched: opening it fails while another program holds it).
 pub fn probe(found: &Found) -> Result<UnitInfo> {
     let t = found.open()?;
-    let pid = t.product_id();
+    let usb_id = t.usb_id();
     let endpoints = t
         .endpoints()
         .iter()
         .map(|e| (e.interface, e.address, format!("{:?}", e.transfer_type), e.max_packet_size))
         .collect::<Vec<_>>();
     let pipes: Vec<u8> = endpoints.iter().map(|e| e.1).collect();
-    let dev = Dth30::open(t, pid, &pipes, Options::default(), DevConfig::default())?;
+    let dev = Dth30::open(t, usb_id, &pipes, Options::default(), DevConfig::default())?;
     Ok(UnitInfo { endpoints, board_id: dev.board_id(), kit: dev.kit().name() })
 }
 
@@ -216,9 +216,9 @@ impl Dth30Tuner {
             .map(|(_, f)| f)
             .ok_or_else(|| Error::Usb(format!("no DTH30 series unit {name}")))?;
         let t = found.open()?;
-        let pid = t.product_id();
+        let usb_id = t.usb_id();
         let pipes: Vec<u8> = t.endpoints().iter().map(|e| e.address).collect();
-        let mut dev = Dth30::open(t, pid, &pipes, Options::default(), DevConfig::default())?;
+        let mut dev = Dth30::open(t, usb_id, &pipes, Options::default(), DevConfig::default())?;
         dev.bring_up(fw)?;
         log::info!(
             "unit {name}: {} board 0x{:02x}, {} front end",

@@ -49,12 +49,6 @@ pub const DUAL_SELECT_GPIO: u32 = 0x4;
 /// Device settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
-    /// The two subsystem ID words the vendor's filter reads with the board
-    /// information; only board 0xB2 uses them to pick its kit
-    /// ([`model::kit_for_board`]). Where they come from on this hardware is
-    /// not known (docs/26 4-tuning.md §2.1), so they are given here; `None`
-    /// counts as "other" (the MJ110 kit on board 0xB2).
-    pub subsystem: Option<(u16, u16)>,
     /// The CAS set-up used by [`Dth30::open_cas`] and
     /// [`Dth30::open_program`].
     pub cas_mode: CasMode,
@@ -67,7 +61,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { subsystem: None, cas_mode: CasMode::default(), ts_port: 0, i2c_channel: 0, i2c_khz: FRONTEND_KHZ }
+        Self { cas_mode: CasMode::default(), ts_port: 0, i2c_channel: 0, i2c_khz: FRONTEND_KHZ }
     }
 }
 
@@ -139,21 +133,20 @@ pub struct Dth30<B: RemotePci> {
 
 impl<B: RemotePci> Dth30<B> {
     /// Bring up the NET2280, read the board ID and pick the kit
-    /// ([`Vixs::open`]); nothing else is started.
-    pub fn open(bus: B, pid: u16, pipes: &[u8], opts: vixs::Options, cfg: Config) -> Result<Self> {
-        Self::new(Vixs::open(bus, pid, pipes, opts)?, cfg)
+    /// ([`Vixs::open`]); nothing else is started. `usb_id` is the device's
+    /// USB vendor and product ID.
+    pub fn open(bus: B, usb_id: (u16, u16), pipes: &[u8], opts: vixs::Options, cfg: Config) -> Result<Self> {
+        Self::new(Vixs::open(bus, usb_id.1, pipes, opts)?, usb_id, cfg)
     }
 
-    /// The device around an opened (or already brought-up) chip; fails for
-    /// a board without a known kit.
-    pub fn new(vixs: Vixs<B>, cfg: Config) -> Result<Self> {
+    /// The device around an opened (or already brought-up) chip, whose USB
+    /// vendor and product ID are `usb_id` (they pick the kit on board 0xB2,
+    /// [`model::kit_for_board`]); fails for a board without a known kit.
+    pub fn new(vixs: Vixs<B>, usb_id: (u16, u16), cfg: Config) -> Result<Self> {
         let board_id = vixs.board_id();
         let board = model::board_id(board_id);
-        if board == 0xB2 && cfg.subsystem.is_none() {
-            log::warn!("board 0xB2 without subsystem IDs: assuming the MJ110 kit");
-        }
-        let kit = model::kit_for_board(board, cfg.subsystem.unwrap_or((0, 0)))
-            .ok_or_else(|| Error::Unsupported(format!("board ID {board:#04x}")))?;
+        let kit =
+            model::kit_for_board(board, usb_id).ok_or_else(|| Error::Unsupported(format!("board ID {board:#04x}")))?;
         log::info!("board {board:#04x}: {} front end", kit.name());
         let bus = FeBus { vixs, channel: cfg.i2c_channel, khz: cfg.i2c_khz };
         Ok(Self { fe: Frontend::new(bus, kit), board_id, kit, cfg, cas: None, raw: None, program: None })
@@ -437,7 +430,7 @@ mod tests {
         v.alive = true;
         v.bus().set(Space::Mem, MMR + 0x1094, 0xC0);
         v.bus().set(Space::Mem, MMR + 0x1090, 0x60);
-        Dth30::new(v, cfg).unwrap()
+        Dth30::new(v, (0x0411, 0x0128), cfg).unwrap()
     }
 
     fn bus(d: &mut Dth30<MockPci>) -> &MockPci {
@@ -456,12 +449,12 @@ mod tests {
     fn kit_selection() {
         assert_eq!(device(0xB4, Config::default()).kit(), KitKind::Toshiba);
         assert_eq!(device(0xB2, Config::default()).kit(), KitKind::Mj110);
-        let cfg = Config { subsystem: Some(model::SUBSYSTEM_MJ102), ..Config::default() };
-        let d = device(0xB2, cfg);
+        let v = Vixs::with_chip(chip(0x0300_00B2), layout(), opts(Completion::Poll));
+        let d = Dth30::new(v, model::BLANK_USB_ID, Config::default()).unwrap();
         assert_eq!((d.kit(), d.board(), d.board_id()), (KitKind::Mj102, 0xB2, 0x0300_00B2));
         assert_eq!(d.config().i2c_khz, 400);
         let v = Vixs::with_chip(chip(0x0300_0012), layout(), opts(Completion::Poll));
-        std::assert_matches!(Dth30::new(v, Config::default()).err(), Some(Error::Unsupported(_)));
+        std::assert_matches!(Dth30::new(v, (0x0411, 0x0128), Config::default()).err(), Some(Error::Unsupported(_)));
     }
 
     #[test]
