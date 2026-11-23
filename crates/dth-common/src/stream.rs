@@ -40,6 +40,25 @@ impl DeviceProgram {
     }
 }
 
+/// Default of the ISDB-T lock wait (`[ISDB-T] LockWaitMs`, `--ter-lock-wait`),
+/// in ms.
+pub const DEFAULT_TER_LOCK_WAIT_MS: u64 = 1200;
+/// Default of the ISDB-S lock wait, for lock and the TMCC TS-ID table
+/// (`[ISDB-S] LockWaitMs`, `--sat-lock-wait`), in ms.
+pub const DEFAULT_SAT_LOCK_WAIT_MS: u64 = 1500;
+
+/// Antenna (LNB) supply values (`[ISDB-S] LnbVoltage`, `--lnb`, `lnb=`), in
+/// units of 0.1 V: off.
+pub const LNB_OFF: u32 = 0;
+/// LNB supply: 11 V.
+pub const LNB_11V: u32 = 110;
+/// LNB supply: 15 V.
+pub const LNB_15V: u32 = 150;
+
+/// The most bulk IN transfers a stream keeps in flight (`--read-depth` is
+/// clamped to 1..=this).
+pub const MAX_READ_DEPTH: usize = 64;
+
 /// Platform default of the backends' `read_depth` setting (`TunerConfig::read_depth`).
 pub fn default_read_depth() -> usize {
     if cfg!(windows) { 4 } else { 16 }

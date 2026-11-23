@@ -15,16 +15,30 @@ use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::{DeviceInformation, TunerDesc};
 use dth10_core::ts_slot::SlotLayout;
 use dth10_core::{Device, Error, Result, StreamMode};
-use dth10_usb::{StreamReader, UsbTransport};
+use dth10_usb::{EP_TS1, StreamReader, UsbTransport};
 
 use dth_common::channels::{Channel, System, default_tuner};
 use dth_common::queue::TsQueue;
 use dth_common::stream::{DeviceProgram, StreamModeCfg};
+use dth_common::ts::{NULL_PID, SYNC_BYTE, TS_PACKET};
 
 use crate::config::TunerConfig;
 use crate::psi::{Program, PsiCollector};
 
-const TS_PACKET: usize = 188;
+/// Tuner descriptor flags bit0 (TLV 'R' of tuner #0): the device has a
+/// second tuner/filter (tuner #1).
+pub(crate) const DESC_FLAG_TUNER1: u32 = 0x1;
+/// Tuner descriptor flags bit2 (TLV 'R' of tuner #1): the vendor driver sends
+/// tuner #1's I2C and GPIO over the tuner #0 path, else over path #1.
+const DESC_FLAG_I2C_PATH0: u32 = 0x4;
+
+/// How long a bulk read waits for a transfer before the loop looks again.
+const READ_POLL: Duration = Duration::from_millis(200);
+/// How long a reader thread pauses after a failed bulk read.
+const READ_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// How often a lock wait reads the demodulator status.
+const LOCK_POLL: Duration = Duration::from_millis(50);
+
 /// How long to collect PAT/PMT in raw mode before switching to device mode.
 const PSI_LEARN_TIMEOUT: Duration = Duration::from_millis(2500);
 /// PSI learn through the link decryption: how long to collect PAT/PMT after
@@ -76,7 +90,7 @@ impl Aligner {
         let mut scratch = [0u8; TS_PACKET];
         for slot in data.as_chunks::<BLOCK>().0 {
             let pkt = self.layout.packet(slot, &mut scratch);
-            if pkt[0] != 0x47 {
+            if pkt[0] != SYNC_BYTE {
                 self.unsynced += 1;
                 if self.unsynced == 1 || self.unsynced.is_multiple_of(10000) {
                     log::debug!("dropping block without sync byte ({} so far): {:02x?}", self.unsynced, &pkt[..8]);
@@ -104,9 +118,10 @@ struct Stream {
     failed: Arc<AtomicBool>,
 }
 
-/// Bulk read errors in a row (50 ms apart) after which a stream's reader
-/// thread gives up: an unplugged device never answers again, and a device in
-/// trouble is better reopened by the next request than hammered.
+/// Bulk read errors in a row ([`READ_RETRY_DELAY`] apart) after which a
+/// stream's reader thread gives up: an unplugged device never answers again,
+/// and a device in trouble is better reopened by the next request than
+/// hammered.
 const READ_FAILURES_BEFORE_GIVING_UP: u32 = 20;
 
 /// What the reader thread needs to restart its stream after a new CEPM
@@ -253,11 +268,11 @@ impl CcCheck {
     fn feed(&mut self, chunk: &[u8]) -> u64 {
         let mut errors = 0;
         for p in chunk.as_chunks::<TS_PACKET>().0 {
-            if p[0] != 0x47 || p[1] & 0x80 != 0 {
+            if p[0] != SYNC_BYTE || p[1] & 0x80 != 0 {
                 continue;
             }
             let pid = ((p[1] as u16 & 0x1F) << 8) | p[2] as u16;
-            if pid == 0x1FFF || p[3] & 0x10 == 0 {
+            if pid == NULL_PID || p[3] & 0x10 == 0 {
                 continue;
             }
             let cc = p[3] & 0x0F;
@@ -311,7 +326,7 @@ impl Stream {
                         last_stats = Instant::now();
                         st.log(&label, t0.elapsed(), dec.as_ref().map(|(d, _)| &d.stats));
                     }
-                    match reader.next(Duration::from_millis(200)) {
+                    match reader.next(READ_POLL) {
                         Ok(Some(data)) => {
                             failures_in_a_row = 0;
                             st.bytes_in += data.len() as u64;
@@ -362,7 +377,7 @@ impl Stream {
                             }
                             log::warn!("{label} bulk read error: {e}");
                             let _ = reader.clear_halt();
-                            std::thread::sleep(Duration::from_millis(50));
+                            std::thread::sleep(READ_RETRY_DELAY);
                         }
                     }
                 }
@@ -428,13 +443,19 @@ fn lnb_overcurrent_report(ev: &dth10_core::events::Event) -> bool {
         && ev.payload.get(4).is_some_and(|b| b & 1 != 0)
 }
 
-/// After an over-current report: 10 ms later (the vendor driver's delay), the
-/// supply's state bit in the GPIO status block; not good means switch the
-/// supply off (both its bits `gpio`).
+/// How long after an over-current report the supply's state is read (the
+/// vendor driver's delay).
+const LNB_CHECK_DELAY: Duration = Duration::from_millis(10);
+/// The byte of the GPIO status block whose bit 0 says the antenna supply is good.
+const GPIO_LNB_GOOD_BYTE: usize = 12;
+
+/// After an over-current report: [`LNB_CHECK_DELAY`] later, the supply's
+/// state bit in the GPIO status block; not good means switch the supply off
+/// (both its bits `gpio`).
 fn check_lnb_supply(dev: &Device<UsbTransport>, gpio: LnbGpio, cut: &AtomicBool) {
-    std::thread::sleep(Duration::from_millis(10));
+    std::thread::sleep(LNB_CHECK_DELAY);
     match dev.gpio_read() {
-        Ok(st) if st[12] & 1 == 0 => match dev.gpio_write(gpio.all(), 0) {
+        Ok(st) if st[GPIO_LNB_GOOD_BYTE] & 1 == 0 => match dev.gpio_write(gpio.all(), 0) {
             Ok(()) => {
                 cut.store(true, Ordering::Relaxed);
                 log::warn!("antenna (LNB) supply over-current: switched off; the next BS/CS tune switches it on again");
@@ -481,6 +502,17 @@ pub struct Tuner {
     /// [`Tuner::close`], it stops the thread and waits for it.
     _events: Option<EventThread>,
 }
+
+/// How long an event read waits before the event thread looks at its stop flag.
+const EVENT_POLL: Duration = Duration::from_millis(1000);
+/// How long the event thread pauses after a failed read.
+const EVENT_ERROR_DELAY: Duration = Duration::from_millis(500);
+/// The window over which the event log is summarised: the first
+/// [`EVENTS_SHOWN_PER_WINDOW`] events of a window are logged one by one, the
+/// rest only counted.
+const EVENT_WINDOW: Duration = Duration::from_mins(1);
+/// Events logged one by one per [`EVENT_WINDOW`].
+const EVENTS_SHOWN_PER_WINDOW: u32 = 5;
 
 /// The interrupt-endpoint reader. It holds the endpoint and with it the
 /// device handle, so it is stopped and joined when the tuner goes: otherwise
@@ -533,7 +565,7 @@ impl Tuner {
 
         // Second tuner/filter exists when TunerDesc flags bit0 is set (as in the original driver).
         let mut second = None;
-        let satellite = if info0.desc.flags & 0x1 != 0 {
+        let satellite = if info0.desc.flags & DESC_FLAG_TUNER1 != 0 {
             let dev1 = Device::new(transport.clone()).with_tuner_index(1);
             match dev1.read_device_information() {
                 Ok(info1) if TerrestrialKit::<UsbTransport>::supports(&info1.desc) => {
@@ -547,11 +579,11 @@ impl Tuner {
                         info1.desc.model,
                         info1.desc.hw_version
                     );
-                    let i2c_path = if info1.desc.flags & 0x4 != 0 { 0 } else { 1 };
+                    let i2c_path = if info1.desc.flags & DESC_FLAG_I2C_PATH0 != 0 { 0 } else { 1 };
                     let i2c_dev = Device::new(transport.clone()).with_tuner_index(i2c_path);
                     match TerrestrialKit::new(i2c_dev, info1.desc.clone(), pid) {
                         Ok(kit) => {
-                            let endpoint = pipes.ts1.map(|(ep, _)| ep).unwrap_or(0x82);
+                            let endpoint = pipes.ts1.map(|(ep, _)| ep).unwrap_or(EP_TS1);
                             log::info!(
                                 "tuner #1: second terrestrial tuner ({} kit): I2C via path {i2c_path} (descriptor flags 0x{:x}), stream via path 1 on EP 0x{endpoint:02x}",
                                 kit.kind(),
@@ -579,14 +611,15 @@ impl Tuner {
                     // The vendor driver sends the satellite kit's I2C over the tuner #0
                     // path when the descriptor's flags bit2 is set, else over the proxy
                     // path #1 (docs/20 §5.2).
-                    let i2c_path = cfg.sat_i2c_path.unwrap_or(if info1.desc.flags & 0x4 != 0 { 0 } else { 1 });
+                    let i2c_path =
+                        cfg.sat_i2c_path.unwrap_or(if info1.desc.flags & DESC_FLAG_I2C_PATH0 != 0 { 0 } else { 1 });
                     let i2c_dev = Device::new(transport.clone()).with_tuner_index(i2c_path);
                     match SatelliteKit::new(i2c_dev, info1.desc.clone(), pid) {
                         Ok(kit) => {
                             let endpoint = if cfg.sat_endpoint != 0 {
                                 cfg.sat_endpoint
                             } else {
-                                pipes.ts1.map(|(ep, _)| ep).unwrap_or(0x82)
+                                pipes.ts1.map(|(ep, _)| ep).unwrap_or(EP_TS1)
                             };
                             log::info!(
                                 "satellite ({} kit): I2C via path {} (descriptor flags 0x{:x}), stream via path {} on EP 0x{endpoint:02x}",
@@ -690,7 +723,7 @@ impl Tuner {
                         .spawn(move || {
                             let (mut window, mut in_window, mut suppressed) = (Instant::now(), 0u32, 0u64);
                             while !stop_thread.load(Ordering::Relaxed) {
-                                match rd.next(Duration::from_millis(1000)) {
+                                match rd.next(EVENT_POLL) {
                                     Ok(Some(ev)) => {
                                         if let Some((dev, gpio, cut)) = lnb_watch.as_ref()
                                             && lnb_overcurrent_report(&ev)
@@ -701,7 +734,7 @@ impl Tuner {
                                             continue;
                                         }
                                         in_window += 1;
-                                        if in_window <= 5 {
+                                        if in_window <= EVENTS_SHOWN_PER_WINDOW {
                                             log::info!(
                                                 "event +{:.1}s targets {:#04b} class 0x{:04x} code 0x{:04x} payload {:02x?}",
                                                 t0.elapsed().as_secs_f32(),
@@ -717,10 +750,10 @@ impl Tuner {
                                     Ok(None) => {}
                                     Err(e) => {
                                         log::warn!("event read: {e}");
-                                        std::thread::sleep(Duration::from_millis(500));
+                                        std::thread::sleep(EVENT_ERROR_DELAY);
                                     }
                                 }
-                                if window.elapsed() >= Duration::from_mins(1) {
+                                if window.elapsed() >= EVENT_WINDOW {
                                     if suppressed > 0 {
                                         log::warn!("events: {in_window} in the last minute ({suppressed} not shown): the device keeps raising card events");
                                     }
@@ -1036,7 +1069,7 @@ impl Tuner {
         dev_for_stream.stream_enable_mode(desc, StreamMode::RawFullTs)?;
         let deadline = Instant::now() + PSI_LEARN_TIMEOUT;
         while Instant::now() < deadline && !psi.complete() {
-            if let Some(data) = reader.next(Duration::from_millis(200))? {
+            if let Some(data) = reader.next(READ_POLL)? {
                 psi.feed(&aligner.feed(&data));
             }
         }
@@ -1077,7 +1110,7 @@ impl Tuner {
         let t = Instant::now();
         let mut deadline = t + PSI_LEARN_TIMEOUT_ENCRYPTED;
         while Instant::now() < deadline && !psi.complete() {
-            if let Some(data) = reader.next(Duration::from_millis(200))? {
+            if let Some(data) = reader.next(READ_POLL)? {
                 let mut chunk = aligner.feed(&data);
                 for pkt in chunk.as_chunks_mut::<TS_PACKET>().0 {
                     match dec.process(&self.transport, flags, pkt) {
@@ -1145,7 +1178,7 @@ impl Tuner {
     }
 
     fn wait_lock<F: FnMut() -> Result<SignalStatus>>(status: F, timeout: Duration, what: &str) -> Option<SignalStatus> {
-        wait_lock_with(status, timeout, SIGNAL_GRACE, Duration::from_millis(50), what)
+        wait_lock_with(status, timeout, SIGNAL_GRACE, LOCK_POLL, what)
     }
 
     /// Tune to `ch` on its default tuner ([`default_tuner`]) and start streaming into the queue.

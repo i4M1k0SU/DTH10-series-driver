@@ -29,9 +29,16 @@ pub struct Pmd {
     pub vdisp: i32,
 }
 
-const NAME_SELF: [u8; 24] = *b".?AVBonDriverDTH10@@\0\0\0\0";
-const NAME_BON2: [u8; 24] = *b".?AVIBonDriver2@@\0\0\0\0\0\0\0";
-const NAME_BON1: [u8; 24] = *b".?AVIBonDriver@@\0\0\0\0\0\0\0\0";
+/// Length of the type names below, NUL-padded: one size for all three, so
+/// that their type descriptors share one type.
+const NAME_LEN: usize = 24;
+const NAME_SELF: [u8; NAME_LEN] = *b".?AVBonDriverDTH10@@\0\0\0\0";
+const NAME_BON2: [u8; NAME_LEN] = *b".?AVIBonDriver2@@\0\0\0\0\0\0\0";
+const NAME_BON1: [u8; NAME_LEN] = *b".?AVIBonDriver@@\0\0\0\0\0\0\0\0";
+
+/// Base class descriptor attribute `BCD_HASPCHD`: the descriptor points to
+/// its class's hierarchy descriptor (`class_descriptor`).
+const BCD_HASPCHD: u32 = 0x40;
 
 #[cfg(target_pointer_width = "64")]
 mod imp {
@@ -71,9 +78,9 @@ mod imp {
         pub chd: ClassHierarchyDescriptor,
         pub bca: [u32; 3],
         pub bcd: [BaseClassDescriptor; 3],
-        pub td_self: TypeDescriptor<24>,
-        pub td_bon2: TypeDescriptor<24>,
-        pub td_bon1: TypeDescriptor<24>,
+        pub td_self: TypeDescriptor<NAME_LEN>,
+        pub td_bon2: TypeDescriptor<NAME_LEN>,
+        pub td_bon1: TypeDescriptor<NAME_LEN>,
     }
     unsafe impl Sync for Blob {}
 
@@ -83,7 +90,7 @@ mod imp {
             type_descriptor: td,
             num_contained_bases: bases,
             where_: Pmd { mdisp: 0, pdisp: -1, vdisp: 0 },
-            attributes: 0x40,
+            attributes: BCD_HASPCHD,
             class_descriptor: offset_of!(Blob, chd) as u32,
         }
     }
@@ -130,7 +137,7 @@ mod imp {
 
     #[repr(C)]
     pub struct BaseClassDescriptor {
-        pub type_descriptor: *const TypeDescriptor<24>,
+        pub type_descriptor: *const TypeDescriptor<NAME_LEN>,
         pub num_contained_bases: u32,
         pub where_: Pmd,
         pub attributes: u32,
@@ -150,7 +157,7 @@ mod imp {
         pub signature: u32,
         pub offset: u32,
         pub cd_offset: u32,
-        pub type_descriptor: *const TypeDescriptor<24>,
+        pub type_descriptor: *const TypeDescriptor<NAME_LEN>,
         pub class_descriptor: *const ClassHierarchyDescriptor,
     }
 
@@ -160,18 +167,18 @@ mod imp {
         pub chd: ClassHierarchyDescriptor,
         pub bca: [*const BaseClassDescriptor; 3],
         pub bcd: [BaseClassDescriptor; 3],
-        pub td_self: TypeDescriptor<24>,
-        pub td_bon2: TypeDescriptor<24>,
-        pub td_bon1: TypeDescriptor<24>,
+        pub td_self: TypeDescriptor<NAME_LEN>,
+        pub td_bon2: TypeDescriptor<NAME_LEN>,
+        pub td_bon1: TypeDescriptor<NAME_LEN>,
     }
     unsafe impl Sync for Blob {}
 
-    const fn bcd(td: *const TypeDescriptor<24>, bases: u32) -> BaseClassDescriptor {
+    const fn bcd(td: *const TypeDescriptor<NAME_LEN>, bases: u32) -> BaseClassDescriptor {
         BaseClassDescriptor {
             type_descriptor: td,
             num_contained_bases: bases,
             where_: Pmd { mdisp: 0, pdisp: -1, vdisp: 0 },
-            attributes: 0x40,
+            attributes: BCD_HASPCHD,
             class_descriptor: &RTTI.chd,
         }
     }

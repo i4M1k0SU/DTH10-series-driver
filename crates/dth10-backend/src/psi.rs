@@ -3,6 +3,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use dth_common::ts::{CA_DESCRIPTOR_TAG, NULL_PID, PAT_PID, PAT_TABLE_ID, PMT_TABLE_ID, SYNC_BYTE, TS_PACKET};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Program {
     pub number: u16,
@@ -17,7 +19,7 @@ impl Program {
     pub fn pid_list(&self) -> Vec<u16> {
         let mut v = vec![self.pmt_pid];
         v.extend(&self.ecm_pids);
-        if self.pcr_pid != 0x1FFF && !v.contains(&self.pcr_pid) {
+        if self.pcr_pid != NULL_PID && !v.contains(&self.pcr_pid) {
             v.push(self.pcr_pid);
         }
         for &p in &self.es_pids {
@@ -43,8 +45,8 @@ impl PsiCollector {
 
     /// Feed 188-byte-aligned TS data.
     pub fn feed(&mut self, data: &[u8]) {
-        for p in data.as_chunks::<188>().0 {
-            if p[0] != 0x47 || p[1] & 0x80 != 0 {
+        for p in data.as_chunks::<TS_PACKET>().0 {
+            if p[0] != SYNC_BYTE || p[1] & 0x80 != 0 {
                 continue;
             }
             let pid = ((p[1] as u16 & 0x1F) << 8) | p[2] as u16;
@@ -52,7 +54,7 @@ impl PsiCollector {
             if afc & 1 == 0 {
                 continue;
             }
-            let wanted = pid == 0 || self.pat.values().any(|&pmt| pmt == pid);
+            let wanted = pid == PAT_PID || self.pat.values().any(|&pmt| pmt == pid);
             if !wanted {
                 continue;
             }
@@ -60,7 +62,7 @@ impl PsiCollector {
             if afc & 2 != 0 {
                 off += 1 + p[4] as usize;
             }
-            if off >= 188 {
+            if off >= TS_PACKET {
                 continue;
             }
             let payload = &p[off..];
@@ -100,7 +102,7 @@ impl PsiCollector {
             return;
         }
         let body = &sec[8..3 + slen - 4];
-        if pid == 0 && tid == 0 {
+        if pid == PAT_PID && tid == PAT_TABLE_ID {
             for e in body.as_chunks::<4>().0 {
                 let prog = ((e[0] as u16) << 8) | e[1] as u16;
                 let ppid = ((e[2] as u16 & 0x1F) << 8) | e[3] as u16;
@@ -108,7 +110,7 @@ impl PsiCollector {
                     self.pat.insert(prog, ppid);
                 }
             }
-        } else if tid == 2 && self.pat.values().any(|&pmt| pmt == pid) {
+        } else if tid == PMT_TABLE_ID && self.pat.values().any(|&pmt| pmt == pid) {
             let number = ((sec[3] as u16) << 8) | sec[4] as u16;
             let pcr_pid = ((sec[8] as u16 & 0x1F) << 8) | sec[9] as u16;
             let pilen = (((sec[10] & 0x0F) as usize) << 8) | sec[11] as usize;
@@ -147,9 +149,9 @@ fn collect_ca_pids(descriptors: &[u8], out: &mut Vec<u16>) {
     while i + 2 <= descriptors.len() {
         let tag = descriptors[i];
         let len = descriptors[i + 1] as usize;
-        if tag == 0x09 && len >= 4 && i + 2 + len <= descriptors.len() {
+        if tag == CA_DESCRIPTOR_TAG && len >= 4 && i + 2 + len <= descriptors.len() {
             let pid = ((descriptors[i + 4] as u16 & 0x1F) << 8) | descriptors[i + 5] as u16;
-            if pid != 0x1FFF && !out.contains(&pid) {
+            if pid != NULL_PID && !out.contains(&pid) {
                 out.push(pid);
             }
         }

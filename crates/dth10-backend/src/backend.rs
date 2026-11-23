@@ -17,6 +17,7 @@ use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::DeviceInformation;
 use dth10_usb::UsbTransport;
 
+use crate::tuner::DESC_FLAG_TUNER1;
 use crate::{Tuner, TunerConfig};
 
 /// The application key file: `explicit`, `$DTH10_APP_KEYS`, `CoBDACom.dll`
@@ -150,7 +151,7 @@ impl Dth10Backend {
                 let _ = writeln!(s, "firmware: {e}");
             }
         }
-        if di.desc.flags & 1 != 0 {
+        if di.desc.flags & DESC_FLAG_TUNER1 != 0 {
             let dev1 = Device::new(t).with_tuner_index(1);
             match dev1.read_device_information() {
                 Ok(di1) => describe_tuner(&mut s, 1, &di1),

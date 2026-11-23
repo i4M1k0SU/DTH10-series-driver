@@ -36,12 +36,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use dth_common::channels::UHF_BANDWIDTH_HZ;
+use dth_common::stream::{
+    DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, LNB_11V, LNB_15V, LNB_OFF, MAX_READ_DEPTH, default_read_depth,
+};
+use dth_common::ts::TS_PACKET;
 use dth_common::{
     Backend, Channel, DeviceProgram, Request, Session, StreamModeCfg, System, TsQueue, Unit, default_tuner,
 };
+use dth10_backend::config::DEFAULT_SAT_STREAM_PATH;
 use dth10_backend::{Dth10Backend, KeyStore, TunerConfig};
 use dth10_usb::{RecipientMode, UsbTransport};
 use dth30_backend::Dth30Backend;
+
+/// How long a TS pump waits for its queue before it looks at its stop
+/// conditions again, in ms.
+pub(crate) const QUEUE_WAIT_MS: u32 = 200;
 
 #[derive(Parser)]
 #[command(name = "dth", version, about = "User-mode tuner command for the BUFFALO DTH10/DTH30 series of USB TV tuners")]
@@ -182,17 +192,17 @@ struct TuneArgs {
     #[arg(long)]
     booster: bool,
     /// ISDB-T: how long to wait for lock before streaming, in ms (up to 2 s longer while there is a signal).
-    #[arg(long, value_name = "MS", default_value_t = 1200)]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_TER_LOCK_WAIT_MS)]
     ter_lock_wait: u64,
     /// ISDB-S: how long to wait for lock and the TMCC TS-ID table, in ms (up to 2 s longer while there is a signal).
-    #[arg(long, value_name = "MS", default_value_t = 1500)]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_SAT_LOCK_WAIT_MS)]
     sat_lock_wait: u64,
     /// ISDB-S: command path (bRequest bit7) of the satellite demodulator's I2C
     /// (default: as the vendor driver, from the device's descriptor flags).
     #[arg(long, value_name = "0|1")]
     sat_i2c_path: Option<u8>,
     /// ISDB-S: command path of the satellite stream-enable command.
-    #[arg(long, value_name = "0|1", default_value_t = 1)]
+    #[arg(long, value_name = "0|1", default_value_t = DEFAULT_SAT_STREAM_PATH)]
     sat_stream_path: u8,
     /// ISDB-S: bulk IN endpoint of the satellite TS (hex; 0 = the second bulk IN endpoint).
     #[arg(long, value_name = "HEX", default_value = "0", value_parser = parse_hex8)]
@@ -445,11 +455,11 @@ pub(crate) fn tuner_of(tuner: Option<u8>, system: System) -> Result<usize, Strin
 /// The LNB option: (voltage, on).
 pub(crate) fn lnb_of(v: u32) -> (u32, bool) {
     let volt = match v {
-        0 => 0,
-        v if v <= 110 => 110,
-        _ => 150,
+        LNB_OFF => LNB_OFF,
+        v if v <= LNB_11V => LNB_11V,
+        _ => LNB_15V,
     };
-    (volt, v != 0)
+    (volt, v != LNB_OFF)
 }
 
 fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
@@ -502,7 +512,7 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
             why = "duration reached";
             break;
         }
-        if queue.wait(200) {
+        if queue.wait(QUEUE_WAIT_MS) {
             while let Some(chunk) = queue.pop() {
                 if let Err(e) = out.write_all(&chunk) {
                     why = if e.kind() == io::ErrorKind::BrokenPipe {
@@ -520,14 +530,14 @@ fn tune(a: &TuneArgs) -> Result<(), Box<dyn Error>> {
         // The status is read once a second with or without --stats: some kits
         // follow the carrier offset and acquire the signal again after a lost
         // lock only inside the status read.
-        if last_stats.elapsed() >= Duration::from_secs(1) {
+        if last_stats.elapsed() >= serve::STATUS_POLL {
             let cnr = tuner.poll_status()[tuner_index];
             if a.stats {
                 let dt = last_stats.elapsed().as_secs_f64();
                 eprintln!(
                     "[t+{:6.1}s] {:6.0} pkt/s {:5.2} MB/s  C/N {:5.1} dB  total {:.1} MB",
                     start.elapsed().as_secs_f64(),
-                    sec_bytes as f64 / 188.0 / dt,
+                    sec_bytes as f64 / TS_PACKET as f64 / dt,
                     sec_bytes as f64 / 1e6 / dt,
                     cnr.unwrap_or(0.0),
                     total as f64 / 1e6
@@ -556,12 +566,12 @@ fn tune_config(a: &TuneArgs, program: DeviceProgram) -> TunerConfig {
         cepm_state: None,
         app_keys: None,
         drop_filler: !a.keep_filler,
-        read_depth: a.read_depth.unwrap_or_else(dth_common::stream::default_read_depth).clamp(1, 64),
+        read_depth: a.read_depth.unwrap_or_else(default_read_depth).clamp(1, MAX_READ_DEPTH),
         exclusive: true,
         log_events: false,
         ter_lock_wait_ms: a.ter_lock_wait,
         attenuator: a.attenuator,
-        ter_bandwidth_hz: 6_000_000,
+        ter_bandwidth_hz: UHF_BANDWIDTH_HZ,
         sat_i2c_path: a.sat_i2c_path.map(|p| p.min(1)),
         sat_stream_path: a.sat_stream_path.min(1),
         sat_endpoint: a.sat_endpoint,

@@ -40,9 +40,13 @@
 
 use std::path::{Path, PathBuf};
 
-use dth_common::stream::{DeviceProgram, StreamModeCfg, parse_num};
+use dth_common::stream::{
+    DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, DeviceProgram, LNB_11V, LNB_15V, LNB_OFF, StreamModeCfg,
+    parse_num,
+};
 use dth_proto::proto::TunerChoice;
 
+use crate::channels::{ALL_SPACES, SPACE_BS, SPACE_CS, SPACE_TERRESTRIAL};
 use crate::client::ServerConfig;
 use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
@@ -85,12 +89,12 @@ impl Default for Tuning {
             stream_mode: StreamModeCfg::Device,
             device_program: DeviceProgram::First,
             app_keys: None,
-            ter_lock_wait_ms: 1200,
+            ter_lock_wait_ms: DEFAULT_TER_LOCK_WAIT_MS,
             attenuator: false,
-            lnb_voltage: 150,
+            lnb_voltage: LNB_15V,
             lnb_power: false,
             booster: false,
-            sat_lock_wait_ms: 1500,
+            sat_lock_wait_ms: DEFAULT_SAT_LOCK_WAIT_MS,
         }
     }
 }
@@ -122,7 +126,7 @@ impl Default for Config {
             ini_path: None,
             dll_dir: None,
             tuner: Tuning::default(),
-            spaces: vec![0, 1, 2],
+            spaces: ALL_SPACES.to_vec(),
             ter_tuner: TunerChoice::Auto,
             server: ServerConfig::default(),
             log_level: "warn".into(),
@@ -137,16 +141,24 @@ pub fn parse_spaces(s: &str) -> Vec<u32> {
         .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
         .filter(|w| !w.is_empty())
         .filter_map(|w| match w.to_ascii_uppercase().as_str() {
-            "GR" | "T" | "UHF" | "ISDB-T" | "地デジ" => Some(0),
-            "BS" => Some(1),
-            "CS" | "CS110" => Some(2),
+            "GR" | "T" | "UHF" | "ISDB-T" | "地デジ" => Some(SPACE_TERRESTRIAL),
+            "BS" => Some(SPACE_BS),
+            "CS" | "CS110" => Some(SPACE_CS),
             _ => None,
         })
         .collect();
     v.sort_unstable();
     v.dedup();
-    if v.is_empty() { vec![0, 1, 2] } else { v }
+    if v.is_empty() { ALL_SPACES.to_vec() } else { v }
 }
+
+/// Room for the DLL's path, in UTF-16 units.
+const MODULE_PATH_LEN: usize = 1024;
+/// Room for one ini value, in UTF-16 units.
+const INI_VALUE_LEN: usize = 512;
+/// The default handed to `GetPrivateProfileStringW`: a value no ini holds, so
+/// that a missing key can be told from an empty one.
+const INI_MISSING: &str = "\u{1}";
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -165,7 +177,7 @@ pub fn module_path(addr: *const ()) -> Option<PathBuf> {
         {
             return None;
         }
-        let mut buf = vec![0u16; 1024];
+        let mut buf = vec![0u16; MODULE_PATH_LEN];
         let n = GetModuleFileNameW(hmod, buf.as_mut_ptr(), buf.len() as u32) as usize;
         if n == 0 {
             return None;
@@ -182,8 +194,8 @@ impl Ini {
     fn get(&self, section: &str, key: &str) -> Option<String> {
         let sec = wide(section);
         let k = wide(key);
-        let def = wide("\u{1}");
-        let mut buf = vec![0u16; 512];
+        let def = wide(INI_MISSING);
+        let mut buf = vec![0u16; INI_VALUE_LEN];
         // SAFETY: plain Win32 call with valid buffers.
         let n = unsafe {
             GetPrivateProfileStringW(
@@ -196,7 +208,7 @@ impl Ini {
             )
         } as usize;
         let s = String::from_utf16_lossy(&buf[..n]);
-        if s == "\u{1}" { None } else { Some(s.trim().to_owned()) }
+        if s == INI_MISSING { None } else { Some(s.trim().to_owned()) }
     }
 
     fn u64(&self, section: &str, key: &str, default: u64) -> u64 {
@@ -251,11 +263,12 @@ impl Config {
         }
         t.ter_lock_wait_ms = f.u64("ISDB-T", "LockWaitMs", t.ter_lock_wait_ms);
         t.attenuator = f.bool("ISDB-T", "Attenuator", t.attenuator);
+        // Volts (11, 15) are taken as well as tenths of a volt.
         t.lnb_voltage = match f.u64("ISDB-S", "LnbVoltage", t.lnb_voltage as u64) {
-            0 => 0,
-            11 | 110 => 110,
-            15 | 150 => 150,
-            _ => 150,
+            0 => LNB_OFF,
+            11 | 110 => LNB_11V,
+            15 | 150 => LNB_15V,
+            _ => LNB_15V,
         };
         t.lnb_power = f.bool("ISDB-S", "LnbPower", t.lnb_power);
         t.booster = f.bool("ISDB-S", "Booster", t.booster);

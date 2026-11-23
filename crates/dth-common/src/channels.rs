@@ -27,12 +27,20 @@ pub struct Channel {
     pub slot: Option<u8>,
 }
 
+/// The first UHF physical channel.
+pub const UHF_FIRST: u32 = 13;
+/// The last UHF physical channel.
+pub const UHF_LAST: u32 = 62;
+/// Width of a UHF channel in Hz: the raster of the table and the ISDB-T
+/// channel bandwidth.
+pub const UHF_BANDWIDTH_HZ: u32 = 6_000_000;
+
 /// UHF channel centre frequency in Hz (ARIB STD-B31: 473 + 1/7 MHz for ch13).
 pub fn uhf_center_hz(ch: u32) -> Option<u32> {
-    if !(13..=62).contains(&ch) {
+    if !(UHF_FIRST..=UHF_LAST).contains(&ch) {
         return None;
     }
-    Some(473_000_000 + 6_000_000 * (ch - 13) + 142_857)
+    Some(473_000_000 + UHF_BANDWIDTH_HZ * (ch - UHF_FIRST) + 142_857)
 }
 
 /// BS transponder IF centre frequencies (Hz) after a 10.678 GHz LNB, odd

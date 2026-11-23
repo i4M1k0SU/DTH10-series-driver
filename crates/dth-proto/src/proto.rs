@@ -49,11 +49,24 @@
 //! The connection ends after the reply. The text form does not depend on the
 //! platform, so its tests run everywhere.
 
-use dth_common::stream::parse_num;
+use std::time::Duration;
+
+use dth_common::stream::{LNB_11V, LNB_15V, LNB_OFF, parse_num};
 use dth_common::{Channel, System};
 
 /// The longest line either side reads.
 pub const MAX_LINE: usize = 512;
+
+/// How long a client waits for the reply to a stream request: tuning can
+/// take a few seconds (handshake, PSI learn) before the daemon answers.
+pub const STREAM_REPLY_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// A streaming client's read timeout: how often its read loop looks at its
+/// stop flag while no TS arrives.
+pub const STREAM_READ_POLL: Duration = Duration::from_millis(500);
+
+/// The buffer a streaming client reads the TS into, in bytes.
+pub const STREAM_READ_BUF: usize = 64 * 1024;
 
 /// Which terrestrial tuner a stream request asks for (key `tuner=`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +247,7 @@ impl Request {
                 "client" if !value.is_empty() => client = Some(value.to_owned()),
                 "lnb" => {
                     lnb = Some(match parse_u32(value)? {
-                        v @ (0 | 110 | 150) => v,
+                        v @ (LNB_OFF | LNB_11V | LNB_15V) => v,
                         v => return Err(format!("lnb {v}: 0, 110 or 150")),
                     })
                 }

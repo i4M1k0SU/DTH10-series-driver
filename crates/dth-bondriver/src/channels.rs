@@ -7,13 +7,22 @@
 use std::collections::HashMap;
 
 pub use dth_common::channels::Channel;
-use dth_common::channels::{BS_IF_HZ, CS_IF_HZ};
+use dth_common::channels::{BS_IF_HZ, CS_IF_HZ, UHF_FIRST};
+
+/// Tuning space: ISDB-T (UHF).
+pub const SPACE_TERRESTRIAL: u32 = 0;
+/// Tuning space: BS.
+pub const SPACE_BS: u32 = 1;
+/// Tuning space: CS110.
+pub const SPACE_CS: u32 = 2;
+/// Every tuning space, in order.
+pub const ALL_SPACES: [u32; 3] = [SPACE_TERRESTRIAL, SPACE_BS, SPACE_CS];
 
 pub fn space_name(space: u32) -> Option<&'static str> {
     match space {
-        0 => Some("地デジ"),
-        1 => Some("BS"),
-        2 => Some("CS110"),
+        SPACE_TERRESTRIAL => Some("地デジ"),
+        SPACE_BS => Some("BS"),
+        SPACE_CS => Some("CS110"),
         _ => None,
     }
 }
@@ -23,13 +32,13 @@ const TS_PER_TRANSPONDER: u32 = 4;
 
 pub fn channel(space: u32, ch: u32) -> Option<Channel> {
     match space {
-        0 => Channel::terrestrial(ch + 13),
-        1 | 2 => {
-            let table = if space == 1 { BS_IF_HZ } else { CS_IF_HZ };
+        SPACE_TERRESTRIAL => Channel::terrestrial(ch + UHF_FIRST),
+        SPACE_BS | SPACE_CS => {
+            let table = if space == SPACE_BS { BS_IF_HZ } else { CS_IF_HZ };
             let tp = (ch / TS_PER_TRANSPONDER) as usize;
             let slot = (ch % TS_PER_TRANSPONDER) as u8;
             let (num, _) = *table.get(tp)?;
-            if space == 1 { Channel::bs(num, slot) } else { Channel::cs(num, slot) }
+            if space == SPACE_BS { Channel::bs(num, slot) } else { Channel::cs(num, slot) }
         }
         _ => None,
     }

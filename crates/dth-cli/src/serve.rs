@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Args;
+use dth_common::stream::{DEFAULT_SAT_LOCK_WAIT_MS, DEFAULT_TER_LOCK_WAIT_MS, MAX_READ_DEPTH, default_read_depth};
 use dth_common::{
     Backend, DeviceProgram, LockExt, Request as UnitRequest, Session, StreamModeCfg, System, TsQueue, default_tuner,
 };
@@ -52,7 +53,7 @@ use dth10_backend::{Dth10Backend, KeyStore, TunerConfig};
 use dth10_usb::RecipientMode;
 use dth30_backend::{Dth30Backend, UNIT_PREFIX};
 
-use crate::{RecipientArg, default_state_dir, lnb_of, stop};
+use crate::{QUEUE_WAIT_MS, RecipientArg, default_state_dir, lnb_of, stop};
 
 #[derive(Args)]
 pub struct ServeArgs {
@@ -97,10 +98,10 @@ pub struct ServeArgs {
     #[arg(long)]
     booster: bool,
     /// ISDB-T: how long to wait for lock before streaming, in ms (up to 2 s longer while there is a signal).
-    #[arg(long, value_name = "MS", default_value_t = 1200)]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_TER_LOCK_WAIT_MS)]
     ter_lock_wait: u64,
     /// ISDB-S: how long to wait for lock and the TMCC TS-ID table, in ms (up to 2 s longer while there is a signal).
-    #[arg(long, value_name = "MS", default_value_t = 1500)]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_SAT_LOCK_WAIT_MS)]
     sat_lock_wait: u64,
     /// Bulk IN transfers kept in flight per stream (39936 bytes each; default 16 on Linux, 4 on Windows).
     #[arg(long, value_name = "N")]
@@ -184,9 +185,21 @@ fn unit_status(cnr: [Option<f32>; 2], tuners: Tuners, holders: [Option<Holder>; 
 /// carrier offset and acquire the signal again after a lost lock only inside
 /// the status read (as in the vendor driver, whose application keeps reading
 /// it during playback), so it is read with or without a client asking.
-const STATUS_POLL: Duration = Duration::from_secs(1);
+pub(crate) const STATUS_POLL: Duration = Duration::from_secs(1);
 /// How often the periodic read looks at the units.
 const STATUS_TICK: Duration = Duration::from_millis(250);
+
+/// How long a new connection may take to send its request line.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often a stream with no TS to send checks that its client is still there
+/// and its device has not gone away.
+const PEER_CHECK: Duration = Duration::from_secs(1);
+/// How often a stream reports TS dropped because its client reads too slowly.
+const DROP_REPORT: Duration = Duration::from_mins(1);
+/// How long the accept loop sleeps when no connection is waiting.
+const ACCEPT_POLL: Duration = Duration::from_millis(100);
+/// How long the accept loop pauses after a failed accept.
+const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(500);
 
 /// Whether the periodic read is due: a stream runs and no read (a client's
 /// status request counts) happened within [`STATUS_POLL`].
@@ -322,7 +335,7 @@ struct Activity {
 /// stream request takes the stream over, tunes, pumps the TS until the client
 /// goes away (or a newer client takes the stream), then releases.
 fn serve_connection(conn: Conn, id: u64, units: &Units) {
-    let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = conn.set_read_timeout(Some(REQUEST_TIMEOUT));
     let mut line = String::new();
     {
         let mut r = BufReader::new(&conn);
@@ -559,7 +572,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
                 why = "daemon stopping";
                 break;
             }
-            if queue.wait(200) {
+            if queue.wait(QUEUE_WAIT_MS) {
                 while let Some(chunk) = queue.pop() {
                     if let Err(e) = c.write_all(&chunk) {
                         why = match e.kind() {
@@ -575,7 +588,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
                     }
                     total += chunk.len() as u64;
                 }
-            } else if checked.elapsed() >= Duration::from_secs(1) {
+            } else if checked.elapsed() >= PEER_CHECK {
                 checked = Instant::now();
                 if conn.peer_closed() {
                     break;
@@ -590,7 +603,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
                     break;
                 }
             }
-            if reported.elapsed() >= Duration::from_mins(1) {
+            if reported.elapsed() >= DROP_REPORT {
                 reported = Instant::now();
                 let d = queue.dropped_bytes() - dropped0;
                 if d > dropped {
@@ -715,7 +728,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
         None => RecipientMode::platform_default(),
     };
     let (lnb_voltage, lnb_power) = lnb_of(a.lnb);
-    let read_depth = a.read_depth.unwrap_or_else(dth_common::stream::default_read_depth).clamp(1, 64);
+    let read_depth = a.read_depth.unwrap_or_else(default_read_depth).clamp(1, MAX_READ_DEPTH);
     let template = TunerConfig {
         recipient,
         stream_mode: StreamModeCfg::Device,
@@ -810,10 +823,10 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
                     act.active.fetch_sub(1, Ordering::Relaxed);
                 }));
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(ACCEPT_POLL),
             Err(e) => {
                 log::warn!("accept: {e}");
-                std::thread::sleep(Duration::from_millis(500));
+                std::thread::sleep(ACCEPT_ERROR_DELAY);
             }
         }
         threads.retain(|t| !t.is_finished());

@@ -13,7 +13,10 @@ use clap::Args;
 use crate::{ChannelArgs, Mode, channel_of, stop};
 use dth_common::System;
 use dth_proto::ipc::{Conn, Target};
-use dth_proto::proto::{Holder, MAX_LINE, Reply, Request, Status, StreamRequest, TunerChoice};
+use dth_proto::proto::{
+    Holder, MAX_LINE, Reply, Request, STREAM_READ_BUF, STREAM_READ_POLL, STREAM_REPLY_TIMEOUT, Status, StreamRequest,
+    TunerChoice,
+};
 
 #[derive(Args)]
 pub struct StreamArgs {
@@ -81,8 +84,7 @@ pub fn run(a: &StreamArgs) -> Result<(), Box<dyn Error>> {
     let t0 = Instant::now();
     let conn = Conn::connect(&target).map_err(|e| format!("cannot reach dth serve at {target}: {e}"))?;
     (&conn).write_all(format!("{}\n", req.to_line()).as_bytes())?;
-    // Tuning can take a few seconds (handshake, PSI learn) before the reply.
-    conn.set_read_timeout(Some(Duration::from_mins(1)))?;
+    conn.set_read_timeout(Some(STREAM_REPLY_TIMEOUT))?;
     let mut r = BufReader::new(&conn);
     let mut line = String::new();
     (&mut r).take(MAX_LINE as u64).read_line(&mut line).map_err(|e| format!("no reply from dth serve: {e}"))?;
@@ -91,9 +93,9 @@ pub fn run(a: &StreamArgs) -> Result<(), Box<dyn Error>> {
         Reply::Busy(why) => return Err(format!("busy: {why}").into()),
         Reply::Error(e) => return Err(e.into()),
     }
-    conn.set_read_timeout(Some(Duration::from_millis(500)))?;
+    conn.set_read_timeout(Some(STREAM_READ_POLL))?;
     let mut out = io::stdout().lock();
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; STREAM_READ_BUF];
     let mut total = 0u64;
     let why = loop {
         if stop::stopping() {
@@ -142,12 +144,15 @@ pub struct StatusArgs {
     connect: Option<String>,
 }
 
+/// How long `dth status` waits for the daemon's answer.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// `dth status`: ask the daemon for the C/N of both systems (a health check
 /// for scripts; the BonDriver sends the same request).
 pub fn status(a: &StatusArgs) -> Result<(), Box<dyn Error>> {
     let target = Target::resolve(a.socket.as_deref(), a.connect.as_deref());
     let conn = Conn::connect(&target).map_err(|e| format!("cannot reach dth serve at {target}: {e}"))?;
-    conn.set_read_timeout(Some(Duration::from_secs(15)))?;
+    conn.set_read_timeout(Some(STATUS_TIMEOUT))?;
     (&conn).write_all(
         format!(
             "{}
