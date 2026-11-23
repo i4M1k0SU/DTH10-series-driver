@@ -20,7 +20,7 @@ members = [
 exclude = ["crates/dth30-fw"]
 
 [workspace.package]
-version = "1.1.0"
+version = "2.0.0"
 edition = "2024"
 # The toolchain is `stable` (rust-toolchain.toml); this is the oldest it may be.
 rust-version = "1.100"
