@@ -331,6 +331,25 @@ struct Activity {
     last_end: Mutex<Instant>,
 }
 
+/// A connection being served: counted in [`Activity`] while it lives, and
+/// its end noted when it is dropped, also when its thread panics (else
+/// `--idle-exit` would never end the daemon).
+struct Active(Arc<Activity>);
+
+impl Active {
+    fn new(activity: Arc<Activity>) -> Self {
+        activity.active.fetch_add(1, Ordering::Relaxed);
+        Active(activity)
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        *self.0.last_end.locked() = Instant::now();
+        self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// One client: read the request; a status request is answered at once, a
 /// stream request takes the stream over, tunes, pumps the TS until the client
 /// goes away (or a newer client takes the stream), then releases.
@@ -439,9 +458,10 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         && !matches!(req.tuner, None | Some(TunerChoice::Index(0)))
         && unit.second_ter.locked().is_none()
     {
-        unit.tuning.fetch_add(1, Ordering::Relaxed);
-        let opened = unit.open(&mut unit.tuner.locked());
-        unit.tuning.fetch_sub(1, Ordering::Relaxed);
+        let opened = {
+            let _tuning = Tuning::new(&unit.tuning);
+            unit.open(&mut unit.tuner.locked())
+        };
         if let Err(e) = opened {
             log::warn!("connection {id}: {what}: {e}");
             let _ = reply(&conn, &Reply::Error(e));
@@ -493,8 +513,12 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
     };
     let what = describe(tuner_name(system, i, second_ter));
 
+    // From here on the slot is this connection's until `held` is dropped: at
+    // the end of the stream, on a failed tune, or when this thread panics.
+    let mut held = Held { unit, i, id, lost_device: false };
+
     let t0 = Instant::now();
-    unit.tuning.fetch_add(1, Ordering::Relaxed);
+    let tuning = Tuning::new(&unit.tuning);
     let tuned: Result<f32, String> = {
         let mut guard = unit.tuner.locked();
         unit.open(&mut guard).and_then(|()| {
@@ -520,8 +544,8 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
             t.set_lock_wait_ms(system, req.lock_wait_ms.unwrap_or(wait));
             match t.set_channel_on(i, &req.channel) {
                 Ok(()) => Ok(t.signal_level_of(i)),
+                // `held` releases the tuner (unless the device is gone).
                 Err(e) => {
-                    t.release(i);
                     if matches!(e, dth_common::Error::Usb(_)) {
                         log::warn!("unit {}: device lost ({e}); opened again on the next request", unit.serial);
                         *guard = None;
@@ -531,7 +555,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
             }
         })
     };
-    unit.tuning.fetch_sub(1, Ordering::Relaxed);
+    drop(tuning);
     let cnr = match tuned {
         Ok(cnr) => {
             unit.cnr.locked().set(i, Some(cnr));
@@ -540,10 +564,6 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         Err(e) => {
             log::warn!("unit {}: connection {id} {what}: {e}", unit.serial);
             let _ = reply(&conn, &Reply::Error(e));
-            let mut s = unit.slots[i].locked();
-            if s.owner == id {
-                *s = Slot::default();
-            }
             return;
         }
     };
@@ -554,7 +574,6 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
         info.push_str(&format!(" tuner={i}"));
     }
     let mut why = "client closed";
-    let mut lost_device = false;
     let mut dropped = 0u64;
     if reply(&conn, &Reply::Ok(info)).is_ok() {
         let queue = &unit.queues[i];
@@ -599,7 +618,7 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
                     && guard.as_ref().is_none_or(|t| t.stream_failed(i))
                 {
                     why = "device lost";
-                    lost_device = true;
+                    held.lost_device = true;
                     break;
                 }
             }
@@ -624,30 +643,66 @@ fn serve_stream(conn: Conn, id: u64, unit: &Unit, req: StreamRequest) {
             if dropped > 0 { format!(", {dropped} bytes dropped (client too slow)") } else { String::new() }
         );
     }
-    let _ = dropped;
+}
 
-    // Release the stream unless a newer connection holds it now.
-    let mine = {
-        let mut s = unit.slots[i].locked();
-        if s.owner == id {
+/// Counts a tune in [`Unit::tuning`] while it lives, so that a status reply
+/// says `busy` for it; the count goes back down also when the tune panics.
+struct Tuning<'a>(&'a AtomicUsize);
+
+impl<'a> Tuning<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        Tuning(count)
+    }
+}
+
+impl Drop for Tuning<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A tuner's slot taken by connection `id`. Dropping it ends the stream:
+/// unless a newer connection holds the slot now, the slot is freed, the
+/// tuner's stream is stopped and its C/N forgotten. This runs however the
+/// connection ends, a panic included, so that the slot is never left held
+/// by a connection that is gone (every `busy=fail` request, which is every
+/// BonDriver's, would be refused for good).
+struct Held<'a> {
+    unit: &'a Unit,
+    i: usize,
+    id: u64,
+    /// The device went away: the session is dropped rather than released,
+    /// and opened again on the next request.
+    lost_device: bool,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let unit = self.unit;
+        {
+            let mut s = unit.slots[self.i].locked();
+            if s.owner != self.id {
+                return;
+            }
             *s = Slot::default();
-            true
-        } else {
-            false
         }
-    };
-    if mine {
         let mut guard = unit.tuner.locked();
-        if lost_device {
-            log::warn!(
-                "unit {}: the device went away during {what}; it is opened again on the next request",
-                unit.serial
-            );
+        if self.lost_device {
+            log::warn!("unit {}: the device went away; it is opened again on the next request", unit.serial);
             *guard = None;
+        } else if std::thread::panicking() {
+            // The session may be half way through what panicked: close it
+            // all, and open it afresh on the next request, rather than stop
+            // one stream of it. A panic of its clean-up is caught here, since
+            // one escaping this drop during the unwind would abort the daemon.
+            log::error!("connection {}: panicked; unit {} is closed", self.id, unit.serial);
+            let session = guard.take();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(session)));
         } else if let Some(t) = guard.as_mut() {
-            t.release(i);
+            t.release(self.i);
         }
-        unit.cnr.locked().set(i, None);
+        unit.cnr.locked().set(self.i, None);
     }
 }
 
@@ -815,13 +870,16 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             Ok(conn) => {
                 let id = next_id.fetch_add(1, Ordering::Relaxed);
                 let units = units.clone();
-                let act = activity.clone();
-                act.active.fetch_add(1, Ordering::Relaxed);
-                threads.push(std::thread::spawn(move || {
+                let active = Active::new(activity.clone());
+                let spawned = std::thread::Builder::new().name(format!("conn-{id}")).spawn(move || {
+                    let _active = active;
                     serve_connection(conn, id, &units);
-                    *act.last_end.locked() = Instant::now();
-                    act.active.fetch_sub(1, Ordering::Relaxed);
-                }));
+                });
+                match spawned {
+                    Ok(t) => threads.push(t),
+                    // The closure is dropped: the connection closes and is not counted.
+                    Err(e) => log::warn!("connection {id}: cannot start its thread: {e}"),
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(ACCEPT_POLL),
             Err(e) => {
@@ -940,6 +998,86 @@ mod tests {
         let st = unit_status([None, Some(28.0)], two, [None, h], true);
         assert_eq!(st.to_info("X"), "X ter=- sat=none ter1=28.0 ter1_ch=27 ter1_by=5 busy");
         assert_eq!((st.sat, st.ter1), (None, Some(28.0)));
+    }
+
+    /// A family with no units, for a [`Unit`] that is never opened.
+    struct NoBackend;
+
+    impl Backend for NoBackend {
+        fn family(&self) -> &'static str {
+            "test"
+        }
+        fn units(&self) -> dth_common::Result<Vec<dth_common::Unit>> {
+            Ok(Vec::new())
+        }
+        fn check(&self, _: &str, _: UnitRequest) -> Result<(), String> {
+            Ok(())
+        }
+        fn open(&self, _: &str, _: TsQueue) -> dth_common::Result<Box<dyn Session>> {
+            Err(dth_common::Error::Unsupported("test".into()))
+        }
+        fn info(&self, _: &str) -> dth_common::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    fn test_unit() -> Unit {
+        Unit {
+            serial: "X".into(),
+            backend: Arc::new(NoBackend),
+            defaults: Arc::new(Defaults {
+                lnb_voltage: Lnb::Off,
+                lnb_power: false,
+                attenuator: false,
+                booster: false,
+                ter_lock_wait_ms: DEFAULT_TER_LOCK_WAIT_MS,
+                sat_lock_wait_ms: DEFAULT_SAT_LOCK_WAIT_MS,
+            }),
+            queues: [TsQueue::new(), TsQueue::new()],
+            tuner: Mutex::new(None),
+            second_ter: Mutex::new(None),
+            satellite: Mutex::new(None),
+            slots: [Mutex::new(Slot::default()), Mutex::new(Slot::default())],
+            cnr: Mutex::new(Cnr::default()),
+            tuning: AtomicUsize::new(0),
+        }
+    }
+
+    #[test]
+    fn a_panicking_connection_gives_everything_back() {
+        let unit = test_unit();
+        let activity = Arc::new(Activity { active: AtomicUsize::new(0), last_end: Mutex::new(Instant::now()) });
+        *unit.slots[1].locked() = held(7, Some("a"));
+        unit.cnr.locked().set(1, Some(18.5));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _active = Active::new(activity.clone());
+            let _held = Held { unit: &unit, i: 1, id: 7, lost_device: false };
+            let _tuning = Tuning::new(&unit.tuning);
+            assert_eq!(activity.active.load(Ordering::Relaxed), 1);
+            assert_eq!(unit.tuning.load(Ordering::Relaxed), 1);
+            panic!("in the middle of a tune");
+        }));
+        assert!(r.is_err());
+        assert_eq!(activity.active.load(Ordering::Relaxed), 0, "--idle-exit can end the daemon");
+        assert_eq!(unit.tuning.load(Ordering::Relaxed), 0, "a status reply is not busy for good");
+        let s = unit.slots[1].locked();
+        assert_eq!(s.owner, 0);
+        assert_eq!(claim(&s, true, Some("b")), Claim::Free, "a busy=fail request gets the tuner");
+        assert_eq!(unit.cnr.locked().tuners[1], None);
+    }
+
+    #[test]
+    fn a_slot_taken_over_stays_with_the_newer_connection() {
+        let unit = test_unit();
+        *unit.slots[0].locked() = held(7, None);
+        unit.cnr.locked().set(0, Some(30.0));
+        {
+            let _held = Held { unit: &unit, i: 0, id: 7, lost_device: false };
+            // a newer connection takes the stream over while this one ends
+            *unit.slots[0].locked() = held(8, None);
+        }
+        assert_eq!(unit.slots[0].locked().owner, 8);
+        assert_eq!(unit.cnr.locked().tuners[0], Some(30.0));
     }
 
     #[test]
