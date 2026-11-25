@@ -38,10 +38,11 @@ const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a (64-bit) prime, for [`folder_hash`].
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// A number for the folder `dir`, the same for every spelling Windows takes
-/// as that folder's (FNV-1a of the path, case-folded). It names the server
-/// of the programs in that folder, so that they meet without being told
-/// where, and the servers of two folders are apart.
+/// A number for the folder `dir` (FNV-1a of the path, lowercased): spellings
+/// that differ only in case get the same number, other spellings of the same
+/// folder (an 8.3 short name, a `\\?\` prefix, a trailing separator, `..`) do
+/// not. It names the server of the programs in that folder, so that they meet
+/// without being told where, and the servers of two folders are apart.
 pub fn folder_hash(dir: &Path) -> u64 {
     let mut h: u64 = FNV_OFFSET_BASIS;
     for b in dir.to_string_lossy().to_lowercase().bytes() {
@@ -153,9 +154,111 @@ fn is_socket_file(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// What tells a file from another that later takes its path: on Unix the
+/// device and inode numbers, on Windows the volume serial number and the
+/// file index. Not the creation time: on Windows a file made again under a
+/// name just freed takes the old file's creation time (NTFS tunneling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileId(u64, u64);
+
+/// The identity of the file at `path` (not followed).
+fn file_id(path: &Path) -> io::Result<FileId> {
+    cfg_select! {
+        unix => {
+            use std::os::unix::fs::MetadataExt;
+            let m = std::fs::symlink_metadata(path)?;
+            Ok(FileId(m.dev(), m.ino()))
+        }
+        windows => {
+            use std::os::windows::fs::OpenOptionsExt;
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+                FILE_READ_ATTRIBUTES, GetFileInformationByHandle,
+            };
+
+            // The socket's file is a reparse point: opened as itself, not as
+            // what its tag stands for.
+            let f = std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)?;
+            // SAFETY: plain data, for which all zeroes is a valid value.
+            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: an open file handle and a writable BY_HANDLE_FILE_INFORMATION.
+            if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(FileId(
+                u64::from(info.dwVolumeSerialNumber),
+                u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
+            ))
+        }
+    }
+}
+
+/// The lock file of the socket file `path`: `<path>.lock`.
+fn lock_path(path: &Path) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(".lock");
+    PathBuf::from(p)
+}
+
+/// Take the lock of the socket file `path`, which the daemons of that path
+/// hold while they check, replace or remove the socket file, so that two of
+/// them starting at once do not both take the file for stale and bind. It is
+/// held until the returned file is dropped. The lock file stays: a new file
+/// under the same name would be another lock than the one a daemon may still
+/// have open. Without the lock (a lock file another user made and this one
+/// cannot open, a read-only folder, a file system without locks) this warns
+/// and gives `None`: the daemon still starts, as it did before there was a
+/// lock, and only the race of two starting at once is back.
+fn lock_socket(path: &Path) -> Option<std::fs::File> {
+    let lock = lock_path(path);
+    let file = match open_lock_file(&lock) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("cannot open the lock file {}: {e}; going on without it", lock.display());
+            return None;
+        }
+    };
+    match file.lock() {
+        Ok(()) => Some(file),
+        Err(e) => {
+            log::warn!("cannot lock {}: {e}; going on without the lock", lock.display());
+            None
+        }
+    }
+}
+
+/// Open the lock file `lock` for writing, making it if it is not there yet;
+/// on Unix a new one gets `SOCKET_MODE`, so that whoever may use the socket
+/// may take its lock too.
+fn open_lock_file(lock: &Path) -> io::Result<std::fs::File> {
+    match std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(lock) {
+        Ok(f) => {
+            // Not left to the umask, as for the socket file.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                f.set_permissions(std::fs::Permissions::from_mode(SOCKET_MODE))?;
+            }
+            Ok(f)
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            std::fs::OpenOptions::new().read(true).write(true).open(lock)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// The daemon's listening socket.
 pub enum Listener {
-    Unix(Socket),
+    /// A Unix domain socket, and the identity of the socket file it made.
+    Unix {
+        socket: Socket,
+        file: FileId,
+    },
     Tcp(TcpListener),
 }
 
@@ -164,7 +267,8 @@ impl Listener {
     /// is removed (any other file at the path is an error and stays), and on
     /// Unix the new one gets `SOCKET_MODE` (0660); a live daemon (one that
     /// answers, or a TCP port in use) is an error, so that only one daemon
-    /// serves a target.
+    /// serves a target. The socket file is checked, replaced and bound under
+    /// its lock ([`lock_socket`]).
     pub fn bind(target: &Target) -> io::Result<Listener> {
         match target {
             Target::Unix(path) => {
@@ -174,6 +278,9 @@ impl Listener {
                     std::fs::create_dir_all(dir)?;
                 }
                 let addr = SockAddr::unix(path)?;
+                // Held until the socket listens: from then on another daemon
+                // sees a live one, not a stale file to replace.
+                let _lock = lock_socket(path);
                 if std::fs::symlink_metadata(path).is_ok() {
                     // Only a socket file is ever replaced: a path given by mistake
                     // that names another file must not cost that file.
@@ -202,9 +309,10 @@ impl Listener {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
                 }
+                let file = file_id(path)?;
                 l.listen(LISTEN_BACKLOG)?;
                 l.set_nonblocking(true)?;
-                Ok(Listener::Unix(l))
+                Ok(Listener::Unix { socket: l, file })
             }
             Target::Tcp(addr) => {
                 let sa: SocketAddr = addr
@@ -227,8 +335,8 @@ impl Listener {
     /// The next connection, or `WouldBlock`.
     pub fn accept(&self) -> io::Result<Conn> {
         match self {
-            Listener::Unix(l) => {
-                let (c, _) = l.accept()?;
+            Listener::Unix { socket, .. } => {
+                let (c, _) = socket.accept()?;
                 c.set_nonblocking(false)?;
                 Ok(Conn::Unix(c))
             }
@@ -241,10 +349,16 @@ impl Listener {
         }
     }
 
-    /// Remove what the listener left in the file system.
+    /// Remove what the listener left in the file system: the socket file, if
+    /// it is still the one this listener made. Once this daemon has stopped
+    /// listening, a daemon starting meanwhile may have replaced the file with
+    /// its own, which must stay. The lock file stays too ([`lock_socket`]).
     pub fn cleanup(&self, target: &Target) {
-        if let Target::Unix(p) = target {
-            let _ = std::fs::remove_file(p);
+        if let (Listener::Unix { file, .. }, Target::Unix(p)) = (self, target) {
+            let _lock = lock_socket(p);
+            if file_id(p).is_ok_and(|id| id == *file) {
+                let _ = std::fs::remove_file(p);
+            }
         }
     }
 }
@@ -392,7 +506,7 @@ mod tests {
         assert_eq!(a.parent(), Some(std::env::temp_dir().as_path()));
         let name = a.file_name().and_then(|n| n.to_str()).expect("a name");
         assert!(name.starts_with("dth-") && name.ends_with(".sock") && name.len() == 4 + 16 + 5, "{name}");
-        // the same folder however it is spelt, another folder elsewhere
+        // the same folder in either case, another folder elsewhere
         assert_eq!(a, folder_socket(Path::new("c:\\tvtest")));
         assert_ne!(a, folder_socket(Path::new("C:\\TVTest2")));
         // short enough for a socket address in a usual temp folder
@@ -435,6 +549,7 @@ mod tests {
         assert!(Listener::bind(&target).is_err(), "a live daemon is not replaced");
         listener.cleanup(&target);
         assert!(!path.exists());
+        let _ = std::fs::remove_file(lock_path(&path));
     }
 
     #[test]
@@ -445,6 +560,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
         std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(lock_path(&path));
     }
 
     #[test]
@@ -459,5 +575,83 @@ mod tests {
         let listener = Listener::bind(&target).expect("bind over the stale socket");
         listener.cleanup(&target);
         assert!(std::fs::symlink_metadata(&path).is_err());
+        let _ = std::fs::remove_file(lock_path(&path));
+    }
+
+    /// A daemon that has stopped listening but not yet cleaned up is replaced
+    /// by one starting meanwhile; its cleanup then leaves the new file alone.
+    #[test]
+    fn a_replaced_daemon_leaves_the_new_socket_file() {
+        let path = std::env::temp_dir().join(format!("dth-ipc-test-replaced-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let target = Target::Unix(path.clone());
+        let Listener::Unix { socket, file } = Listener::bind(&target).expect("bind") else {
+            unreachable!("a Unix target makes a Unix listener")
+        };
+        drop(socket);
+        let old = Listener::Unix { socket: unix_socket().unwrap(), file };
+        // On Linux a daemon's open socket keeps its file's inode even once the
+        // file is removed; closed here, its inode would be free, and ext4 gives
+        // it to the next socket file at once, so that the new file would look
+        // like the old one. A hard link keeps the old inode instead.
+        #[cfg(unix)]
+        let kept = {
+            let kept = path.with_extension("sock.kept");
+            let _ = std::fs::remove_file(&kept);
+            std::fs::hard_link(&path, &kept).unwrap();
+            kept
+        };
+        let new = Listener::bind(&target).expect("bind over the stale socket");
+        old.cleanup(&target);
+        assert!(std::fs::symlink_metadata(&path).is_ok(), "the new daemon's file stays");
+        drop(Conn::connect(&target).expect("the new daemon still answers"));
+        new.cleanup(&target);
+        assert!(std::fs::symlink_metadata(&path).is_err(), "the new daemon removes its own file");
+        #[cfg(unix)]
+        std::fs::remove_file(&kept).unwrap();
+        let _ = std::fs::remove_file(lock_path(&path));
+    }
+
+    /// A daemon starting while another holds the socket file's lock waits
+    /// for it, then finds the other's socket live, not a stale file.
+    #[test]
+    fn bind_waits_for_the_lock() {
+        let path = std::env::temp_dir().join(format!("dth-ipc-test-lock-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let target = Target::Unix(path.clone());
+        drop(Listener::bind(&target).expect("bind"));
+        let held = lock_socket(&path).expect("the lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| tx.send(Listener::bind(&target)).unwrap());
+            assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "bind waits for the lock");
+            // What a daemon does under the lock: replace the stale file, listen.
+            std::fs::remove_file(&path).unwrap();
+            let first = unix_socket().unwrap();
+            first.bind(&SockAddr::unix(&path).unwrap()).unwrap();
+            first.listen(LISTEN_BACKLOG).unwrap();
+            drop(held);
+            let second = rx.recv_timeout(Duration::from_secs(5)).expect("bind is done");
+            assert_eq!(second.err().map(|e| e.kind()), Some(io::ErrorKind::AddrInUse));
+        });
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(lock_path(&path));
+    }
+
+    /// A lock file that cannot be opened (here a folder in its place) costs
+    /// the lock, not the daemon.
+    #[test]
+    fn without_the_lock_file_the_daemon_still_binds() {
+        let path = std::env::temp_dir().join(format!("dth-ipc-test-nolock-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let lock = lock_path(&path);
+        std::fs::create_dir_all(&lock).unwrap();
+        let target = Target::Unix(path.clone());
+        let listener = Listener::bind(&target).expect("bind without the lock");
+        drop(Conn::connect(&target).expect("connect"));
+        listener.cleanup(&target);
+        assert!(std::fs::symlink_metadata(&path).is_err());
+        assert!(lock.is_dir(), "what stands in for the lock file stays");
+        std::fs::remove_dir(&lock).unwrap();
     }
 }

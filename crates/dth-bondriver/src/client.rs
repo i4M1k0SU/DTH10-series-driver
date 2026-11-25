@@ -196,8 +196,10 @@ fn program_text(p: DeviceProgram) -> String {
 }
 
 /// The loopback port of the TCP fallback for a DLL folder (FNV-1a of the
-/// folder's path, case-folded): fixed per folder, so every DLL instance of
-/// that folder meets the same server, and two installs seldom collide.
+/// folder's path, lowercased: spellings that differ only in case get the same
+/// port, other spellings of the folder do not): fixed per folder, so every DLL
+/// instance of that folder meets the same server, and two installs seldom
+/// collide.
 fn fallback_port(dll_dir: &Path) -> u16 {
     FALLBACK_PORT_BASE + (ipc::folder_hash(dll_dir) % u64::from(FALLBACK_PORT_COUNT)) as u16
 }
