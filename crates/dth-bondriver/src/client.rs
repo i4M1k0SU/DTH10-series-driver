@@ -22,7 +22,8 @@
 //! back when it is not running: a server that was killed or crashed is
 //! started again and the last channel asked for once more; a stream the
 //! server ended (the device was unplugged) or could not start yet (no device
-//! at all) is asked for again with growing pauses, so the picture comes back
+//! at all, another window holds the tuner) is asked for again with growing
+//! pauses, so the picture comes back
 //! by itself once the tuner is there.
 //!
 //! Every stream request carries this instance's client id, so the server
@@ -105,16 +106,25 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 /// The DLL's side of a stream: the reader thread that copies the TS from the
 /// server's connection into the queue TVTest reads from.
 struct ClientStream {
+    /// Set under the `stream` lock, under which the reader decides at its end
+    /// whether the stream was lost: one stopped on purpose was not.
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handle: JoinHandle<()>,
 }
 
-impl ClientStream {
-    fn stop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
+/// A stream request that did not get its `ok`.
+struct NotStarted {
+    why: String,
+    /// The stream may come by itself later (no server answering yet, `busy`,
+    /// no device), so the supervisor asks for it again; not after a request
+    /// the server refused (no lock, a mode the unit lacks), which would only
+    /// fail again.
+    again: bool,
+}
+
+impl NotStarted {
+    fn again(why: impl std::fmt::Display) -> NotStarted {
+        NotStarted { why: why.to_string(), again: true }
     }
 }
 
@@ -424,15 +434,20 @@ impl Inner {
         }
     }
 
+    /// Stop the stream's reader and drop what it queued. The reader is told
+    /// under the stream lock but joined out of it, as it takes that lock at
+    /// its end.
     fn stop_stream(&self) {
-        if let Some(mut s) = self.stream.locked().take() {
-            s.stop();
+        let old = self.stream.locked().take().inspect(|s| s.stop.store(true, Ordering::Relaxed));
+        if let Some(s) = old {
+            let _ = s.handle.join();
         }
         self.queue.purge();
     }
 
-    /// Ask the server for the channel's stream and feed the queue from it.
-    fn start_stream(self: &Arc<Self>, ch: &Channel) -> Result<(), String> {
+    /// Ask the server for the channel's stream: the connection past the
+    /// `ok`, for the reader thread.
+    fn request_stream(&self, ch: &Channel) -> Result<BufReader<Conn>, NotStarted> {
         let t0 = Instant::now();
         let req = Request::Stream(StreamRequest {
             unit: self.unit.clone(),
@@ -454,74 +469,110 @@ impl Inner {
         // Our own previous stream (same client id) is replaced at once by the
         // server; one held by another window is answered "busy" at once, and
         // TVTest gets the failure without any waiting.
-        let conn =
-            Conn::connect(&self.target).map_err(|e| format!("cannot reach the server at {}: {e}", self.target))?;
-        conn.set_read_timeout(Some(STREAM_REPLY_TIMEOUT)).map_err(|e| e.to_string())?;
+        let conn = Conn::connect(&self.target)
+            .map_err(|e| NotStarted::again(format!("cannot reach the server at {}: {e}", self.target)))?;
+        conn.set_read_timeout(Some(STREAM_REPLY_TIMEOUT)).map_err(NotStarted::again)?;
         let mut c = &conn;
-        c.write_all(format!("{}\n", req.to_line()).as_bytes()).map_err(|e| e.to_string())?;
+        c.write_all(format!("{}\n", req.to_line()).as_bytes()).map_err(|e| NotStarted::again(NoAnswer::of(e)))?;
         let mut reader = BufReader::new(conn);
-        let mut line = String::new();
-        (&mut reader)
-            .take(MAX_LINE as u64)
-            .read_line(&mut line)
-            .map_err(|e| format!("no reply from the server: {e}"))?;
-        match Reply::parse(&line) {
+        match Reply::parse(&reply_line(&mut reader).map_err(NotStarted::again)?) {
             Reply::Ok(info) => {
                 log::info!("server: streaming {} after {:?}: {info}", ch.name, t0.elapsed());
                 self.on_tuner.store(reply_tuner(&info), Ordering::Relaxed);
+                Ok(reader)
             }
-            Reply::Busy(why) => return Err(format!("busy: {why}")),
-            Reply::Error(e) => return Err(e),
+            Reply::Busy(why) => Err(NotStarted::again(format!("busy: {why}"))),
+            Reply::Error(e) => Err(NotStarted { again: no_device(&e), why: e }),
         }
-        reader.get_ref().set_read_timeout(Some(STREAM_READ_POLL)).map_err(|e| e.to_string())?;
+    }
+
+    /// Feed the queue from a stream the server said `ok` to.
+    fn start_reader(self: &Arc<Self>, mut reader: BufReader<Conn>, ch: &Channel) -> std::io::Result<ClientStream> {
+        reader.get_ref().set_read_timeout(Some(STREAM_READ_POLL))?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let inner = self.clone();
         let name = ch.name.clone();
-        let handle = std::thread::Builder::new()
-            .name("dth-client-ts".into())
-            .spawn(move || {
-                let mut buf = vec![0u8; STREAM_READ_BUF];
-                let mut pending: Vec<u8> = Vec::new();
-                let mut total = 0u64;
-                let mut ended = None;
-                while !stop2.load(Ordering::Relaxed) {
-                    match reader.read(&mut buf) {
-                        Ok(0) => {
-                            ended = Some("the server ended it");
-                            break;
-                        }
-                        Ok(n) => {
-                            total += n as u64;
-                            pending.extend_from_slice(&buf[..n]);
-                            if let Some(chunk) = whole_packets(&mut pending) {
-                                inner.queue.push(chunk);
-                            }
-                        }
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::WouldBlock
-                                    | std::io::ErrorKind::TimedOut
-                                    | std::io::ErrorKind::Interrupted
-                            ) => {}
-                        Err(e) => {
-                            log::warn!("server: read: {e}");
-                            ended = Some("read error");
-                            break;
+        let handle = std::thread::Builder::new().name("dth-client-ts".into()).spawn(move || {
+            let mut buf = vec![0u8; STREAM_READ_BUF];
+            let mut pending: Vec<u8> = Vec::new();
+            let mut total = 0u64;
+            let mut ended = None;
+            while !stop2.load(Ordering::Relaxed) {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        ended = Some("the server ended it");
+                        break;
+                    }
+                    Ok(n) => {
+                        total += n as u64;
+                        pending.extend_from_slice(&buf[..n]);
+                        if let Some(chunk) = whole_packets(&mut pending) {
+                            inner.queue.push(chunk);
                         }
                     }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(e) => {
+                        log::warn!("server: read: {e}");
+                        ended = Some("read error");
+                        break;
+                    }
                 }
-                if let Some(why) = ended
-                    && !stop2.load(Ordering::Relaxed)
-                {
+            }
+            if let Some(why) = ended {
+                // Under the stream lock, under which whoever stops this stream
+                // tells it first: the server ends our stream when a channel
+                // change replaces it, and that end is not a lost stream.
+                let _stream = inner.stream.locked();
+                if !stop2.load(Ordering::Relaxed) {
                     log::warn!("server: the stream of {name} ended ({why}, {total} bytes); it will be asked for again");
                     inner.lost.store(true, Ordering::Relaxed);
                 }
-            })
-            .map_err(|e| e.to_string())?;
-        *self.stream.locked() = Some(ClientStream { stop, handle: Some(handle) });
+            }
+        })?;
+        Ok(ClientStream { stop, handle })
+    }
+
+    /// Switch the stream to `ch`; the caller holds `ops`, and sets `lost` on
+    /// failure. The new stream is asked for before the old one is stopped:
+    /// the server replaces our own stream at once (same client id), so it
+    /// never frees the tuner in between for another window to take. A failed
+    /// request stops the old stream all the same, as TVTest takes the failure
+    /// for no stream.
+    fn switch_to(self: &Arc<Self>, ch: &Channel) -> Result<(), NotStarted> {
+        let asked = {
+            // Held until the old reader is told to stop, so that the end of
+            // the old connection the request brings is not a lost stream.
+            let stream = self.stream.locked();
+            let asked = self.ensure_server().map_err(NotStarted::again).and_then(|()| self.request_stream(ch));
+            if let Some(old) = stream.as_ref() {
+                old.stop.store(true, Ordering::Relaxed);
+            }
+            asked
+        };
+        // The old stream's TS is dropped once its reader is joined, before
+        // the new one feeds the queue.
+        self.stop_stream();
+        let reader = asked?;
+        // Before the new reader starts, which may see its stream end at once.
+        self.lost.store(false, Ordering::Relaxed);
+        *self.stream.locked() = Some(self.start_reader(reader, ch).map_err(NotStarted::again)?);
         Ok(())
+    }
+
+    /// TVTest's channel change; the caller holds `ops`.
+    fn set_channel(self: &Arc<Self>, ch: &Channel) -> Result<(), String> {
+        *self.want.locked() = Some(ch.clone());
+        self.switch_to(ch).map_err(|e| {
+            self.lost.store(e.again, Ordering::Relaxed);
+            e.why
+        })
     }
 }
 
@@ -548,27 +599,34 @@ fn supervise(inner: Arc<Inner>) {
         if let Some(ch) = want
             && recovery_due(true, inner.lost.load(Ordering::Relaxed), alive, last_try, delay)
         {
-            last_try = Some(Instant::now());
             let _ops = inner.ops.locked();
             if inner.closing.load(Ordering::Relaxed) {
                 break;
             }
-            log::warn!(
-                "server: {}; asking for the stream of {} again",
-                if alive { "the stream is not running" } else { "the server is not answering" },
-                ch.name
-            );
-            inner.stop_stream();
-            inner.lost.store(false, Ordering::Relaxed);
-            match inner.ensure_server().and_then(|()| inner.start_stream(&ch)) {
-                Ok(()) => {
-                    log::info!("server: the stream of {} is back", ch.name);
-                    delay = RETRY_FIRST;
-                }
-                Err(e) => {
-                    log::warn!("server: the stream of {} is not back yet ({e}); next try in {delay:?}", ch.name);
-                    inner.lost.store(true, Ordering::Relaxed);
-                    delay = next_delay(delay);
+            // TVTest may have changed the channel while this thread waited for
+            // `ops` (the old channel must not come back over the new one), or
+            // the stream may be running again.
+            if inner.want.locked().as_ref() == Some(&ch) && (inner.lost.load(Ordering::Relaxed) || !alive) {
+                last_try = Some(Instant::now());
+                log::warn!(
+                    "server: {}; asking for the stream of {} again",
+                    if alive { "the stream is not running" } else { "the server is not answering" },
+                    ch.name
+                );
+                match inner.switch_to(&ch) {
+                    Ok(()) => {
+                        log::info!("server: the stream of {} is back", ch.name);
+                        delay = RETRY_FIRST;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "server: the stream of {} is not back yet ({}); next try in {delay:?}",
+                            ch.name,
+                            e.why
+                        );
+                        inner.lost.store(true, Ordering::Relaxed);
+                        delay = next_delay(delay);
+                    }
                 }
             }
         }
@@ -621,18 +679,12 @@ impl Client {
     /// Ask the server for the channel's stream (starting the server again
     /// first when it has gone away). Without a device the request fails at
     /// once, and the supervisor keeps asking for the channel until the tuner
-    /// is plugged in.
+    /// is plugged in; likewise when no server answers yet or another window
+    /// holds the tuner. A request the server refuses (no lock) is not asked
+    /// for again.
     pub fn set_channel(&mut self, ch: &Channel) -> Result<(), String> {
         let _ops = self.inner.ops.locked();
-        *self.inner.want.locked() = Some(ch.clone());
-        self.inner.lost.store(false, Ordering::Relaxed);
-        self.inner.stop_stream();
-        self.inner.ensure_server()?;
-        self.inner.start_stream(ch).inspect_err(|e| {
-            if no_device(e) {
-                self.inner.lost.store(true, Ordering::Relaxed);
-            }
-        })
+        self.inner.set_channel(ch)
     }
 
     /// C/N of the current channel's tuner, as last read by the supervisor (never waits).
@@ -1054,6 +1106,107 @@ mod tests {
         let tuners = tuners.locked();
         assert_eq!(tuners[0], (System::IsdbS, None), "no tuner= with a satellite request");
         assert_eq!(tuners[1], (System::IsdbT, Some(TunerChoice::Index(1))));
+    }
+
+    /// (what, previous stream still connected) of every request the server
+    /// got: `status`, or the channel name of a stream request.
+    type Requests = Arc<Mutex<Vec<(String, bool)>>>;
+
+    /// A stand-in for `dth serve` that answers status and keeps a stream open
+    /// (after a few packets) until the next stream request replaces it, as
+    /// the server does for the same client.
+    fn holding_server(target: Target, seen: Requests, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+        let listener = Listener::bind(&target).expect("bind the fake server");
+        std::thread::spawn(move || {
+            let mut stream: Option<Conn> = None;
+            while !stop.load(Ordering::Relaxed) {
+                let Ok(conn) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut line = String::new();
+                let _ = (&mut BufReader::new(&conn)).take(MAX_LINE as u64).read_line(&mut line);
+                let mut c = &conn;
+                match Request::parse(line.trim_end()) {
+                    Ok(Request::Status { .. }) => {
+                        seen.locked().push(("status".into(), false));
+                        let _ = c.write_all(b"ok X ter=30.0 sat=-\n");
+                    }
+                    Ok(Request::Stream(r)) => {
+                        let previous = stream.take().is_some_and(|p| !p.peer_closed());
+                        seen.locked().push((r.channel.name.clone(), previous));
+                        let _ = c.write_all(b"ok X ISDB-T 557142857 Hz C/N 30.0 dB\n");
+                        let mut pkt = [0u8; 188];
+                        pkt[0] = 0x47;
+                        let _ = c.write_all(&pkt.repeat(10));
+                        stream = Some(conn);
+                    }
+                    Err(e) => panic!("bad request {line:?}: {e}"),
+                }
+            }
+            listener.cleanup(&target);
+        })
+    }
+
+    fn stream_requests(seen: &Requests) -> Vec<(String, bool)> {
+        seen.locked().iter().filter(|(what, _)| what != "status").cloned().collect()
+    }
+
+    /// The new channel is asked for while the previous stream is still
+    /// connected, so the server never frees the tuner in between.
+    #[test]
+    fn a_channel_change_asks_before_the_old_stream_ends() {
+        let dir = dll_folder("change-order");
+        let seen = Requests::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = holding_server(server_target(&dir), seen.clone(), stop.clone());
+        let cfg = Config { dll_dir: Some(dir.clone()), ..Config::default() };
+        let queue = TsQueue::new();
+        let mut h = Client::open(&cfg, queue.clone()).expect("open against the fake server");
+        h.set_channel(&Channel::terrestrial(27).expect("UHF channel")).expect("first stream");
+        h.set_channel(&Channel::terrestrial(28).expect("UHF channel")).expect("second stream");
+        assert!(queue.wait(3000), "no packets from the second stream");
+        assert!(!h.inner.lost.load(Ordering::Relaxed), "the replaced stream is not a lost one");
+        h.close();
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(stream_requests(&seen), [("27ch".into(), false), ("28ch".into(), true)]);
+    }
+
+    /// The supervisor decided to bring back the channel it saw, and waits
+    /// for `ops` while TVTest changes the channel: the old channel is not
+    /// asked for over the new one.
+    #[test]
+    fn the_supervisor_does_not_bring_back_an_old_channel() {
+        let dir = dll_folder("old-channel");
+        let seen = Requests::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = holding_server(server_target(&dir), seen.clone(), stop.clone());
+        let cfg = Config { dll_dir: Some(dir.clone()), ..Config::default() };
+        let mut h = Client::open(&cfg, TsQueue::new()).expect("open against the fake server");
+        {
+            let _ops = h.inner.ops.locked();
+            // a stream of channel 27 that was lost, as the supervisor finds it
+            *h.inner.want.locked() = Some(Channel::terrestrial(27).expect("UHF channel"));
+            h.inner.lost.store(true, Ordering::Relaxed);
+            // its next round: a status request, then it waits for `ops`
+            let polls = seen.locked().len();
+            let t0 = Instant::now();
+            while seen.locked().len() == polls && t0.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            // TVTest changes the channel meanwhile
+            h.inner.set_channel(&Channel::terrestrial(28).expect("UHF channel")).expect("stream of 28");
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        h.close();
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(stream_requests(&seen), [("28ch".into(), false)]);
     }
 
     #[test]
