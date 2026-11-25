@@ -284,7 +284,7 @@ dependencies = [
  "dth-log",
  "dth-proto",
  "env_logger",
- "jiff 1.0.0",
+ "jiff 1.0.1",
  "log",
  "windows-sys",
  "winresource",
@@ -303,7 +303,7 @@ dependencies = [
  "dth10-usb",
  "dth30-backend",
  "env_logger",
- "jiff 1.0.0",
+ "jiff 1.0.1",
  "libc",
  "log",
  "windows-sys",
@@ -319,7 +319,7 @@ name = "dth-log"
 version = "2.0.0"
 dependencies = [
  "env_logger",
- "jiff 1.0.0",
+ "jiff 1.0.1",
  "libc",
  "windows-sys",
 ]
@@ -368,7 +368,7 @@ dependencies = [
  "dth10-core",
  "dth10-usb",
  "env_logger",
- "jiff 1.0.0",
+ "jiff 1.0.1",
  "log",
  "winresource",
 ]
@@ -410,7 +410,7 @@ dependencies = [
  "dth30-core",
  "dth30-usb",
  "env_logger",
- "jiff 1.0.0",
+ "jiff 1.0.1",
  "log",
  "winresource",
 ]
@@ -578,12 +578,12 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+checksum = "ed5d126d72eb017f10b302e73bdeca446bea405ee449af4d9e7866d6b082d83e"
 dependencies = [
- "jiff-core 1.0.0",
- "jiff-static 1.0.0",
+ "jiff-core 1.0.1",
+ "jiff-static 1.0.1",
  "log",
  "portable-atomic",
  "portable-atomic-util",
@@ -601,9 +601,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
+checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
 dependencies = [
  "log",
 ]
@@ -622,11 +622,11 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+checksum = "c0127e9bde3c6130d6169e7d8d68676e4be69c4bf7573c308b6f960a5089c428"
 dependencies = [
- "jiff-core 1.0.0",
+ "jiff-core 1.0.1",
  "proc-macro2",
  "quote",
  "syn 3.0.10",
