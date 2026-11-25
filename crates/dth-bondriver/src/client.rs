@@ -92,6 +92,11 @@ const SERVER_POLL: Duration = Duration::from_millis(100);
 /// The supervisor's round, in [`SERVER_POLL`]s: once a second.
 const SUPERVISE_POLLS: u32 = 10;
 
+/// How many times, [`SERVER_POLL`] apart, a server that closes the connection
+/// without an answer (one that is ending) is asked again before it counts as
+/// not answering.
+const ENDING_SERVER_POLLS: u32 = 10;
+
 /// How long a status request may take. The server answers from what it has
 /// (it never opens the device for a status request), so this only catches a
 /// server that is stuck.
@@ -129,6 +134,20 @@ enum NoAnswer {
     /// A server accepted the connection but did not answer in time: it is
     /// there, so no second one is started.
     Failed(String),
+    /// A server accepted the connection but closed it before its answer: one
+    /// that is ending, so it is soon gone.
+    Closed(String),
+}
+
+impl NoAnswer {
+    /// A write or read that failed on a connection the server accepted.
+    fn of(e: std::io::Error) -> NoAnswer {
+        use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, UnexpectedEof};
+        match e.kind() {
+            ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof => NoAnswer::Closed(e.to_string()),
+            _ => NoAnswer::Failed(e.to_string()),
+        }
+    }
 }
 
 impl std::fmt::Display for NoAnswer {
@@ -136,7 +155,18 @@ impl std::fmt::Display for NoAnswer {
         match self {
             NoAnswer::Unreachable(e) => write!(f, "cannot reach the server: {e}"),
             NoAnswer::Failed(e) => write!(f, "the server does not answer: {e}"),
+            NoAnswer::Closed(e) => write!(f, "the server closed the connection without an answer: {e}"),
         }
+    }
+}
+
+/// Read the server's reply line. A connection closed before it (an empty
+/// read) is [`NoAnswer::Closed`], not an empty reply.
+fn reply_line(reader: &mut impl BufRead) -> Result<String, NoAnswer> {
+    let mut line = String::new();
+    match reader.take(MAX_LINE as u64).read_line(&mut line).map_err(NoAnswer::of)? {
+        0 => Err(NoAnswer::Closed("end of the connection".into())),
+        _ => Ok(line),
     }
 }
 
@@ -263,14 +293,11 @@ fn launch_spec(cfg: &Config, dll_dir: &Path, target: &Target) -> Launch {
 /// an unknown serial), and [`NoAnswer`] when it did not answer.
 fn status_of(target: &Target, unit: Option<&str>) -> Result<Option<Status>, NoAnswer> {
     let conn = Conn::connect(target).map_err(|e| NoAnswer::Unreachable(e.to_string()))?;
-    let failed = |e: std::io::Error| NoAnswer::Failed(e.to_string());
-    conn.set_read_timeout(Some(STATUS_TIMEOUT)).map_err(failed)?;
+    conn.set_read_timeout(Some(STATUS_TIMEOUT)).map_err(|e| NoAnswer::Failed(e.to_string()))?;
     let mut c = &conn;
     c.write_all(format!("{}\n", Request::Status { unit: unit.map(str::to_owned) }.to_line()).as_bytes())
-        .map_err(failed)?;
-    let mut line = String::new();
-    (&mut BufReader::new(&conn)).take(MAX_LINE as u64).read_line(&mut line).map_err(failed)?;
-    match Reply::parse(&line) {
+        .map_err(NoAnswer::of)?;
+    match Reply::parse(&reply_line(&mut BufReader::new(&conn))?) {
         Reply::Ok(info) => Ok(Some(Status::parse(&info))),
         Reply::Busy(why) | Reply::Error(why) => {
             log::debug!("server: status: {why}");
@@ -347,10 +374,20 @@ impl Inner {
     /// ends right after it was started (cannot bind the socket, lost the bind
     /// race against another DLL's server) is noticed by its exit, so TVTest
     /// does not wait out the start timeout for it.
+    ///
+    /// A server that closes the connection without an answer is ending: it is
+    /// asked again for a while, until it is gone (and one is started here) or
+    /// another one answers in its place.
     fn ensure_server(&self) -> Result<(), String> {
-        match self.status() {
+        let mut answer = self.status();
+        for _ in 0..ENDING_SERVER_POLLS {
+            let Err(NoAnswer::Closed(_)) = answer else { break };
+            std::thread::sleep(SERVER_POLL);
+            answer = self.status();
+        }
+        match answer {
             Ok(_) => return Ok(()),
-            Err(e @ NoAnswer::Failed(_)) => return Err(format!("{e} (at {})", self.target)),
+            Err(e @ (NoAnswer::Failed(_) | NoAnswer::Closed(_))) => return Err(format!("{e} (at {})", self.target)),
             Err(NoAnswer::Unreachable(e)) => log::info!("server: none answers at {} ({e}); starting one", self.target),
         }
         let mut child = self.spawn_server()?;
@@ -366,7 +403,9 @@ impl Inner {
                     return Ok(());
                 }
                 Err(e @ NoAnswer::Failed(_)) => return Err(format!("the server started but {e}")),
-                Err(NoAnswer::Unreachable(e)) => {
+                // Not up yet, or an ending server still closes the connections
+                // before ours has its socket.
+                Err(e @ (NoAnswer::Unreachable(_) | NoAnswer::Closed(_))) => {
                     if let Ok(Some(exit)) = child.try_wait() {
                         // Gone already. Another DLL's server may have won the
                         // bind race (this one then exits at once): ask once more.
@@ -499,7 +538,9 @@ fn supervise(inner: Arc<Inner>) {
             }
             Err(e) => {
                 *inner.cnr.locked() = Status::default();
-                // A server that is there but slow is not replaced by a second one.
+                // A server that is there but slow is not replaced by a second
+                // one; one that closes the connection without an answer is
+                // ending, and is gone by the time the stream is asked for again.
                 matches!(e, NoAnswer::Failed(_))
             }
         };
@@ -740,6 +781,77 @@ mod tests {
         let err = Client::open(&cfg, TsQueue::new()).err().expect("no server");
         assert!(t0.elapsed() < Duration::from_secs(2));
         assert!(err.contains("cannot start the server"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stand-in for a `dth serve` that is ending: it closes every connection
+    /// without an answer, until `answer_after` (when given; another server in
+    /// its place answers status from then on), and stops listening at `stop`.
+    fn ending_server(target: Target, answer_after: Option<Duration>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+        let listener = Listener::bind(&target).expect("bind the fake server");
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            while !stop.load(Ordering::Relaxed) {
+                let Ok(conn) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                if answer_after.is_some_and(|d| t0.elapsed() >= d) {
+                    let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
+                    let mut line = String::new();
+                    let _ = (&mut BufReader::new(&conn)).take(MAX_LINE as u64).read_line(&mut line);
+                    let _ = (&conn).write_all(b"ok X ter=- sat=-\n");
+                }
+            }
+            listener.cleanup(&target);
+        })
+    }
+
+    #[test]
+    fn a_server_closing_without_an_answer_is_ending() {
+        let dir = dll_folder("ending");
+        let target = server_target(&dir);
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = ending_server(target.clone(), None, stop.clone());
+        let r = status_of(&target, None);
+        assert!(matches!(r, Err(NoAnswer::Closed(_))), "{:?}", r.err());
+        // still closing after a second: that server does not answer (and no
+        // second one is started next to it)
+        let cfg = Config { dll_dir: Some(dir.clone()), ..Config::default() };
+        let err = Client::open(&cfg, TsQueue::new()).err().expect("no answer");
+        assert!(err.contains("closed the connection without an answer"), "{err}");
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
+
+        // once it has stopped listening, a server is started (here there is
+        // no dth.exe to start)
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = ending_server(target.clone(), None, stop.clone());
+        let ender = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                stop.store(true, Ordering::Relaxed);
+            })
+        };
+        let err = Client::open(&cfg, TsQueue::new()).err().expect("no server");
+        assert!(err.contains("cannot start the server"), "{err}");
+        let _ = (ender.join(), server.join());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_answering_after_an_ending_one_is_used() {
+        let dir = dll_folder("after-ending");
+        let target = server_target(&dir);
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = ending_server(target, Some(Duration::from_millis(300)), stop.clone());
+        // no dth.exe here: opening succeeds only by the answer of the server there
+        let cfg = Config { dll_dir: Some(dir.clone()), ..Config::default() };
+        let mut h = Client::open(&cfg, TsQueue::new()).expect("the server answering in the ending one's place");
+        h.close();
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
