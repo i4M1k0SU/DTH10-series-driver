@@ -187,6 +187,19 @@ pub struct Client {
     supervisor: Option<JoinHandle<()>>,
 }
 
+/// A new DLL instance's client id: `<pid>-<module>-<n>`. The process alone
+/// does not tell the instances apart, nor does a count: a renamed copy of the
+/// DLL loaded into the same process (BonDriverProxyEx does that) has statics
+/// of its own and counts from 1 as well, so the address of the count, which
+/// differs per loaded module, goes in too. The server only compares the id as
+/// a string.
+fn client_id() -> String {
+    static INSTANCE: AtomicU64 = AtomicU64::new(0);
+    let n = INSTANCE.fetch_add(1, Ordering::Relaxed) + 1;
+    let module = (&raw const INSTANCE).addr();
+    format!("{}-{module:x}-{n}", std::process::id())
+}
+
 fn program_text(p: DeviceProgram) -> String {
     match p {
         DeviceProgram::First => "first".into(),
@@ -530,14 +543,13 @@ fn supervise(inner: Arc<Inner>) {
 impl Client {
     /// Connect to the server in the DLL's folder, starting it when none answers.
     pub fn open(cfg: &Config, queue: TsQueue) -> Result<Client, String> {
-        static INSTANCE: AtomicU64 = AtomicU64::new(0);
         let dll_dir =
             cfg.dll_dir.clone().ok_or("the DLL's own folder is unknown, so the server dth.exe cannot be found")?;
         let target = server_target(&dll_dir);
         let launch = launch_spec(cfg, &dll_dir, &target);
         let inner = Arc::new(Inner {
             target,
-            client: format!("{}-{}", std::process::id(), INSTANCE.fetch_add(1, Ordering::Relaxed) + 1),
+            client: client_id(),
             unit: (!cfg.tuner.serial.is_empty()).then(|| cfg.tuner.serial.clone()),
             program: program_text(cfg.tuner.device_program),
             raw: cfg.tuner.stream_mode == StreamModeCfg::Raw,
@@ -627,6 +639,19 @@ mod tests {
         pending.extend_from_slice(&[0u8; 178]);
         assert_eq!(whole_packets(&mut pending).map(|v| v.len()), Some(188));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn client_ids_name_process_module_and_instance() {
+        let (a, b) = (client_id(), client_id());
+        assert_ne!(a, b, "each instance has its own id");
+        let parts = |id: &str| id.rsplit_once('-').map(|(head, n)| (head.to_owned(), n.parse::<u64>().expect("count")));
+        let ((head_a, n_a), (head_b, n_b)) = (parts(&a).expect("<pid>-<module>-<n>"), parts(&b).expect("ditto"));
+        assert_eq!(head_a, head_b, "the same process and module");
+        assert!(n_b > n_a, "{a} then {b}");
+        let (pid, module) = head_a.split_once('-').expect("<pid>-<module>");
+        assert_eq!(pid, std::process::id().to_string());
+        assert!(u64::from_str_radix(module, 16).is_ok_and(|m| m != 0), "{a}");
     }
 
     #[test]
