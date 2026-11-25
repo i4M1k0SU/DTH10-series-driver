@@ -306,16 +306,44 @@ impl Unit {
     }
 }
 
-/// The unit a request names, or the only one.
-fn pick_unit<'a>(units: &'a [Arc<Unit>], serial: Option<&str>) -> Result<&'a Arc<Unit>, String> {
-    let served = || units.iter().map(|u| u.serial.as_str()).collect::<Vec<_>>().join(", ");
-    if units.is_empty() {
+/// The unit a request names, else the only one connected now.
+fn pick_unit<'a>(
+    units: &'a [Arc<Unit>],
+    serial: Option<&str>,
+    present: Option<&[String]>,
+) -> Result<&'a Arc<Unit>, String> {
+    let served: Vec<&str> = units.iter().map(|u| u.serial.as_str()).collect();
+    pick_unit_index(&served, serial, present).map(|i| &units[i])
+}
+
+/// Which of the units `served` a request gets: the one it names (served,
+/// connected or not: it may come back), else the only one served, else the
+/// only one of them connected now (`present`, the names the last device scan
+/// found; `None` when that is not known). The daemon serves every unit it
+/// has seen, so one that was unplugged and replaced by another stays in
+/// `served`, and only `present` tells them apart.
+fn pick_unit_index(served: &[&str], serial: Option<&str>, present: Option<&[String]>) -> Result<usize, String> {
+    if served.is_empty() {
         return Err("no unit yet (no supported device found; waiting for one)".into());
     }
-    match serial {
-        Some(s) => units.iter().find(|u| u.serial == s).ok_or_else(|| format!("no unit {s} (served: {})", served())),
-        None if units.len() == 1 => Ok(&units[0]),
-        None => Err(format!("several units are served, give unit=<serial>: {}", served())),
+    if let Some(s) = serial {
+        return served
+            .iter()
+            .position(|&u| u == s)
+            .ok_or_else(|| format!("no unit {s} (served: {})", served.join(", ")));
+    }
+    if served.len() == 1 {
+        return Ok(0);
+    }
+    let connected: Vec<usize> =
+        (0..served.len()).filter(|&i| present.is_none_or(|p| p.iter().any(|n| n == served[i]))).collect();
+    match connected[..] {
+        [i] => Ok(i),
+        [] => Err(format!("none of the units served is connected now: {}", served.join(", "))),
+        _ => {
+            let names: Vec<&str> = connected.iter().map(|&i| served[i]).collect();
+            Err(format!("several units are served, give unit=<serial>: {}", names.join(", ")))
+        }
     }
 }
 
@@ -353,7 +381,7 @@ impl Drop for Active {
 /// One client: read the request; a status request is answered at once, a
 /// stream request takes the stream over, tunes, pumps the TS until the client
 /// goes away (or a newer client takes the stream), then releases.
-fn serve_connection(conn: Conn, id: u64, units: &Units) {
+fn serve_connection(conn: Conn, id: u64, units: &Units, present: &Present) {
     let _ = conn.set_read_timeout(Some(REQUEST_TIMEOUT));
     let mut line = String::new();
     {
@@ -376,7 +404,8 @@ fn serve_connection(conn: Conn, id: u64, units: &Units) {
         Request::Stream(r) => (r.unit.clone(), Some(r)),
     };
     let units: Vec<Arc<Unit>> = units.locked().clone();
-    let unit = match pick_unit(&units, unit_name.as_deref()) {
+    let present = present.locked().clone();
+    let unit = match pick_unit(&units, unit_name.as_deref(), present.as_deref()) {
         Ok(u) => u,
         Err(e) => {
             log::warn!("connection {id}: {e}");
@@ -734,22 +763,35 @@ fn poll_status(units: &Units, quit: &AtomicBool) {
 /// The units served, in discovery order; grows when a device appears later.
 type Units = Arc<Mutex<Vec<Arc<Unit>>>>;
 
+/// The names of the units connected at the last device scan; `None` before
+/// one, when a family could not list its devices, or when the units were
+/// named on the command line (no scan then).
+type Present = Arc<Mutex<Option<Vec<String>>>>;
+
 /// How often the daemon looks for devices: while it has none, and otherwise.
 const SCAN_WITHOUT_UNIT: Duration = Duration::from_secs(2);
 const SCAN_WITH_UNITS: Duration = Duration::from_secs(10);
 
-/// Add a unit for every supported device that is not served yet.
 /// Builds a served unit from its name and family.
 type MakeUnit<'a> = &'a dyn Fn(&str, Arc<dyn Backend>) -> Arc<Unit>;
 
-fn discover(units: &Units, backends: &[Arc<dyn Backend>], make_unit: MakeUnit<'_>) {
+/// Add a unit for every supported device that is not served yet, and note
+/// which units are connected now. Listing the devices may open them (Linux
+/// without sysfs reads each one's serial number), so a request uses this
+/// scan's result rather than listing them again.
+fn discover(units: &Units, present: &Present, backends: &[Arc<dyn Backend>], make_unit: MakeUnit<'_>) {
     let mut found = Vec::new();
+    let mut complete = true;
     for b in backends {
         match b.units() {
             Ok(v) => found.extend(v.into_iter().map(|u| (u, b.clone()))),
-            Err(e) => log::debug!("{} device list: {e}", b.family()),
+            Err(e) => {
+                log::debug!("{} device list: {e}", b.family());
+                complete = false;
+            }
         }
     }
+    *present.locked() = complete.then(|| found.iter().map(|(u, _)| u.name.clone()).collect());
     let mut u = units.locked();
     for (unit, backend) in found {
         if u.iter().any(|x| x.serial == unit.name) {
@@ -828,9 +870,10 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
         })
     };
     let units: Units = Arc::new(Mutex::new(Vec::new()));
+    let present: Present = Arc::new(Mutex::new(None));
     let auto = a.serial.is_empty();
     if auto {
-        discover(&units, &backends, &make_unit);
+        discover(&units, &present, &backends, &make_unit);
     } else {
         let mut u = units.locked();
         for s in &a.serial {
@@ -869,11 +912,11 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
         match listener.accept() {
             Ok(conn) => {
                 let id = next_id.fetch_add(1, Ordering::Relaxed);
-                let units = units.clone();
+                let (units, present) = (units.clone(), present.clone());
                 let active = Active::new(activity.clone());
                 let spawned = std::thread::Builder::new().name(format!("conn-{id}")).spawn(move || {
                     let _active = active;
-                    serve_connection(conn, id, &units);
+                    serve_connection(conn, id, &units, &present);
                 });
                 match spawned {
                     Ok(t) => threads.push(t),
@@ -892,7 +935,7 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             let interval = if units.locked().is_empty() { SCAN_WITHOUT_UNIT } else { SCAN_WITH_UNITS };
             if last_scan.elapsed() >= interval {
                 last_scan = Instant::now();
-                discover(&units, &backends, &make_unit);
+                discover(&units, &present, &backends, &make_unit);
             }
         }
         if a.idle_exit > 0
@@ -1002,6 +1045,25 @@ mod tests {
         let st = unit_status([None, Some(28.0)], two, [None, h], true);
         assert_eq!(st.to_info("X"), "X ter=- sat=none ter1=28.0 ter1_ch=27 ter1_by=5 busy");
         assert_eq!((st.sat, st.ter1), (None, Some(28.0)));
+    }
+
+    #[test]
+    fn unit_picks() {
+        let present = |names: &[&str]| names.iter().map(|&n| n.to_owned()).collect::<Vec<_>>();
+        assert!(pick_unit_index(&[], None, None).is_err(), "nothing served yet");
+        // a named unit is served, connected or not
+        assert_eq!(pick_unit_index(&["A", "B"], Some("B"), Some(&present(&["A"]))), Ok(1));
+        assert!(pick_unit_index(&["A"], Some("C"), None).is_err());
+        // the only unit served, even when it is not connected (it may come back)
+        assert_eq!(pick_unit_index(&["A"], None, Some(&present(&[]))), Ok(0));
+        // A was unplugged and B plugged in: B, not "several units"
+        assert_eq!(pick_unit_index(&["A", "B"], None, Some(&present(&["B"]))), Ok(1));
+        assert_eq!(pick_unit_index(&["A", "B", "C"], None, Some(&present(&["C", "X"]))), Ok(2));
+        let e = pick_unit_index(&["A", "B", "C"], None, Some(&present(&["A", "C"]))).unwrap_err();
+        assert!(e.contains("several") && e.contains("A, C") && !e.contains('B'), "{e}");
+        assert!(pick_unit_index(&["A", "B"], None, Some(&present(&[]))).unwrap_err().contains("connected"));
+        // not known which are connected: as before
+        assert!(pick_unit_index(&["A", "B"], None, None).unwrap_err().contains("several"));
     }
 
     /// A family with no units, for a [`Unit`] that is never opened.
