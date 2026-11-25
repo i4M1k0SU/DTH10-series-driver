@@ -715,6 +715,18 @@ mod tests {
     use dth_proto::ipc::Listener;
     use std::sync::atomic::AtomicUsize;
 
+    /// Stop a fake server as the daemon does, and remove the lock file that
+    /// `Listener::bind` leaves next to the socket file (`%TEMP%`, not the
+    /// test's folder), so that the tests leave nothing behind.
+    fn unlisten(listener: &Listener, target: &Target) {
+        listener.cleanup(target);
+        if let Target::Unix(p) = target {
+            let mut lock = p.clone().into_os_string();
+            lock.push(".lock");
+            let _ = std::fs::remove_file(lock);
+        }
+    }
+
     /// A folder standing in for the DLL's, emptied afterwards.
     fn dll_folder(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("dth-client-{name}-{}", std::process::id()));
@@ -855,7 +867,7 @@ mod tests {
                     let _ = (&conn).write_all(b"ok X ter=- sat=-\n");
                 }
             }
-            listener.cleanup(&target);
+            unlisten(&listener, &target);
         })
     }
 
@@ -954,7 +966,7 @@ mod tests {
             for c in conns {
                 let _ = c.join();
             }
-            listener.cleanup(&target);
+            unlisten(&listener, &target);
         })
     }
 
@@ -1008,7 +1020,7 @@ mod tests {
                         Err(e) => panic!("bad request {line:?}: {e}"),
                     }
                 }
-                listener.cleanup(&target);
+                unlisten(&listener, &target);
             })
         };
 
@@ -1084,7 +1096,7 @@ mod tests {
                     };
                     let _ = c.write_all(answer);
                 }
-                listener.cleanup(&target);
+                unlisten(&listener, &target);
             })
         };
 
@@ -1145,7 +1157,7 @@ mod tests {
                     Err(e) => panic!("bad request {line:?}: {e}"),
                 }
             }
-            listener.cleanup(&target);
+            unlisten(&listener, &target);
         })
     }
 

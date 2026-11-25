@@ -456,8 +456,12 @@ mod tests {
                     Err(e) => panic!("accept: {e}"),
                 }
             };
+            listener.cleanup(&target);
             drop(listener);
-            let _ = std::fs::remove_file(&path);
+            // and the lock file `Listener::bind` leaves next to the socket file
+            let mut lock = path.into_os_string();
+            lock.push(".lock");
+            let _ = std::fs::remove_file(lock);
             (c, daemon)
         }
 
