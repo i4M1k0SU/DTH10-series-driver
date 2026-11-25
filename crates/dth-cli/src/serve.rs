@@ -904,6 +904,11 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
         }
     }
     log::info!("dth serve: stopping");
+    // Stop listening before anything else: a client that comes while the
+    // units are closed then finds no daemon and starts a new one, instead
+    // of waiting in the backlog for an answer that never comes.
+    listener.cleanup(&target);
+    drop(listener);
     let units: Vec<Arc<Unit>> = units.locked().clone();
     for u in &units {
         for s in &u.slots {
@@ -922,7 +927,6 @@ pub fn run(a: &ServeArgs) -> Result<(), Box<dyn Error>> {
             t.close();
         }
     }
-    listener.cleanup(&target);
     Ok(())
 }
 
