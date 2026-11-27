@@ -513,6 +513,10 @@ const EVENT_ERROR_DELAY: Duration = Duration::from_millis(500);
 const EVENT_WINDOW: Duration = Duration::from_mins(1);
 /// Events logged one by one per [`EVENT_WINDOW`].
 const EVENTS_SHOWN_PER_WINDOW: u32 = 5;
+/// Events per [`EVENT_WINDOW`] taken for a storm. Every tune raises one card
+/// event, so a channel scan comes to about 20 a minute; a card engine in
+/// trouble raises one every 0.5 s (120 a minute, docs/40).
+const EVENT_STORM_PER_WINDOW: u32 = 60;
 
 /// The interrupt-endpoint reader. It holds the endpoint and with it the
 /// device handle, so it is stopped and joined when the tuner goes: otherwise
@@ -754,8 +758,10 @@ impl Tuner {
                                     }
                                 }
                                 if window.elapsed() >= EVENT_WINDOW {
-                                    if suppressed > 0 {
+                                    if in_window >= EVENT_STORM_PER_WINDOW {
                                         log::warn!("events: {in_window} in the last minute ({suppressed} not shown): the device keeps raising card events");
+                                    } else if suppressed > 0 {
+                                        log::info!("events: {in_window} in the last minute ({suppressed} not shown)");
                                     }
                                     window = Instant::now();
                                     in_window = 0;
@@ -1063,7 +1069,7 @@ impl Tuner {
             StreamReader::DEFAULT_TRANSFER_LEN,
             self.cfg.read_depth.max(1),
         )?;
-        let mut psi = PsiCollector::new();
+        let mut psi = PsiCollector::new(None);
         let mut aligner = Aligner::new(true, self.slot_layout());
         reader.start();
         dev_for_stream.stream_enable_mode(desc, StreamMode::RawFullTs)?;
@@ -1085,12 +1091,16 @@ impl Tuner {
     /// satellite stream (which has no raw mode) and, by default, for the
     /// terrestrial one too, because a raw enable on stream #0 stops the
     /// satellite stream until the next power cycle (docs/40).
+    ///
+    /// `tsid`: the TSID selected for a satellite stream. PATs of any other TS
+    /// (packets of the TS selected before, still on their way) are ignored.
     fn learn_and_push_pids_encrypted(
         &mut self,
         ep: u8,
         dev_for_stream: &Device<UsbTransport>,
         desc: &TunerDesc,
         flags: u8,
+        tsid: Option<u16>,
     ) -> Result<Vec<(u32, Vec<u16>)>> {
         let keys = self.app_keys()?;
         let hs = self.cepm.locked().iter().find(|(f, _)| *f == flags).map(|(_, hs)| hs.clone());
@@ -1103,7 +1113,7 @@ impl Tuner {
             StreamReader::DEFAULT_TRANSFER_LEN,
             self.cfg.read_depth.max(1),
         )?;
-        let mut psi = PsiCollector::new();
+        let mut psi = PsiCollector::new(tsid);
         let mut aligner = Aligner::new(true, self.slot_layout());
         reader.start();
         dev_for_stream.stream_enable_mode(desc, StreamMode::EncryptedPartial)?;
@@ -1134,6 +1144,13 @@ impl Tuner {
         dev_for_stream.stream_disable()?;
         reader.stop();
         log::info!("PSI learned through the link decryption in {:?} (complete: {})", t.elapsed(), psi.complete());
+        if psi.stale_pats() > 0 {
+            log::info!(
+                "PSI learn: {} PAT section(s) of another TS skipped, programs from TSID {:04x?}",
+                psi.stale_pats(),
+                psi.tsid()
+            );
+        }
         Ok(self.push_program_lists(dev_for_stream, psi.programs()))
     }
 
@@ -1290,7 +1307,7 @@ impl Tuner {
                                 ));
                             }
                             let flags = self.cepm_flags_for(t);
-                            self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags)?
+                            self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags, None)?
                         } else {
                             if self.satellite.is_some() {
                                 log::warn!(
@@ -1404,7 +1421,7 @@ impl Tuner {
                         return Err(Error::Protocol("CEPM handshake for the satellite stream failed"));
                     }
                     let dev = Device::new(self.transport.clone()).with_tuner_index(self.cfg.sat_stream_path);
-                    let pids = self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags)?;
+                    let pids = self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags, Some(tsid))?;
                     let lists = pids.clone();
                     let restart = Some(StreamRestart { dev, desc: desc.clone(), mode, pids });
                     let decrypt = true;
