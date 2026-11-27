@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use dth10_core::LockExt;
 use dth10_core::cepm::{self, AppKeys, Decryptor, Handshake};
 use dth10_core::device::LnbGpio;
-use dth10_core::kit::{SignalStatus, TuneRequest, field, lock};
+use dth10_core::kit::{SignalStatus, TuneRequest, field, is_tsid, lock};
 use dth10_core::satellite::SatelliteKit;
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::tlv::{DeviceInformation, TunerDesc};
@@ -202,6 +202,42 @@ fn wait_lock_with<F: FnMut() -> Result<SignalStatus>>(
         }
         std::thread::sleep(interval);
     }
+}
+
+/// ISDB-S: read `status` again every `interval`, for at most `wait`, while
+/// the TMCC TS-ID table of the locked status `st` is still empty (right after
+/// the lock the demodulator can read all its entries as 0 for a moment).
+/// Returns the last locked status read: `st` itself when the demodulator does
+/// not report the table or already has it, and a status with an empty table
+/// when the wait ends without one or a read fails.
+fn wait_tsid_table<F: FnMut() -> Result<SignalStatus>>(
+    mut status: F,
+    st: SignalStatus,
+    wait: Duration,
+    interval: Duration,
+) -> SignalStatus {
+    if st.mask & field::TSID_TABLE == 0 || !st.tsid_table().is_empty() {
+        return st;
+    }
+    let deadline = Instant::now() + wait;
+    let mut last = st;
+    while Instant::now() < deadline {
+        std::thread::sleep(interval);
+        match status() {
+            Ok(s) if s.lock & lock::LOCKED != 0 => {
+                last = s;
+                if !last.tsid_table().is_empty() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log::debug!("status during the TS-ID table wait: {e}");
+                break;
+            }
+        }
+    }
+    last
 }
 
 /// A raw (byte0=1) stream enable that the device refuses with a STALL: this
@@ -1350,27 +1386,41 @@ impl Tuner {
                     Err(e) => log::warn!("ISDB-S booster {}: {e}", on_off(on)),
                 }
                 sat.kit.tune(ch.frequency_hz as u64)?;
-                // Wait for lock, then pick the TSID: the TMCC table entry of the
-                // relative TS number when the channel names one and the table
-                // has it, else the channel's own TSID.
+                // Wait for lock and for the TMCC TS-ID table, then pick the
+                // TSID: the table entry of the relative TS number when the
+                // channel names one and the table has it, else the channel's
+                // own TSID.
                 let mut tsid = ch.tsid;
                 let kit = &mut sat.kit;
-                if let Some(st) =
-                    Self::wait_lock(|| kit.signal_status(field::ALL_BASIC | field::TSID_TABLE), sat_wait, "ISDB-S")
-                {
-                    let ids = &st.tsids[..(st.tsid_count as usize).min(st.tsids.len())];
-                    log::info!("ISDB-S locked, C/N {:.1} dB, TMCC TS-IDs {:04x?}", st.cnr_mdb as f64 / 1000.0, ids);
-                    if st.mask & field::TSID_TABLE != 0 {
+                let mut read = || kit.signal_status(field::ALL_BASIC | field::TSID_TABLE);
+                if let Some(st) = Self::wait_lock(&mut read, sat_wait, "ISDB-S") {
+                    let locked = Instant::now();
+                    let st = wait_tsid_table(&mut read, st, sat_wait, LOCK_POLL);
+                    let read_ids = &st.tsids[..usize::from(st.tsid_count).min(st.tsids.len())];
+                    log::info!(
+                        "ISDB-S locked, C/N {:.1} dB, TMCC TS-IDs {:04x?}",
+                        st.cnr_mdb as f64 / 1000.0,
+                        read_ids
+                    );
+                    let ids = st.tsid_table();
+                    if st.mask & field::TSID_TABLE == 0 {
+                        // This demodulator does not report the table.
+                    } else if ids.is_empty() {
                         if let Some(slot) = ch.slot {
-                            match ids.get(slot as usize) {
-                                Some(&id) if id != 0 && id != 0xFFFF => tsid = id,
-                                _ => log::warn!(
-                                    "ISDB-S: relative TS {slot} not in the TMCC table, selecting TSID 0x{tsid:04x}"
-                                ),
-                            }
-                        } else if !ids.contains(&tsid) {
-                            log::warn!("ISDB-S: TSID 0x{tsid:04x} is not in the TMCC table {ids:04x?}");
+                            log::warn!(
+                                "ISDB-S: TMCC TS-ID table still empty {:?} after the lock; relative TS {slot} falls back to TSID 0x{tsid:04x} from the channel table, which a re-organised transponder may not carry",
+                                locked.elapsed()
+                            );
                         }
+                    } else if let Some(slot) = ch.slot {
+                        match ids.get(usize::from(slot)) {
+                            Some(&id) if is_tsid(id) => tsid = id,
+                            _ => log::warn!(
+                                "ISDB-S: relative TS {slot} not in the TMCC table, selecting TSID 0x{tsid:04x}"
+                            ),
+                        }
+                    } else if !ids.contains(&tsid) {
+                        log::warn!("ISDB-S: TSID 0x{tsid:04x} is not in the TMCC table {ids:04x?}");
                     }
                 } else {
                     // No lock at all (no antenna, no signal): fail at once rather than
@@ -1642,6 +1692,71 @@ mod tests {
         let t0 = Instant::now();
         assert!(wait_lock_with(|| status_of(lock::LOCKED | lock::SIGNAL), MS(1000), MS(1000), MS(5), "test").is_some());
         assert!(t0.elapsed() < MS(500));
+    }
+
+    /// A locked ISDB-S status with this TS-ID table (8 entries, as the
+    /// demodulator reads them).
+    fn sat_status(ids: &[u16]) -> SignalStatus {
+        let mut st = SignalStatus { mask: field::LOCK | field::TSID_TABLE, lock: lock::LOCKED, ..Default::default() };
+        st.tsids[..ids.len()].copy_from_slice(ids);
+        st.tsid_count = ids.len() as u8;
+        st
+    }
+
+    #[test]
+    fn an_empty_tsid_table_is_read_again() {
+        // All zeros at the lock, filled in a little later.
+        let t0 = Instant::now();
+        let got = wait_tsid_table(
+            || Ok(if t0.elapsed() < MS(30) { sat_status(&[0; 8]) } else { sat_status(&[0x4090, 0x4092]) }),
+            sat_status(&[0; 8]),
+            MS(1000),
+            MS(5),
+        );
+        assert_eq!(got.tsid_table(), [0x4090, 0x4092]);
+        assert!(t0.elapsed() < MS(500));
+    }
+
+    #[test]
+    fn a_tsid_table_that_stays_empty_ends_the_wait() {
+        let t0 = Instant::now();
+        let got = wait_tsid_table(|| Ok(sat_status(&[0; 8])), sat_status(&[0; 8]), MS(40), MS(5));
+        assert!(got.tsid_table().is_empty());
+        assert!(t0.elapsed() >= MS(40));
+    }
+
+    #[test]
+    fn a_tsid_table_at_the_lock_needs_no_wait() {
+        let mut reads = 0;
+        let st = sat_status(&[0x40f1, 0x40f2]);
+        let got = wait_tsid_table(
+            || {
+                reads += 1;
+                Ok(st)
+            },
+            st,
+            MS(1000),
+            MS(5),
+        );
+        assert_eq!((got, reads), (st, 0));
+        // A demodulator that does not report the table is not waited for either.
+        let no_table = SignalStatus { mask: field::LOCK, lock: lock::LOCKED, ..Default::default() };
+        assert_eq!(wait_tsid_table(|| unreachable!(), no_table, MS(1000), MS(5)), no_table);
+    }
+
+    #[test]
+    fn an_unlocked_read_keeps_the_last_locked_status() {
+        let mut n = 0;
+        let got = wait_tsid_table(
+            || {
+                n += 1;
+                if n == 1 { status_of(0) } else { Ok(sat_status(&[0x4010])) }
+            },
+            sat_status(&[0; 8]),
+            MS(1000),
+            MS(5),
+        );
+        assert_eq!(got.tsid_table(), [0x4010]);
     }
 
     #[test]

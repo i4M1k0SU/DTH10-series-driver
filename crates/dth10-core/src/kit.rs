@@ -61,6 +61,28 @@ pub struct SignalStatus {
 /// Value reported for a layer that is not in use.
 pub const BER_UNUSED: u32 = 0xFFFF_FFFF;
 
+/// An unused entry of the demodulator's TMCC TS-ID table.
+pub const TSID_NONE: u16 = 0xFFFF;
+
+/// A TS-ID that names a TS: neither an unused entry nor the 0 a table reads
+/// before it is filled in.
+pub fn is_tsid(id: u16) -> bool {
+    id != 0 && id != TSID_NONE
+}
+
+impl SignalStatus {
+    /// ISDB-S: the TMCC TS-ID table of this status, in TMCC order. Empty when
+    /// the table was not read, or not filled in yet: right after the lock the
+    /// demodulator can read all its entries as 0 for a moment.
+    pub fn tsid_table(&self) -> &[u16] {
+        if self.mask & field::TSID_TABLE == 0 {
+            return &[];
+        }
+        let ids = &self.tsids[..usize::from(self.tsid_count).min(self.tsids.len())];
+        if ids.iter().any(|&id| is_tsid(id)) { ids } else { &[] }
+    }
+}
+
 /// States of the demodulators' TS pin control, which the vendor driver
 /// numbers 0, 1 and 2 for every kit; each demodulator maps them onto its own
 /// registers.
@@ -163,5 +185,17 @@ mod tests {
         for pid in [0x0199, 0x01FF, 0x0200, 0x0202, 0x017B] {
             assert_eq!(VendorDriver::for_product(pid), VendorDriver::Series, "{pid:#06x}");
         }
+    }
+
+    #[test]
+    fn tsid_table_of_a_status() {
+        let mut st = SignalStatus { mask: field::LOCK | field::TSID_TABLE, tsid_count: 8, ..Default::default() };
+        assert!(st.tsid_table().is_empty(), "all zeros: not filled in yet");
+        st.tsids[..2].copy_from_slice(&[0x4090, 0x4092]);
+        st.tsid_count = 2;
+        assert_eq!(st.tsid_table(), [0x4090, 0x4092]);
+        st.mask = field::LOCK;
+        assert!(st.tsid_table().is_empty(), "not read");
+        assert!(is_tsid(0x40f1) && !is_tsid(0) && !is_tsid(TSID_NONE));
     }
 }
