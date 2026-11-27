@@ -513,6 +513,10 @@ const EVENT_ERROR_DELAY: Duration = Duration::from_millis(500);
 const EVENT_WINDOW: Duration = Duration::from_mins(1);
 /// Events logged one by one per [`EVENT_WINDOW`].
 const EVENTS_SHOWN_PER_WINDOW: u32 = 5;
+/// Events per [`EVENT_WINDOW`] taken for a storm. Every tune raises one card
+/// event, so a channel scan comes to about 20 a minute; a card engine in
+/// trouble raises one every 0.5 s (120 a minute, docs/40).
+const EVENT_STORM_PER_WINDOW: u32 = 60;
 
 /// The interrupt-endpoint reader. It holds the endpoint and with it the
 /// device handle, so it is stopped and joined when the tuner goes: otherwise
@@ -754,8 +758,10 @@ impl Tuner {
                                     }
                                 }
                                 if window.elapsed() >= EVENT_WINDOW {
-                                    if suppressed > 0 {
+                                    if in_window >= EVENT_STORM_PER_WINDOW {
                                         log::warn!("events: {in_window} in the last minute ({suppressed} not shown): the device keeps raising card events");
+                                    } else if suppressed > 0 {
+                                        log::info!("events: {in_window} in the last minute ({suppressed} not shown)");
                                     }
                                     window = Instant::now();
                                     in_window = 0;
