@@ -30,8 +30,19 @@ clap.workspace = true
 libc = "0.2.191"
 
 [target.'cfg(windows)'.dependencies]
-# Ctrl-C ends the stream.
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
+# Ctrl-C ends the stream; the socket waits and the pipe probes of `dth stream`.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The named pipes the tests of `dth stream` write to.
+windows-sys = { version = "0.61.2", features = ["Win32_Security"] }
 
 [build-dependencies]
 jiff.workspace = true

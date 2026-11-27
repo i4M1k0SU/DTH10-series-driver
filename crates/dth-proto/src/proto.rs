@@ -6,10 +6,10 @@
 //!
 //! ```text
 //! > stream ter=557142857 name=27 program=1024
-//! > stream unit=04110199-110822N0326 sat=1318000000 tsid=40f1 program=101 busy=fail client=4120-1 lnb=0 boost=0 lock_wait=1500
+//! > stream unit=04110199-110822N0326 sat=1318000000 tsid=40f1 program=101 busy=fail client=4120-7ffb3a2c1000-1 lnb=0 boost=0 lock_wait=1500
 //! > stream sat=1318000000 slot=1 program=first
 //! < ok 04110199-110822N0326 ISDB-S 1318000000 Hz C/N 18.6 dB
-//! > stream unit=SN-U2W ter=557142857 name=27 tuner=auto client=4120-1
+//! > stream unit=SN-U2W ter=557142857 name=27 tuner=auto client=4120-7ffb3a2c1000-1
 //! < ok SN-U2W ISDB-T 557142857 Hz C/N 28.0 dB tuner=1
 //! < busy ISDB-S stream of unit 04110199-110822N0326 is held by connection 3
 //! < error no unit 04110199-110822N0326

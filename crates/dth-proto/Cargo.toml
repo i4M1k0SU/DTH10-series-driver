@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 dth-common.workspace = true
+log.workspace = true
 socket2 = "0.6.5"
 
 [target.'cfg(windows)'.dependencies]

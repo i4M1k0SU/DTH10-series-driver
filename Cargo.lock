@@ -329,6 +329,7 @@ name = "dth-proto"
 version = "2.0.0"
 dependencies = [
  "dth-common",
+ "log",
  "socket2",
  "windows-sys",
 ]
