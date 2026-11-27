@@ -31,16 +31,39 @@ impl Program {
     }
 }
 
+/// Collects the PAT and PMTs of one TS.
+///
+/// Right after a tune the stream can still carry packets of the TS selected
+/// before (in the device or the bulk pipeline), so the PAT is tied to its
+/// `transport_stream_id`: with an expected TSID, PATs of any other TSID are
+/// ignored; without one, a PAT of a TSID other than the one held replaces it
+/// and drops the PMTs collected so far (the newer TS wins). A PMT counts only
+/// when the current PAT lists its program on the PID it arrived on.
 #[derive(Default)]
 pub struct PsiCollector {
     sections: HashMap<u16, Vec<u8>>,
+    expected_tsid: Option<u16>,
+    /// `transport_stream_id` of the PAT held in `pat`.
+    tsid: Option<u16>,
     pat: BTreeMap<u16, u16>,
     pmts: BTreeMap<u16, Program>,
+    stale_pats: u32,
 }
 
 impl PsiCollector {
-    pub fn new() -> Self {
-        Self::default()
+    /// `expected_tsid`: the TSID selected for this stream, when known (ISDB-S).
+    pub fn new(expected_tsid: Option<u16>) -> Self {
+        Self { expected_tsid, ..Self::default() }
+    }
+
+    /// `transport_stream_id` of the PAT the programs come from.
+    pub fn tsid(&self) -> Option<u16> {
+        self.tsid
+    }
+
+    /// PAT sections ignored or replaced because they carried another TSID.
+    pub fn stale_pats(&self) -> u32 {
+        self.stale_pats
     }
 
     /// Feed 188-byte-aligned TS data.
@@ -103,6 +126,21 @@ impl PsiCollector {
         }
         let body = &sec[8..3 + slen - 4];
         if pid == PAT_PID && tid == PAT_TABLE_ID {
+            let tsid = ((sec[3] as u16) << 8) | sec[4] as u16;
+            if self.expected_tsid.is_some_and(|want| want != tsid) {
+                self.stale_pats += 1;
+                return;
+            }
+            if self.tsid != Some(tsid) {
+                if self.tsid.is_some() {
+                    // Another TS took over: what was learned belongs to the old one.
+                    self.stale_pats += 1;
+                    self.pat.clear();
+                    self.pmts.clear();
+                    self.sections.retain(|&p, _| p == PAT_PID);
+                }
+                self.tsid = Some(tsid);
+            }
             for e in body.as_chunks::<4>().0 {
                 let prog = ((e[0] as u16) << 8) | e[1] as u16;
                 let ppid = ((e[2] as u16 & 0x1F) << 8) | e[3] as u16;
@@ -110,8 +148,12 @@ impl PsiCollector {
                     self.pat.insert(prog, ppid);
                 }
             }
-        } else if tid == PMT_TABLE_ID && self.pat.values().any(|&pmt| pmt == pid) {
+        } else if tid == PMT_TABLE_ID {
             let number = ((sec[3] as u16) << 8) | sec[4] as u16;
+            if self.pat.get(&number) != Some(&pid) {
+                // A program of another TS (stale packets on a shared PMT PID).
+                return;
+            }
             let pcr_pid = ((sec[8] as u16 & 0x1F) << 8) | sec[9] as u16;
             let pilen = (((sec[10] & 0x0F) as usize) << 8) | sec[11] as usize;
             let end = 3 + slen - 4;
@@ -134,13 +176,14 @@ impl PsiCollector {
         }
     }
 
-    /// All programs of the PAT have a parsed PMT.
+    /// All programs of the current PAT have a parsed PMT.
     pub fn complete(&self) -> bool {
         !self.pat.is_empty() && self.pat.keys().all(|n| self.pmts.contains_key(n))
     }
 
+    /// The programs of the current PAT that have a parsed PMT.
     pub fn programs(&self) -> Vec<Program> {
-        self.pmts.values().cloned().collect()
+        self.pmts.values().filter(|p| self.pat.get(&p.number) == Some(&p.pmt_pid)).cloned().collect()
     }
 }
 
@@ -189,15 +232,102 @@ mod tests {
             0x02, 0, 0, 0x04, 0x00, 0xC1, 0, 0, 0xE1, 0xFF, 0xF0, 0x06, 0x09, 0x04, 0x00, 0x05, 0xE9, 0x01, 0x02, 0xE1,
             0x00, 0xF0, 0x00, 0x0F, 0xE1, 0x10, 0xF0, 0x00,
         ]);
-        let mut c = PsiCollector::new();
+        let mut c = PsiCollector::new(None);
         c.feed(&packet(0, true, &pat));
         c.feed(&packet(0x1F0, true, &pmt));
         assert!(c.complete());
+        assert_eq!(c.tsid(), Some(0x7FE0));
         let p = &c.programs()[0];
         assert_eq!(p.number, 0x400);
         assert_eq!(p.pcr_pid, 0x1FF);
         assert_eq!(p.ecm_pids, vec![0x901]);
         assert_eq!(p.es_pids, vec![0x100, 0x110]);
         assert_eq!(p.pid_list(), vec![0x1F0, 0x901, 0x1FF, 0x100, 0x110]);
+    }
+
+    /// PAT section of `tsid` listing `(program, PMT PID)` pairs.
+    fn pat(tsid: u16, programs: &[(u16, u16)]) -> Vec<u8> {
+        let mut sec = vec![PAT_TABLE_ID, 0, 0, (tsid >> 8) as u8, tsid as u8, 0xC1, 0, 0];
+        for &(prog, pmt_pid) in programs {
+            sec.extend_from_slice(&[(prog >> 8) as u8, prog as u8, 0xE0 | (pmt_pid >> 8) as u8, pmt_pid as u8]);
+        }
+        with_crc(sec)
+    }
+
+    /// PMT section of `prog` with one elementary stream `es_pid`, also the PCR PID.
+    fn pmt(prog: u16, es_pid: u16) -> Vec<u8> {
+        let (hi, lo) = (0xE0 | (es_pid >> 8) as u8, es_pid as u8);
+        let mut sec = vec![PMT_TABLE_ID, 0, 0, (prog >> 8) as u8, prog as u8, 0xC1, 0, 0, hi, lo, 0xF0, 0x00];
+        sec.extend_from_slice(&[0x02, hi, lo, 0xF0, 0x00]);
+        with_crc(sec)
+    }
+
+    fn numbers(c: &PsiCollector) -> Vec<u16> {
+        c.programs().iter().map(|p| p.number).collect()
+    }
+
+    #[test]
+    fn ignores_pat_of_another_tsid() {
+        let mut c = PsiCollector::new(Some(0x4012));
+        // The TS selected before is still in the pipeline.
+        c.feed(&packet(PAT_PID, true, &pat(0x4011, &[(161, 0x1F0), (162, 0x1F1)])));
+        c.feed(&packet(0x1F0, true, &pmt(161, 0x100)));
+        assert!(!c.complete());
+        assert!(c.programs().is_empty());
+        assert_eq!(c.tsid(), None);
+        c.feed(&packet(PAT_PID, true, &pat(0x4012, &[(171, 0x1F0)])));
+        c.feed(&packet(0x1F1, true, &pmt(162, 0x110)));
+        c.feed(&packet(0x1F0, true, &pmt(171, 0x120)));
+        assert!(c.complete());
+        assert_eq!(c.tsid(), Some(0x4012));
+        assert_eq!(numbers(&c), vec![171]);
+        assert_eq!(c.programs()[0].es_pids, vec![0x120]);
+        // Late packets of the old TS change nothing.
+        c.feed(&packet(PAT_PID, true, &pat(0x4011, &[(161, 0x1F0)])));
+        c.feed(&packet(0x1F0, true, &pmt(161, 0x100)));
+        assert_eq!(numbers(&c), vec![171]);
+        assert_eq!(c.stale_pats(), 2);
+    }
+
+    #[test]
+    fn ignores_stale_pmt_on_a_shared_pmt_pid() {
+        let mut c = PsiCollector::new(Some(0x4012));
+        c.feed(&packet(PAT_PID, true, &pat(0x4012, &[(171, 0x1F0), (172, 0x1F1)])));
+        // PMTs of the old TS's programs on the PIDs the new PAT uses.
+        c.feed(&packet(0x1F0, true, &pmt(161, 0x100)));
+        c.feed(&packet(0x1F1, true, &pmt(162, 0x110)));
+        assert!(!c.complete());
+        assert!(c.programs().is_empty());
+        c.feed(&packet(0x1F0, true, &pmt(171, 0x120)));
+        assert!(!c.complete());
+        // A program of the current PAT on the wrong PMT PID does not count either.
+        c.feed(&packet(0x1F0, true, &pmt(172, 0x130)));
+        assert!(!c.complete());
+        c.feed(&packet(0x1F1, true, &pmt(172, 0x130)));
+        assert!(c.complete());
+        assert_eq!(numbers(&c), vec![171, 172]);
+    }
+
+    #[test]
+    fn newer_tsid_replaces_the_pat_without_an_expected_one() {
+        // ISDB-T: no TSID is selected, so the TS seen last wins.
+        let mut c = PsiCollector::new(None);
+        c.feed(&packet(PAT_PID, true, &pat(0x7FE0, &[(0x400, 0x1F0), (0x401, 0x1F1)])));
+        c.feed(&packet(0x1F0, true, &pmt(0x400, 0x100)));
+        assert_eq!(numbers(&c), vec![0x400]);
+        c.feed(&packet(PAT_PID, true, &pat(0x7FE1, &[(0x408, 0x1F0)])));
+        assert_eq!(c.tsid(), Some(0x7FE1));
+        assert!(!c.complete());
+        assert!(c.programs().is_empty());
+        c.feed(&packet(0x1F1, true, &pmt(0x401, 0x110)));
+        c.feed(&packet(0x1F0, true, &pmt(0x400, 0x100)));
+        assert!(!c.complete());
+        c.feed(&packet(0x1F0, true, &pmt(0x408, 0x180)));
+        assert!(c.complete());
+        assert_eq!(numbers(&c), vec![0x408]);
+        // The same TSID again keeps what was learned.
+        c.feed(&packet(PAT_PID, true, &pat(0x7FE1, &[(0x408, 0x1F0)])));
+        assert!(c.complete());
+        assert_eq!(c.stale_pats(), 1);
     }
 }

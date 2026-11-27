@@ -1063,7 +1063,7 @@ impl Tuner {
             StreamReader::DEFAULT_TRANSFER_LEN,
             self.cfg.read_depth.max(1),
         )?;
-        let mut psi = PsiCollector::new();
+        let mut psi = PsiCollector::new(None);
         let mut aligner = Aligner::new(true, self.slot_layout());
         reader.start();
         dev_for_stream.stream_enable_mode(desc, StreamMode::RawFullTs)?;
@@ -1085,12 +1085,16 @@ impl Tuner {
     /// satellite stream (which has no raw mode) and, by default, for the
     /// terrestrial one too, because a raw enable on stream #0 stops the
     /// satellite stream until the next power cycle (docs/40).
+    ///
+    /// `tsid`: the TSID selected for a satellite stream. PATs of any other TS
+    /// (packets of the TS selected before, still on their way) are ignored.
     fn learn_and_push_pids_encrypted(
         &mut self,
         ep: u8,
         dev_for_stream: &Device<UsbTransport>,
         desc: &TunerDesc,
         flags: u8,
+        tsid: Option<u16>,
     ) -> Result<Vec<(u32, Vec<u16>)>> {
         let keys = self.app_keys()?;
         let hs = self.cepm.locked().iter().find(|(f, _)| *f == flags).map(|(_, hs)| hs.clone());
@@ -1103,7 +1107,7 @@ impl Tuner {
             StreamReader::DEFAULT_TRANSFER_LEN,
             self.cfg.read_depth.max(1),
         )?;
-        let mut psi = PsiCollector::new();
+        let mut psi = PsiCollector::new(tsid);
         let mut aligner = Aligner::new(true, self.slot_layout());
         reader.start();
         dev_for_stream.stream_enable_mode(desc, StreamMode::EncryptedPartial)?;
@@ -1134,6 +1138,13 @@ impl Tuner {
         dev_for_stream.stream_disable()?;
         reader.stop();
         log::info!("PSI learned through the link decryption in {:?} (complete: {})", t.elapsed(), psi.complete());
+        if psi.stale_pats() > 0 {
+            log::info!(
+                "PSI learn: {} PAT section(s) of another TS skipped, programs from TSID {:04x?}",
+                psi.stale_pats(),
+                psi.tsid()
+            );
+        }
         Ok(self.push_program_lists(dev_for_stream, psi.programs()))
     }
 
@@ -1290,7 +1301,7 @@ impl Tuner {
                                 ));
                             }
                             let flags = self.cepm_flags_for(t);
-                            self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags)?
+                            self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags, None)?
                         } else {
                             if self.satellite.is_some() {
                                 log::warn!(
@@ -1404,7 +1415,7 @@ impl Tuner {
                         return Err(Error::Protocol("CEPM handshake for the satellite stream failed"));
                     }
                     let dev = Device::new(self.transport.clone()).with_tuner_index(self.cfg.sat_stream_path);
-                    let pids = self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags)?;
+                    let pids = self.learn_and_push_pids_encrypted(ep, &dev, &desc, flags, Some(tsid))?;
                     let lists = pids.clone();
                     let restart = Some(StreamRestart { dev, desc: desc.clone(), mode, pids });
                     let decrypt = true;
