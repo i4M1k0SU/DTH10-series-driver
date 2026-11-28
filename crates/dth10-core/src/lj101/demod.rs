@@ -5,7 +5,7 @@
 
 use crate::device::Device;
 use crate::error::Result;
-use crate::kit::{BER_UNUSED, SignalStatus, TsPins, field, lock};
+use crate::kit::{BER_UNUSED, SignalStatus, TSID_NONE, TsPins, field, lock};
 use crate::protocol::UsbControl;
 use crate::tc90517::demod::reg;
 use crate::tlv::{TunerDesc, flag};
@@ -296,7 +296,7 @@ impl Tc90517Sat {
                 st.tsids = [0; 8];
                 for i in 0..8 {
                     let id = ((ids[2 * i] as u16) << 8) | ids[2 * i + 1] as u16;
-                    if id != 0xFFFF {
+                    if id != TSID_NONE {
                         st.tsids[n] = id;
                         n += 1;
                     }

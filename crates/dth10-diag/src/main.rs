@@ -35,7 +35,7 @@ use dth_common::stream::{Lnb, parse_num};
 use dth_common::{Channel, System};
 use dth10_core::cepm;
 use dth10_core::device::FLAG_TUNER1;
-use dth10_core::kit::{BER_UNUSED, SignalStatus, TuneRequest, field, lock};
+use dth10_core::kit::{BER_UNUSED, SignalStatus, TuneRequest, field, is_tsid, lock};
 use dth10_core::satellite::SatelliteKit;
 use dth10_core::terrestrial::TerrestrialKit;
 use dth10_core::ts_slot::{self, SlotLayout};
@@ -59,8 +59,6 @@ const READ_RETRY_DELAY: Duration = Duration::from_millis(50);
 const FILLER_AFTER_TUNE: Duration = Duration::from_millis(1500);
 /// A channel argument above this is a frequency in Hz, not a channel number.
 const MIN_FREQUENCY_HZ: u32 = 1000;
-/// A TMCC TS-ID table entry that names no TS.
-const TSID_NONE: u16 = 0xFFFF;
 
 #[derive(Parser)]
 #[command(
@@ -873,9 +871,8 @@ impl PacketStats {
 /// `dth`). 0 = nothing to select.
 fn pick_tsid(ch: &Channel, ids: &[u16]) -> u16 {
     if let Some(slot) = ch.slot
-        && let Some(&id) = ids.get(slot as usize)
-        && id != 0
-        && id != TSID_NONE
+        && let Some(&id) = ids.get(usize::from(slot))
+        && is_tsid(id)
     {
         return id;
     }
@@ -947,15 +944,20 @@ fn sat_probe(kit: &mut SatelliteKit<UsbTransport>, ch: &Channel, a: &TuneSatArgs
         Duration::from_millis(a.lock_wait),
         true,
         || kit.signal_status(field::ALL | field::TSID_TABLE),
-        |st| st.lock & lock::LOCKED != 0 && st.tsid_count > 0,
+        // Right after the lock the table can read as all zeros for a moment.
+        |st| st.lock & lock::LOCKED != 0 && !st.tsid_table().is_empty(),
     );
     let st = match last {
         Some(st) if st.lock & lock::LOCKED != 0 => st,
         _ => return Err(format!("ISDB-S: no lock within {} ms (no signal, or no antenna)", a.lock_wait).into()),
     };
-    let ids = &st.tsids[..(st.tsid_count as usize).min(st.tsids.len())];
-    let table: Vec<String> = ids.iter().map(|t| format!("{t:04x}")).collect();
+    let read_ids = &st.tsids[..usize::from(st.tsid_count).min(st.tsids.len())];
+    let table: Vec<String> = read_ids.iter().map(|t| format!("{t:04x}")).collect();
     println!("ISDB-S: locked, TMCC TS-ID table [{}]", table.join(" "));
+    let ids = st.tsid_table();
+    if ids.is_empty() {
+        eprintln!("warning: the TMCC TS-ID table is still empty after {} ms", a.lock_wait);
+    }
     let tsid = pick_tsid(ch, ids);
     if tsid == 0 {
         return Err("no TSID to select (empty TMCC table; give --tsid)".into());
